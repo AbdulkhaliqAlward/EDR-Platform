@@ -323,7 +323,7 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 	// Zero tokenValue from memory after building the response struct
 	// (best-effort — Go strings are immutable but this removes the reference).
 	tokenValue = ""
-	_ = rand.Read(make([]byte, 1)) // prevent compiler from optimizing out the zero
+	_, _ = rand.Read(make([]byte, 1)) // prevent compiler from optimizing out the zero
 
 	return c.JSON(http.StatusOK, jsonResp)
 }

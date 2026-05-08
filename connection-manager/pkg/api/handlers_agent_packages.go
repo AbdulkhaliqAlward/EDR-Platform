@@ -90,10 +90,7 @@ func (h *Handlers) CreateAgentPackage(c echo.Context) error {
 	}
 	expiresAt := time.Now().Add(time.Duration(exp) * time.Second)
 
-	// Upgrade binaries are NOT injected with any enrollment/uninstall token —
-	// a registered agent already has its mTLS identity. The builder call below
-	// deliberately passes an empty token so the produced EXE has no secret inside.
-	tokenValue := "" //nolint:staticcheck // intentional: no-token upgrade build
+	// Upgrade binaries carry no enrollment token — enrolled agents authenticate via mTLS.
 	_ = req.TokenID
 
 	// Read CA PEM
@@ -113,7 +110,6 @@ func (h *Handlers) CreateAgentPackage(c echo.Context) error {
 		ServerIP:      req.ServerIP,
 		ServerDomain:  req.ServerDomain,
 		ServerPort:    req.ServerPort,
-		Token:         tokenValue,
 		SkipConfig:    req.SkipConfig,
 		CACertPEM:     caCertPEM,
 		InstallSysmon: req.InstallSysmon,
