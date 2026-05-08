@@ -488,7 +488,7 @@ export default function EnrollmentTokens() {
                         <div className="p-4">
                             <SkeletonTable rows={5} columns={7} />
                         </div>
-                {tokens.length === 0 ? (
+                    ) : tokens.length === 0 ? (
                         <div className="text-center py-12 flex-1 flex flex-col justify-center items-center">
                             <Key className="w-12 h-12 text-slate-400 mx-auto mb-4 opacity-50" />
                             <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-2">
