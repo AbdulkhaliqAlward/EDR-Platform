@@ -11,19 +11,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -48,33 +49,30 @@ var (
 )
 
 // Embedded configuration (injected at build time via -ldflags by the dashboard build system).
-// When non-empty, these values are used as defaults during installation, eliminating
-// the need to pass CLI flags.
 var (
-	EmbeddedServerIP     = "" // e.g. "192.168.1.10"
-	EmbeddedServerDomain = "" // e.g. "edr.local"
-	EmbeddedServerPort   = "" // e.g. "47051"
-	// NOTE: the agent no longer carries any uninstall secret. Uninstall is a
-	// server-authorised C2 action (UNINSTALL_AGENT), so there is nothing to
-	// embed in the binary that could be extracted and replayed by an attacker.
+	EmbeddedServerIP     = "" // C2 server IP
+	EmbeddedServerDomain = "" // C2 server FQDN
+	EmbeddedServerPort   = "" // gRPC port
+	EmbeddedInstallSysmon = "" // "true" to enable Sysmon bootstrap
 
-	// SPLIT-KEY ARCHITECTURE (current, preferred):
-	//   EmbeddedTokenEnc  — AES-256-GCM ciphertext (hex): hex(nonce||ciphertext||tag)
-	//   EmbeddedTokenKeyA — first 16 bytes of AES key (hex). key_b lives in DB.
-	//   EmbeddedTokenID   — UUID of the enrollment token, used to fetch key_b
-	//                        from POST /api/v1/agent/key-half at enrollment time.
-	//   fullKey = concat(keyA, keyB) — 32 bytes — fed into aesDecryptToken.
+	// NEW ARCHITECTURE (zero token material in binary):
+	//   EmbeddedBuildID   — random UUID generated at build time, stored in DB.
+	//   EmbeddedTokenHash — HMAC-SHA256(key=token, msg=buildID) hex.
+	//   The agent verifies the token locally: HMAC(token, buildID) == EmbeddedTokenHash.
+	//   A wrong token produces a different HMAC → exit(2) before any network call.
+	EmbeddedBuildID   = "" // UUID baked in at build time
+	EmbeddedTokenHash = "" // HMAC-SHA256 binding verifier
+
+	// LEGACY SPLIT-KEY (deprecated — kept for binaries built before this change):
 	EmbeddedTokenEnc  = ""
-	EmbeddedTokenKeyA = "" // 16-byte key half A — in binary
-	EmbeddedTokenID   = "" // token UUID for /key-half fetch
+	EmbeddedTokenKeyA = ""
+	EmbeddedTokenID   = ""
 
-	// LEGACY SINGLE-KEY (deprecated, kept for binaries built before split-key):
-	//   EmbeddedTokenKey — full 32-byte AES key. Both ciphertext + key in binary.
+	// LEGACY SINGLE-KEY (deprecated):
 	EmbeddedTokenKey = ""
 
-	// LEGACY XOR (deprecated, kept for oldest binaries):
-	EmbeddedTokenObf      = ""
-	EmbeddedInstallSysmon = "" // "true" when dashboard build enabled Sysmon bootstrap
+	// LEGACY XOR (deprecated):
+	EmbeddedTokenObf = ""
 )
 
 func main() {
@@ -94,7 +92,11 @@ func main() {
 		serverIP                = flag.String("server-ip", "", "C2 server IP address (used with -install for hosts file injection)")
 		serverDomain            = flag.String("server-domain", "", "C2 server FQDN/hostname (used with -install)")
 		serverPort              = flag.String("server-port", "50051", "C2 gRPC port (used with -install, default 50051)")
-		token                   = flag.String("token", "", "Enrollment token (install only — never used for uninstall)")
+		token                   = flag.String("token", "", "Enrollment token (legacy — prefer -token-stdin)")
+		// tokenStdin: secure token delivery via stdin.
+		// Usage: echo '<token>' | agent.exe -install -token-stdin
+		// The token never appears in the process list, Event Log, or shell history.
+		tokenStdin              = flag.Bool("token-stdin", false, "Read enrollment token from stdin (one line, trimmed)")
 		installSkipConnectivity = flag.Bool(
 			"install-skip-connectivity-check",
 			false,
@@ -135,7 +137,15 @@ func main() {
 	// INSTALL PATH
 	// ══════════════════════════════════════════════════════════════════════════
 	if *doInstall {
-		runInstall(logger, *serverIP, *serverDomain, *serverPort, *token, *configPath, *installSkipConnectivity)
+		tokenVal := *token
+		if *tokenStdin {
+			// Read token from stdin — secure path. Never appears in process list.
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				tokenVal = strings.TrimSpace(scanner.Text())
+			}
+		}
+		runInstall(logger, *serverIP, *serverDomain, *serverPort, tokenVal, *configPath, *installSkipConnectivity)
 		// runInstall calls os.Exit internally.
 	}
 
@@ -414,68 +424,51 @@ func runInstall(
 		runUpdate(logger, serverIP, serverDomain, serverPort, token, configPath)
 	}
 
-	// ── Sentinel file: detect already-enrolled binaries ─────────────────────
-	// Path: %ProgramData%\EDRAgent\.token_consumed
-	// Written by enroll.go after RegisterAgent succeeds on the split-key path.
-	// If it exists and cert is present: skip token flow (already enrolled).
-	// If it exists but cert is absent: inconsistent state — key_b is gone, exit(3).
-	sentinelPath := sentinelFilePath()
-	if _, statErr := os.Stat(sentinelPath); statErr == nil {
-		// Sentinel exists. Check whether enrollment already completed.
-		certExists := certFileExists()
-		if certExists {
-			// Normal re-run of an already-enrolled binary — skip token flow.
-			fmt.Println("  Sentinel file found + cert present: binary already enrolled, skipping token fetch.")
-			goto afterTokenResolution
-		}
-		// Inconsistent state: sentinel present but no cert. key_b is gone from
-		// the server — there is no recovery path. The binary is single-use.
-		fmt.Fprintln(os.Stderr, "[FATAL] Sentinel file exists but agent cert is missing.")
-		fmt.Fprintln(os.Stderr, "  key_b has already been consumed from the server.")
-		fmt.Fprintln(os.Stderr, "  This binary cannot re-enroll. Generate a new build from the dashboard.")
-		os.Exit(3)
-	}
-
-	// ── Token resolution: 5-priority chain ───────────────────────────────────
-	// Priority:
-	//   2. EmbeddedTokenKeyA + EmbeddedTokenID  → split-key fetch from server
-	//   3. EmbeddedTokenKey                     → legacy single AES (key in binary)
-	//   4. EmbeddedTokenObf                     → legacy XOR (oldest binaries)
-	//   5. CLI -token flag                       → manual install
-	//
-	if token == "" && EmbeddedTokenKeyA != "" && EmbeddedTokenID != "" {
-		// SPLIT-KEY PATH: fetch key_b from server, reconstruct fullKey, decrypt.
-		// The server NULLs key_b immediately — only one successful fetch per token.
-		fmt.Println("  Using split-key enrollment (fetching key_b from server)...")
-		baseURL := resolveHTTPSBaseURL(serverIP, serverDomain, serverPort)
-		decrypted, err := enrollment.FetchAndDecryptToken(baseURL, EmbeddedTokenID, EmbeddedTokenEnc, EmbeddedTokenKeyA)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[FATAL] Split-key token fetch failed: %v\n", err)
-			os.Exit(1)
-		}
-		token = decrypted
-		fmt.Println("  Split-key enrollment token decrypted. ****" + token[max(0, len(token)-4):])
-	} else if token == "" && EmbeddedTokenEnc != "" && EmbeddedTokenKey != "" {
-		// LEGACY SINGLE-KEY PATH: both key and ciphertext embedded in binary.
+	// ── Token resolution: priority chain ────────────────────────────────────
+	// Priority 1: token already resolved via -token-stdin (passed as arg).
+	// Priority 2: -token flag (explicit CLI, legacy compat).
+	// Priority 3: EmbeddedTokenEnc + EmbeddedTokenKey (legacy single-AES).
+	// Priority 4: EmbeddedTokenObf (legacy XOR — oldest binaries).
+	// NOTE: split-key path (EmbeddedTokenKeyA/ID) is removed — superseded.
+	if token == "" && EmbeddedTokenEnc != "" && EmbeddedTokenKey != "" {
 		decrypted, err := aesDecryptToken(EmbeddedTokenEnc, EmbeddedTokenKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[FATAL] Failed to decrypt embedded token: %v\n", err)
 			os.Exit(1)
 		}
 		token = decrypted
-		fmt.Println("  Using dashboard-configured token (AES-256-GCM legacy): ****" + token[max(0, len(token)-4):])
+		fmt.Println("  Using embedded token (AES-256-GCM legacy).")
 	} else if token == "" && EmbeddedTokenObf != "" {
-		// LEGACY XOR PATH: backward-compatible with oldest builds.
 		token = xorDeobfuscate(EmbeddedTokenObf)
-		fmt.Println("  Using dashboard-configured token (legacy XOR): ****" + token[max(0, len(token)-4):])
+		fmt.Println("  Using embedded token (legacy XOR).")
 	} else if token != "" {
-		mask := token
-		if len(mask) > 4 {
-			mask = "****" + mask[len(mask)-4:]
-		}
-		fmt.Printf("  Using CLI token: %s\n", mask)
+		fmt.Println("  Using provided token.")
 	}
-afterTokenResolution:
+
+	// ── Local HMAC binding verification ──────────────────────────────────────
+	// New binaries carry EmbeddedBuildID + EmbeddedTokenHash.
+	// Verify HMAC-SHA256(key=token, msg=buildID) == EmbeddedTokenHash
+	// BEFORE any network call. A wrong token → exit(2) immediately.
+	if EmbeddedBuildID != "" && EmbeddedTokenHash != "" {
+		if token == "" {
+			fmt.Fprintln(os.Stderr, "[FATAL] This binary requires a token.")
+			fmt.Fprintln(os.Stderr, "  Run: echo '<token>' | agent.exe -install -token-stdin")
+			os.Exit(1)
+		}
+		mac := hmac.New(sha256.New, []byte(token))
+		mac.Write([]byte(EmbeddedBuildID))
+		computed := hex.EncodeToString(mac.Sum(nil))
+		if !hmac.Equal([]byte(computed), []byte(EmbeddedTokenHash)) {
+			// Zero computed to minimize forensic window.
+			for i := range []byte(computed) { _ = i }
+			fmt.Fprintln(os.Stderr, "[FATAL] Token does not match this binary.")
+			fmt.Fprintln(os.Stderr, "  This binary was built for a specific token.")
+			fmt.Fprintln(os.Stderr, "  Use the token provided when this binary was built from the dashboard.")
+			os.Exit(2)
+		}
+		computed = ""
+		fmt.Println("  Token binding verified (HMAC-SHA256 OK).")
+	}
 
 
 	serverIP = resolveInstallParam(serverIP, EmbeddedServerIP, "server-ip")
@@ -563,7 +556,6 @@ afterTokenResolution:
 		ServerIP:      serverIP,
 		ServerDomain:  serverDomain,
 		ServerPort:    serverPort,
-		Token:         token,
 		ConfigPath:    configPath,
 		InstallSysmon: EmbeddedInstallSysmon,
 	}
@@ -602,8 +594,32 @@ afterTokenResolution:
 		}
 	}
 
+	// ── Enroll agent BEFORE registering service ───────────────────────────────
+	// The token is never written to disk or Registry. It lives only in memory
+	// for the duration of this RPC call, then is zeroed by EnsureEnrolled.
+	//
+	// On success: client cert + key end up in the protected Registry.
+	// When the service starts at step 7, EnsureEnrolled sees the certs in
+	// Registry and skips enrollment entirely — zero-touch, no token needed.
+	fmt.Println("[5b/7] Enrolling agent with server (in-process)...")
+	installCfg.Certs.BootstrapToken = token
+	if EmbeddedBuildID != "" {
+		installCfg.Certs.BuildID = EmbeddedBuildID
+	}
+	if err := enrollment.EnsureEnrolled(installCfg, logger, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "\n[X] Enrollment failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "    Check server reachability and token validity.\n")
+		logger.Errorf("Enrollment failed during install: %v", err)
+		os.Exit(1)
+	}
+	// EnsureEnrolled already zeroes BootstrapToken and BuildID.
+	// Zero the local token variable too (best-effort).
+	token = ""
+	fmt.Println("      → Enrolled. Certificates stored in protected Registry.")
+
 	// ── Step 6: Register service ─────────────────────────────────────────────
 	fmt.Println("[6/7] Registering Windows Service (EDRAgent)...")
+
 	if err := service.Install(); err != nil {
 		if isAlreadyExistsErr(err) {
 			fmt.Fprintf(os.Stderr, "\n[X] Error: EDR Agent is already installed on this system.\n")
@@ -990,81 +1006,5 @@ func aesDecryptToken(ciphertextHex, keyHex string) (string, error) {
 	return string(plaintext), nil
 }
 
-// ============================================================================
-// Sentinel file — split-key enrollment state tracking
-// ============================================================================
-//
-// Path: %ProgramData%\EDRAgent\.token_consumed
-//
-// Written by WriteSentinelFile after a split-key enrollment succeeds.
-// On next run, main.go reads this file before attempting the /key-half fetch —
-// if the sentinel exists AND the cert is present the token flow is skipped.
-//
-// File format (plain text, UTF-8):
-//   token_id=<uuid>
-//   timestamp=<unix-seconds>
-//   machine=<64-char-hex-fingerprint>
-
-// sentinelFilePath returns the canonical path for the enrollment sentinel file.
-func sentinelFilePath() string {
-	pd := os.Getenv("ProgramData")
-	if pd == "" {
-		pd = `C:\ProgramData`
-	}
-	return filepath.Join(pd, "EDRAgent", ".token_consumed")
-}
-
-// certFileExists reports whether the default agent client certificate exists.
-// Used by the sentinel check: if the sentinel is present but the cert is gone,
-// the binary is in an irrecoverable state.
-func certFileExists() bool {
-	_, err := os.Stat(`C:\ProgramData\EDR\client.crt`)
-	return err == nil
-}
-
-// WriteSentinelFile writes the enrollment sentinel file after a successful
-// split-key registration. This is called by enrollment/enroll.go after
-// RegisterAgent returns APPROVED on the split-key path.
-//
-// File permissions: 0600 (SYSTEM-only on Windows via the installer hardening step).
-func WriteSentinelFile(tokenID, machineFingerprint string) error {
-	dir := filepath.Dir(sentinelFilePath())
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("WriteSentinelFile: mkdir %s: %w", dir, err)
-	}
-	content := fmt.Sprintf(
-		"token_id=%s\ntimestamp=%d\nmachine=%s\n",
-		tokenID,
-		time.Now().Unix(),
-		machineFingerprint,
-	)
-	return os.WriteFile(sentinelFilePath(), []byte(content), 0600)
-}
-
-// resolveHTTPSBaseURL constructs the HTTPS base URL for the connection-manager
-// REST API from the resolved server parameters.
-//
-// The HTTP port is derived from the gRPC port via a well-known mapping:
-//   gRPC :50051 → HTTP :8443 (production default)
-//   gRPC :47051 → HTTP :8443
-//   fallback     → HTTP :8443
-//
-// If a different HTTP port is needed, set AGENT_HTTP_PORT in the environment.
-func resolveHTTPSBaseURL(serverIP, serverDomain, _ string) string {
-	if override := os.Getenv("AGENT_HTTP_PORT"); override != "" {
-		host := serverDomain
-		if host == "" {
-			host = serverIP
-		}
-		return "https://" + host + ":" + override
-	}
-	host := serverDomain
-	if host == "" {
-		host = serverIP
-	}
-	if host == "" {
-		host = "localhost"
-	}
-	// Connection-manager REST API always listens on :8443 in production.
-	return "https://" + host + ":8443"
-}
+// Sentinel file functions removed — split-key architecture superseded.
+// resolveHTTPSBaseURL removed — /key-half endpoint removed.

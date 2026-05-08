@@ -1510,21 +1510,55 @@ export interface AgentBuildRequest {
     install_sysmon?: boolean;
 }
 
+/** Response from POST /api/v1/agent/build (new JSON format). */
+export interface AgentBuildResponse {
+    /** Plaintext enrollment token — shown ONCE. The admin must save it securely. */
+    token: string;
+    /** UUID baked into the binary (EmbeddedBuildID). */
+    build_id: string;
+    /** SHA-256 hex of the compiled binary. */
+    sha256: string;
+    /** Binary size in bytes. */
+    size: number;
+    /** Build duration string (e.g. "12.3s"). */
+    duration: string;
+    /** Base64-encoded .exe binary. */
+    binary: string;
+}
+
 export const agentBuildApi = {
     /**
-     * Build and download the agent binary.
-     * Returns a Blob (the .exe) and response headers with metadata.
+     * Build the agent binary. Returns JSON with the one-time token,
+     * build metadata, and the base64-encoded .exe.
      */
-    build: async (data: AgentBuildRequest): Promise<{ blob: Blob; sha256: string; filename: string }> => {
-        const response = await connectionApi.post('/api/v1/agent/build', data, {
-            responseType: 'blob',
-            timeout: 600_000, // 10 minutes — generous for cross-compilation (first build can take 3-5 min)
+    build: async (data: AgentBuildRequest): Promise<{
+        blob: Blob;
+        sha256: string;
+        filename: string;
+        token: string;
+        build_id: string;
+        size: number;
+        duration: string;
+    }> => {
+        const response = await connectionApi.post<AgentBuildResponse>('/api/v1/agent/build', data, {
+            timeout: 600_000, // 10 minutes — generous for cross-compilation
         });
-        const sha256 = (response.headers as Record<string, string>)['x-agent-sha256'] || '';
+        const r = response.data;
+        // Decode base64 binary to Blob
+        const binaryStr = atob(r.binary);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: 'application/octet-stream' });
         return {
-            blob: response.data as Blob,
-            sha256,
+            blob,
+            sha256: r.sha256,
             filename: 'edr-agent.exe',
+            token: r.token,
+            build_id: r.build_id,
+            size: r.size,
+            duration: r.duration,
         };
     },
 

@@ -19,10 +19,10 @@ var (
 	// One token is allowed to produce exactly one agent binary.
 	ErrTokenAlreadyBuilt = errors.New("enrollment token has already been used to build an agent binary")
 
-	// ErrKeyBAlreadyServed is returned by ServeKeyB when the atomic CTE
-	// finds no matching row — meaning the key half has already been served,
-	// the token is revoked, expired, or does not exist.
-	// The caller MUST return HTTP 410 Gone on this error.
-	ErrKeyBAlreadyServed = errors.New("key_b has already been served or token is invalid")
+	// ErrBuildIDAlreadySet is returned by StoreBuildID when the atomic CAS
+	// (WHERE build_id IS NULL) finds no row — meaning a BuildID has already
+	// been assigned to this token. One token → one binary → one BuildID.
+	ErrBuildIDAlreadySet = errors.New("build_id already set for this enrollment token")
 )
+
 

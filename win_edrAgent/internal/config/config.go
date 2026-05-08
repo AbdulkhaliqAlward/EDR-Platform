@@ -201,6 +201,12 @@ type CertConfig struct {
 	CAPath         string `yaml:"ca_path" json:"ca_path"`
 	BootstrapToken string `yaml:"bootstrap_token" json:"bootstrap_token"`
 
+	// BuildID is the UUID baked into the binary at build time (EmbeddedBuildID).
+	// Set in-memory by main.go before calling EnsureEnrolled.
+	// Sent as req.Tags["build_id"] so agent_service.go can use the BuildID lookup path.
+	// NEVER written to disk or Registry (yaml:"-", json:"-").
+	BuildID string `yaml:"-" json:"-"`
+
 	// Inline PEM data — stored in Registry, loaded into memory at startup.
 	// When these are set, the file paths above are ignored for TLS.
 	CertPEM   []byte `yaml:"-" json:"cert_pem,omitempty"`

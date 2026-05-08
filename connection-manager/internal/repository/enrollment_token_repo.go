@@ -59,7 +59,7 @@ func (r *PostgresEnrollmentTokenRepository) Create(ctx context.Context, token *m
 // GetByID retrieves an enrollment token by its UUID.
 func (r *PostgresEnrollmentTokenRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.EnrollmentToken, error) {
 	query := `
-		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, key_b, key_b_served, created_by, created_at, revoked_at, updated_at
+		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, build_id, created_by, created_at, revoked_at, updated_at
 		FROM enrollment_tokens
 		WHERE id = $1`
 
@@ -70,7 +70,7 @@ func (r *PostgresEnrollmentTokenRepository) GetByID(ctx context.Context, id uuid
 // Deprecated for security-sensitive paths: prefer GetByTokenHash.
 func (r *PostgresEnrollmentTokenRepository) GetByToken(ctx context.Context, token string) (*models.EnrollmentToken, error) {
 	query := `
-		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, key_b, key_b_served, created_by, created_at, revoked_at, updated_at
+		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, build_id, created_by, created_at, revoked_at, updated_at
 		FROM enrollment_tokens
 		WHERE token = $1`
 
@@ -82,95 +82,58 @@ func (r *PostgresEnrollmentTokenRepository) GetByToken(ctx context.Context, toke
 // the caller hashes it with security.HashToken(), then calls this method.
 func (r *PostgresEnrollmentTokenRepository) GetByTokenHash(ctx context.Context, hash string) (*models.EnrollmentToken, error) {
 	query := `
-		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, key_b, key_b_served, created_by, created_at, revoked_at, updated_at
+		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, build_id, created_by, created_at, revoked_at, updated_at
 		FROM enrollment_tokens
 		WHERE token_hash = $1`
 
 	return r.scanOne(ctx, query, hash)
 }
 
-// StoreKeyB persists the hex-encoded second key half (key_b) onto the token row.
-// Called by agent-builder immediately after split-key generation.
-// If this call fails the build MUST be aborted (never return a binary where key_b
-// was not stored, or enrollment will be impossible).
-func (r *PostgresEnrollmentTokenRepository) StoreKeyB(ctx context.Context, tokenID uuid.UUID, keyB string) error {
+// GetByBuildID retrieves an enrollment token by the BuildID assigned at agent build time.
+// Used by RegisterAgent for the BuildID-path lookup (new binaries).
+func (r *PostgresEnrollmentTokenRepository) GetByBuildID(ctx context.Context, buildID uuid.UUID) (*models.EnrollmentToken, error) {
+	query := `
+		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, build_id, created_by, created_at, revoked_at, updated_at
+		FROM enrollment_tokens
+		WHERE build_id = $1`
+
+	return r.scanOne(ctx, query, buildID)
+}
+
+// StoreBuildID atomically assigns a BuildID to a token using a CAS UPDATE:
+//
+//	WHERE build_id IS NULL — the first caller wins; concurrent calls fail fast.
+//
+// Returns ErrBuildIDAlreadySet if build_id was already assigned.
+// Returns ErrNotFound if the tokenID does not exist.
+func (r *PostgresEnrollmentTokenRepository) StoreBuildID(ctx context.Context, tokenID uuid.UUID, buildID uuid.UUID) error {
 	query := `
 		UPDATE enrollment_tokens
-		SET    key_b      = $2,
+		SET    build_id   = $2,
 		       updated_at = NOW()
-		WHERE  id         = $1`
+		WHERE  id         = $1
+		  AND  build_id   IS NULL`
 
-	tag, err := r.pool.Exec(ctx, query, tokenID, keyB)
+	tag, err := r.pool.Exec(ctx, query, tokenID, buildID)
 	if err != nil {
-		return fmt.Errorf("StoreKeyB: %w", err)
+		return fmt.Errorf("StoreBuildID: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		// Either the token doesn't exist, or build_id was already set.
+		// Disambiguate: check if the row exists.
+		var exists bool
+		chkErr := r.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM enrollment_tokens WHERE id = $1)`, tokenID,
+		).Scan(&exists)
+		if chkErr != nil || !exists {
+			return ErrNotFound
+		}
+		return ErrBuildIDAlreadySet
 	}
 	return nil
 }
 
-// ServeKeyB is the security-critical atomic operation for the split-key architecture.
-//
-// It uses a single CTE to:
-//  1. Match the row ONLY if:  key_b IS NOT NULL
-//                           AND key_b_served = FALSE
-//                           AND revoked_at IS NULL
-//                           AND (expires_at IS NULL OR expires_at > NOW())
-//  2. In the same atomic statement: NULL out key_b, set key_b_served = TRUE.
-//  3. Return the key_b value that existed before it was NULLed.
-//
-// A SELECT-then-UPDATE would be a TOCTOU race condition — this is NOT done.
-//
-// Returns:
-//   - (keyB string, nil)            on success — the caller serves keyB to the agent
-//   - ("", ErrKeyBAlreadyServed)    if CAS found no row (already served / revoked / expired / not found)
-//   - ("", err)                     on DB error
-func (r *PostgresEnrollmentTokenRepository) ServeKeyB(ctx context.Context, tokenID uuid.UUID) (string, error) {
-	// Atomic CTE: consume key_b exactly once.
-	//
-	// SECURITY INVARIANT:
-	//   - The WHERE clause on the CTE guarantees no row is matched if
-	//     key_b is already NULL (already served) or token is invalid.
-	//   - SET key_b = NULL + key_b_served = TRUE happen in the same
-	//     server-side transaction — there is no window for a second caller
-	//     to read key_b before it is NULLed.
-	//   - RETURNING old_key_b gives us the value before NULL was written,
-	//     so we can return it to the caller without a second SELECT.
-	query := `
-		WITH target AS (
-			SELECT id, key_b AS old_key_b
-			FROM   enrollment_tokens
-			WHERE  id           = $1
-			  AND  key_b        IS NOT NULL
-			  AND  key_b_served = FALSE
-			  AND  revoked_at   IS NULL
-			  AND  (expires_at IS NULL OR expires_at > NOW())
-		),
-		updated AS (
-			UPDATE enrollment_tokens
-			SET    key_b        = NULL,
-			       key_b_served = TRUE,
-			       updated_at   = NOW()
-			FROM   target
-			WHERE  enrollment_tokens.id = target.id
-			RETURNING target.old_key_b
-		)
-		SELECT old_key_b FROM updated`
-
-	var keyB string
-	err := r.pool.QueryRow(ctx, query, tokenID).Scan(&keyB)
-	if err == pgx.ErrNoRows {
-		// CAS found no row — key already served, token invalid/revoked/expired, or not found.
-		return "", ErrKeyBAlreadyServed
-	}
-	if err != nil {
-		return "", fmt.Errorf("ServeKeyB: %w", err)
-	}
-	return keyB, nil
-}
-
-// Uses a WHERE build_count = 0 CAS update to prevent concurrent double-builds.
+// IncrementBuildCount atomically increments build_count from 0 to 1.
 // Returns ErrTokenAlreadyBuilt when 0 rows are affected (already consumed).
 func (r *PostgresEnrollmentTokenRepository) IncrementBuildCount(ctx context.Context, tokenID uuid.UUID) error {
 	query := `
@@ -193,7 +156,7 @@ func (r *PostgresEnrollmentTokenRepository) IncrementBuildCount(ctx context.Cont
 // List retrieves all enrollment tokens ordered by creation date (newest first).
 func (r *PostgresEnrollmentTokenRepository) List(ctx context.Context) ([]*models.EnrollmentToken, error) {
 	query := `
-		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, key_b, key_b_served, created_by, created_at, revoked_at, updated_at
+		SELECT id, token, token_hash, description, is_active, expires_at, use_count, max_uses, build_count, build_id, created_by, created_at, revoked_at, updated_at
 		FROM enrollment_tokens
 		ORDER BY created_at DESC`
 
@@ -263,8 +226,7 @@ func (r *PostgresEnrollmentTokenRepository) HasConsumption(ctx context.Context, 
 	).Scan(&exists)
 	if err != nil {
 		// Backward compatibility: if the migrations creating enrollment_token_consumptions
-		// were not applied yet, don't hard-fail enrollment. We simply treat it as
-		// "no prior consumption" (idempotency disabled until migrations are applied).
+		// were not applied yet, don't hard-fail enrollment.
 		if strings.Contains(err.Error(), "enrollment_token_consumptions") && strings.Contains(err.Error(), "does not exist") {
 			return false, nil
 		}
@@ -280,8 +242,6 @@ func (r *PostgresEnrollmentTokenRepository) RecordConsumption(ctx context.Contex
 		ON CONFLICT (token_id, hardware_id) DO NOTHING`
 	result, err := r.pool.Exec(ctx, query, tokenID, hardwareID, agentID)
 	if err != nil {
-		// Backward compatibility: if the consumptions table doesn't exist yet,
-		// proceed as if this is a new consumption so max_uses still works.
 		if strings.Contains(err.Error(), "enrollment_token_consumptions") && strings.Contains(err.Error(), "does not exist") {
 			return true, nil
 		}
@@ -296,13 +256,13 @@ func (r *PostgresEnrollmentTokenRepository) scanOne(ctx context.Context, query s
 		t         models.EnrollmentToken
 		expiresAt sql.NullTime
 		maxUses   sql.NullInt32
-		keyB      sql.NullString
+		buildID   uuid.NullUUID
 		revokedAt sql.NullTime
 	)
 	err := r.pool.QueryRow(ctx, query, arg).Scan(
 		&t.ID, &t.Token, &t.TokenHash, &t.Description, &t.IsActive,
 		&expiresAt, &t.UseCount, &maxUses, &t.BuildCount,
-		&keyB, &t.KeyBServed,
+		&buildID,
 		&t.CreatedBy, &t.CreatedAt, &revokedAt, &t.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -318,8 +278,8 @@ func (r *PostgresEnrollmentTokenRepository) scanOne(ctx context.Context, query s
 		v := int(maxUses.Int32)
 		t.MaxUses = &v
 	}
-	if keyB.Valid {
-		t.KeyB = &keyB.String
+	if buildID.Valid {
+		t.BuildID = &buildID.UUID
 	}
 	if revokedAt.Valid {
 		t.RevokedAt = &revokedAt.Time
@@ -333,13 +293,13 @@ func (r *PostgresEnrollmentTokenRepository) scanRow(rows pgx.Rows) (*models.Enro
 		t         models.EnrollmentToken
 		expiresAt sql.NullTime
 		maxUses   sql.NullInt32
-		keyB      sql.NullString
+		buildID   uuid.NullUUID
 		revokedAt sql.NullTime
 	)
 	err := rows.Scan(
 		&t.ID, &t.Token, &t.TokenHash, &t.Description, &t.IsActive,
 		&expiresAt, &t.UseCount, &maxUses, &t.BuildCount,
-		&keyB, &t.KeyBServed,
+		&buildID,
 		&t.CreatedBy, &t.CreatedAt, &revokedAt, &t.UpdatedAt,
 	)
 	if err != nil {
@@ -352,8 +312,8 @@ func (r *PostgresEnrollmentTokenRepository) scanRow(rows pgx.Rows) (*models.Enro
 		v := int(maxUses.Int32)
 		t.MaxUses = &v
 	}
-	if keyB.Valid {
-		t.KeyB = &keyB.String
+	if buildID.Valid {
+		t.BuildID = &buildID.UUID
 	}
 	if revokedAt.Valid {
 		t.RevokedAt = &revokedAt.Time

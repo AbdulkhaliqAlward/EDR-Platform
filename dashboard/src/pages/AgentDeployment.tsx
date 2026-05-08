@@ -57,7 +57,12 @@ function BuildModal({
     const [isBuilding, setIsBuilding] = useState(false);
     const [buildProgress, setBuildProgress] = useState('');
     const [error, setError] = useState('');
-    const [buildResult, setBuildResult] = useState<{ sha256: string; filename: string } | null>(null);
+    const [buildResult, setBuildResult] = useState<{
+        sha256: string;
+        filename: string;
+        token: string;
+        build_id: string;
+    } | null>(null);
 
     // Persist form state on change
     useEffect(() => {
@@ -108,7 +113,12 @@ function BuildModal({
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
-            setBuildResult({ sha256: result.sha256, filename: result.filename });
+            setBuildResult({
+                sha256: result.sha256,
+                filename: result.filename,
+                token: result.token,
+                build_id: result.build_id,
+            });
             setBuildProgress('');
             clearFormState();
         } catch (err: unknown) {
@@ -152,8 +162,8 @@ function BuildModal({
 
                 {/* Build success */}
                 {buildResult && (
-                    <div className="p-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-lg">
-                        <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300 font-medium mb-2">
+                    <div className="p-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-lg space-y-4">
+                        <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300 font-medium">
                             <CheckCircle className="w-5 h-5" />
                             Agent Built Successfully
                         </div>
@@ -162,6 +172,53 @@ function BuildModal({
                             <p className="font-mono text-xs break-all">
                                 <span className="font-medium font-sans">SHA256:</span> {buildResult.sha256}
                             </p>
+                        </div>
+
+                        {/* ── ONE-TIME TOKEN REVEAL ── */}
+                        <div className="mt-3 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg">
+                            <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300 font-medium text-sm mb-2">
+                                <AlertTriangle className="w-4 h-4" />
+                                One-Time Token — Save Securely
+                            </div>
+                            <p className="text-xs text-amber-600 dark:text-amber-400 mb-3">
+                                This token is shown <strong>once</strong>. It is not stored in the binary.
+                                Copy it now and use it during installation.
+                            </p>
+                            <div className="relative group">
+                                <div className="bg-slate-900 dark:bg-black rounded-lg p-3 font-mono text-xs text-green-400 break-all select-all">
+                                    {buildResult.token}
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        navigator.clipboard.writeText(buildResult.token);
+                                    }}
+                                    className="absolute top-1.5 right-1.5 p-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                                    title="Copy token"
+                                >
+                                    <Copy className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* ── INSTALL COMMAND ── */}
+                        <div className="mt-2">
+                            <span className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">Install Command (run as Administrator):</span>
+                            <div className="relative group">
+                                <div className="bg-slate-900 dark:bg-black rounded-lg p-3 font-mono text-xs text-green-400 break-all">
+                                    {`echo '${buildResult.token}' | .\\edr-agent.exe -install -token-stdin -server-ip <SERVER_IP> -server-domain <DOMAIN>`}
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        navigator.clipboard.writeText(
+                                            `echo '${buildResult.token}' | .\\edr-agent.exe -install -token-stdin -server-ip <SERVER_IP> -server-domain <DOMAIN>`
+                                        );
+                                    }}
+                                    className="absolute top-1.5 right-1.5 p-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+                                    title="Copy install command"
+                                >
+                                    <Copy className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -285,11 +342,11 @@ function BuildModal({
                     </div>
                 </div>
 
-                <div className="p-3 bg-blue-50 dark:bg-blue-900/15 border border-blue-200 dark:border-blue-800 rounded-lg text-xs text-blue-700 dark:text-blue-300 flex items-start gap-2">
+                    <div className="p-3 bg-blue-50 dark:bg-blue-900/15 border border-blue-200 dark:border-blue-800 rounded-lg text-xs text-blue-700 dark:text-blue-300 flex items-start gap-2">
                     <Info className="w-4 h-4 mt-0.5 shrink-0" />
                     <div>
-                        <strong>Skip Config</strong> embeds only the token and CA certificate. The installer
-                        will require server IP, domain, and port as CLI arguments during installation.
+                        <strong>Zero-Embed Security:</strong> The binary contains no token material.
+                        The token is returned once after build and must be provided via stdin at install time.
                     </div>
                 </div>
 
@@ -503,31 +560,27 @@ export default function AgentDeployment() {
                         </p>
                     </StepCard>
 
-                    <StepCard step={3} title="Install (Full Config)" icon={Shield}>
+                    <StepCard step={3} title="Install with Token (Secure)" icon={Shield}>
                         <p>
-                            If the agent was built with all server configuration embedded:
+                            Pass the enrollment token via <strong>stdin</strong> — it never appears in the process list or shell history:
                         </p>
                         <CodeBlock
                             label="Run as Administrator"
-                            code={`.\\edr-agent.exe -install`}
+                            code={`echo '<YOUR_TOKEN>' | .\\edr-agent.exe -install -token-stdin -server-ip 192.168.1.10 -server-domain edr.local`}
                         />
                         <p className="text-xs text-slate-500 dark:text-slate-400">
-                            No additional parameters needed — server IP, domain, port, and token are all embedded.
+                            The token is shown once after building. The binary contains <strong>zero</strong> token material.
                         </p>
                     </StepCard>
 
-                    <StepCard step={4} title="Install (Skip Config)" icon={Terminal}>
+                    <StepCard step={4} title="Install (Legacy Flag)" icon={Terminal}>
                         <p>
-                            If the agent was built with <strong>"Skip Config"</strong>, you must provide
-                            server details as CLI arguments:
+                            Alternatively, pass the token as a CLI flag (less secure — visible in process list):
                         </p>
                         <CodeBlock
                             label="Run as Administrator"
-                            code={`.\\edr-agent.exe -install ^\n  -server-ip 192.168.1.10 ^\n  -server-domain edr.local ^\n  -server-port 47051`}
+                            code={`.\\edr-agent.exe -install -token <YOUR_TOKEN> -server-ip 192.168.1.10 -server-domain edr.local`}
                         />
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                            The enrollment token is still embedded — no need to pass it via CLI (security policy).
-                        </p>
                     </StepCard>
 
                     <StepCard step={5} title="Verify Installation" icon={CheckCircle}>

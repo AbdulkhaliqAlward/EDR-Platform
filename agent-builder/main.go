@@ -22,9 +22,6 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -45,15 +42,20 @@ type BuildRequest struct {
 	ServerIP      string `json:"server_ip"`
 	ServerDomain  string `json:"server_domain"`
 	ServerPort    string `json:"server_port"`
-	// Token is the legacy single-key enrollment token (XOR or single AES).
-	// New builds use TokenEnc + TokenKeyA + TokenID (split-key architecture).
-	Token         string `json:"token"`
-	// Split-key fields (set by connection-manager handlers_build.go).
-	TokenEnc      string `json:"token_enc"`   // hex(nonce||ciphertext||tag)
-	TokenKeyA     string `json:"token_key_a"` // hex(16-byte key_a) — baked into binary
-	TokenID       string `json:"token_id"`    // UUID — baked into binary for /key-half fetch
+	// BuildID + TokenBinding: new architecture (zero token material in binary).
+	// BuildID is a UUID stored in the binary as EmbeddedBuildID.
+	// TokenBinding is HMAC-SHA256(key=token, msg=buildID) stored as EmbeddedTokenHash.
+	// The agent uses these to validate the token locally before any network call.
+	BuildID       string `json:"build_id"`      // UUID injected as EmbeddedBuildID
+	TokenBinding  string `json:"token_binding"` // HMAC hex injected as EmbeddedTokenHash
+	// Legacy fields: kept for backward compatibility with old agent builds.
+	// New builds will have BuildID + TokenBinding set instead.
+	Token         string `json:"token"`       // deprecated: legacy plaintext token
+	TokenEnc      string `json:"token_enc"`   // deprecated: split-key ciphertext
+	TokenKeyA     string `json:"token_key_a"` // deprecated: split-key half A
+	TokenID       string `json:"token_id"`    // deprecated: split-key token UUID
 	SkipConfig    bool   `json:"skip_config"`
-	CACertPEM     string `json:"ca_cert_pem"` // PEM-encoded CA certificate to embed
+	CACertPEM     string `json:"ca_cert_pem"`
 	InstallSysmon bool   `json:"install_sysmon"`
 }
 
@@ -129,8 +131,11 @@ func computeFingerprint(req BuildRequest, agentSrcDir string) string {
 	fmt.Fprintf(h, "server_domain=%s\n", req.ServerDomain)
 	fmt.Fprintf(h, "server_port=%s\n", req.ServerPort)
 
-	// 2. Token hash (not the raw token — security)
-	if req.Token != "" {
+	// 2. BuildID + TokenBinding (new) or legacy token hash
+	if req.BuildID != "" {
+		fmt.Fprintf(h, "build_id=%s\n", req.BuildID)
+		fmt.Fprintf(h, "token_binding=%s\n", req.TokenBinding)
+	} else if req.Token != "" {
 		tokenHash := sha256Hex(req.Token)
 		fmt.Fprintf(h, "token_hash=%s\n", tokenHash)
 	}
@@ -334,25 +339,21 @@ func main() {
 			ldflags = append(ldflags, fmt.Sprintf("-X main.GitCommit=%s", srcCommit))
 		}
 
-		if req.TokenEnc != "" && req.TokenKeyA != "" && req.TokenID != "" {
-			// SPLIT-KEY path (new): key was split server-side in handlers_build.go.
-			// key_b is already stored in the DB; we only embed key_a + ciphertext + token ID.
-			// The agent fetches key_b from POST /api/v1/agent/key-half at enrollment time.
+		if req.BuildID != "" && req.TokenBinding != "" {
+			// NEW ARCHITECTURE: zero token material in binary.
+			// Binary only carries BuildID (UUID) + HMAC binding.
+			// The agent validates the token locally using HMAC-SHA256.
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedBuildID=%s", req.BuildID))
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenHash=%s", req.TokenBinding))
+		} else if req.TokenEnc != "" && req.TokenKeyA != "" && req.TokenID != "" {
+			// LEGACY split-key path: kept for backward compatibility with old deployments.
 			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenEnc=%s", req.TokenEnc))
 			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenKeyA=%s", req.TokenKeyA))
 			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenID=%s", req.TokenID))
 		} else if req.Token != "" {
-			// LEGACY path: generate single-key AES (no split) for backward compatibility.
-			tokenEnc, tokenKey, err := aesEncryptToken(req.Token)
-			if err != nil {
-				log.Printf("[BUILD] Failed to encrypt token: %v", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": "Failed to encrypt enrollment token: " + err.Error(),
-				})
-				return
-			}
-			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenEnc=%s", tokenEnc))
-			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenKey=%s", tokenKey))
+			// LEGACY single-key path: encode as XOR for oldest compat.
+			// Note: this path is only reached for very old builder clients.
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenObf=%s", sha256Hex(req.Token)))
 		}
 
 		if !req.SkipConfig {
@@ -467,38 +468,4 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// aesEncryptToken encrypts plaintext using AES-256-GCM with a randomly-generated
-// per-build key.  Returns (ciphertextHex, keyHex, error).
-//
-// Format of ciphertextHex (all concatenated, hex-encoded):
-//
-//	12-byte nonce || AES-GCM ciphertext+tag
-//
-// The key is 32 random bytes (AES-256).
-func aesEncryptToken(plaintext string) (ciphertextHex, keyHex string, err error) {
-	// Generate random 32-byte key (AES-256).
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return "", "", fmt.Errorf("generate AES key: %w", err)
-	}
 
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", "", fmt.Errorf("new AES cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", "", fmt.Errorf("new GCM: %w", err)
-	}
-
-	// Random 12-byte nonce (standard GCM nonce size).
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", "", fmt.Errorf("generate nonce: %w", err)
-	}
-
-	// Seal appends ciphertext + 16-byte GCM tag to nonce.
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-
-	return hex.EncodeToString(ciphertext), hex.EncodeToString(key), nil
-}

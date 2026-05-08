@@ -158,45 +158,76 @@ func (s *agentServiceImpl) Register(ctx context.Context, req *RegisterAgentReque
 		return nil, ErrInvalidRequest
 	}
 
-	// 1. Validate token: try dynamic enrollment tokens first, then fall back to legacy installation tokens.
+	// 1. Validate token: new binaries send build_id in Tags; fall back to token-hash lookup.
 	var legacyToken *models.InstallationToken
 	var enrollmentToken *models.EnrollmentToken
 
 	if s.enrollmentTokenRepo != nil {
-		// Hash the incoming raw token before lookup — the raw value must never
-		// be passed to the DB layer.  The agent always sends the raw 64-char hex
-		// token; the server computes SHA-256(raw) and looks up by token_hash.
-		if et, err := s.enrollmentTokenRepo.GetByTokenHash(ctx, security.HashToken(req.InstallationToken)); err == nil {
-			// Validate in a way that supports idempotency: if the token is maxed-out
-			// but THIS hardware_id already consumed it, allow re-enrollment without
-			// consuming another seat (still reject true expiry).
-			if et.ExpiresAt != nil && time.Now().After(*et.ExpiresAt) {
-				return nil, ErrExpiredToken
+		// ── BuildID path (new binaries, zero token material in binary) ──────────
+		// New agent binaries embed only BuildID + HMAC binding (no ciphertext/key).
+		// The agent sends build_id via req.Tags["build_id"] and the raw token via
+		// req.InstallationToken. We look up by BuildID, then verify token_hash.
+		if buildIDStr, ok := req.Tags["build_id"]; ok && buildIDStr != "" {
+			if buildID, parseErr := uuid.Parse(strings.TrimSpace(buildIDStr)); parseErr == nil {
+				if et, err := s.enrollmentTokenRepo.GetByBuildID(ctx, buildID); err == nil {
+					// Verify the token hash matches — ensures the token matches the BuildID record.
+					if et.TokenHash == security.HashToken(req.InstallationToken) {
+						// Token validated; apply the same expiry/max_uses/active checks as below.
+						if et.ExpiresAt != nil && time.Now().After(*et.ExpiresAt) {
+							return nil, ErrExpiredToken
+						}
+						if et.MaxUses != nil && et.UseCount >= *et.MaxUses {
+							consumed, cErr := s.enrollmentTokenRepo.HasConsumption(ctx, et.ID, req.HardwareID)
+							if cErr != nil || !consumed {
+								return nil, ErrExpiredToken
+							}
+						}
+						if !et.IsActive {
+							consumed, cErr := s.enrollmentTokenRepo.HasConsumption(ctx, et.ID, req.HardwareID)
+							if cErr != nil || !consumed {
+								return nil, ErrExpiredToken
+							}
+						}
+						enrollmentToken = et
+						s.logger.WithField("build_id", buildIDStr).Info("[ENROLL] BuildID path: token validated")
+					} else {
+						s.logger.WithField("build_id", buildIDStr).Warn("[ENROLL] BuildID found but token hash mismatch — rejecting")
+						return nil, ErrInvalidToken
+					}
+				}
 			}
+		}
 
-			if et.MaxUses != nil && et.UseCount >= *et.MaxUses {
-				consumed, cErr := s.enrollmentTokenRepo.HasConsumption(ctx, et.ID, req.HardwareID)
-				if cErr != nil {
-					s.logger.WithError(cErr).Warn("Failed to check token consumption")
-					return nil, fmt.Errorf("token consumption check failed: %w", cErr)
-				}
-				if !consumed {
-					s.logger.Warnf("Enrollment token %s exhausted (max_uses reached)", et.ID)
+		// ── Token-hash path (legacy binaries and fallback) ────────────────────
+		if enrollmentToken == nil {
+			if et, err := s.enrollmentTokenRepo.GetByTokenHash(ctx, security.HashToken(req.InstallationToken)); err == nil {
+				if et.ExpiresAt != nil && time.Now().After(*et.ExpiresAt) {
 					return nil, ErrExpiredToken
 				}
-			}
-			if !et.IsActive {
-				consumed, cErr := s.enrollmentTokenRepo.HasConsumption(ctx, et.ID, req.HardwareID)
-				if cErr != nil {
-					s.logger.WithError(cErr).Warn("Failed to check token consumption")
-					return nil, fmt.Errorf("token consumption check failed: %w", cErr)
+				if et.MaxUses != nil && et.UseCount >= *et.MaxUses {
+					consumed, cErr := s.enrollmentTokenRepo.HasConsumption(ctx, et.ID, req.HardwareID)
+					if cErr != nil {
+						s.logger.WithError(cErr).Warn("Failed to check token consumption")
+						return nil, fmt.Errorf("token consumption check failed: %w", cErr)
+					}
+					if !consumed {
+						s.logger.Warnf("Enrollment token %s exhausted (max_uses reached)", et.ID)
+						return nil, ErrExpiredToken
+					}
 				}
-				if !consumed {
-					s.logger.Warnf("Enrollment token %s is inactive (revoked/deactivated)", et.ID)
-					return nil, ErrExpiredToken
+				if !et.IsActive {
+					consumed, cErr := s.enrollmentTokenRepo.HasConsumption(ctx, et.ID, req.HardwareID)
+					if cErr != nil {
+						s.logger.WithError(cErr).Warn("Failed to check token consumption")
+						return nil, fmt.Errorf("token consumption check failed: %w", cErr)
+					}
+					if !consumed {
+						s.logger.Warnf("Enrollment token %s is inactive (revoked/deactivated)", et.ID)
+						return nil, ErrExpiredToken
+					}
 				}
+				enrollmentToken = et
 			}
-			enrollmentToken = et
 		}
 	}
 

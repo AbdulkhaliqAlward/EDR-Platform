@@ -194,16 +194,15 @@ type EnrollmentTokenRepository interface {
 	// One token is allowed to produce exactly one agent binary — no exceptions.
 	IncrementBuildCount(ctx context.Context, tokenID uuid.UUID) error
 
-	// StoreKeyB persists the hex-encoded second key half (key_b) onto the token row.
-	// Called by agent-builder immediately after split-key generation.
+	// StoreBuildID atomically assigns a BuildID to a token.
+	// Uses WHERE build_id IS NULL so the first caller wins — no double-build races.
+	// Returns ErrBuildIDAlreadySet if a BuildID is already assigned.
 	// Returns ErrNotFound if the tokenID does not exist.
-	StoreKeyB(ctx context.Context, tokenID uuid.UUID, keyB string) error
+	StoreBuildID(ctx context.Context, tokenID uuid.UUID, buildID uuid.UUID) error
 
-	// ServeKeyB atomically serves and NULLs the key_b value in one CTE.
-	// Returns the key_b string on success, ErrKeyBAlreadyServed if the
-	// CAS predicate fails (already served / revoked / expired / not found).
-	// This MUST be a single atomic SQL statement — no SELECT then UPDATE.
-	ServeKeyB(ctx context.Context, tokenID uuid.UUID) (string, error)
+	// GetByBuildID retrieves an enrollment token by the BuildID that was
+	// assigned at agent build time. Used by RegisterAgent for BuildID-path lookup.
+	GetByBuildID(ctx context.Context, buildID uuid.UUID) (*models.EnrollmentToken, error)
 
 	// List retrieves all enrollment tokens ordered by creation date.
 	List(ctx context.Context) ([]*models.EnrollmentToken, error)

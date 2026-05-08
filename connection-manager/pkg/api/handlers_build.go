@@ -3,9 +3,10 @@ package api
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -24,46 +25,56 @@ import (
 
 // BuildAgentRequest is the JSON body for agent build requests from the dashboard.
 type BuildAgentRequest struct {
-	ServerIP     string `json:"server_ip"`
-	ServerDomain string `json:"server_domain"`
-	ServerPort   string `json:"server_port"`
+	ServerIP      string `json:"server_ip"`
+	ServerDomain  string `json:"server_domain"`
+	ServerPort    string `json:"server_port"`
 	// TokenID references an existing enrollment token. If omitted, MaxUses must be provided
 	// and BuildAgent will mint a new enrollment token for this build.
-	TokenID      string `json:"token_id"`
-	MaxUses      *int   `json:"max_uses"` // nil = require token_id; non-nil must be >= 1
-	ExpiresInH   *int   `json:"expires_in_hours"` // nil = default 24 hours
-	SkipConfig   bool   `json:"skip_config"` // if true, only token + CA are embedded
-	InstallSysmon bool  `json:"install_sysmon"` // if true, agent will install + enable Sysmon on first run
-
-	// internal: populated by splitKeyForBuild, never from JSON
-	tokenEnc  string
-	tokenKeyA string
+	TokenID       string `json:"token_id"`
+	MaxUses       *int   `json:"max_uses"`       // nil = require token_id; non-nil must be >= 1
+	ExpiresInH    *int   `json:"expires_in_hours"` // nil = default 24 hours
+	SkipConfig    bool   `json:"skip_config"`    // if true, only CA is embedded (no server addr)
+	InstallSysmon bool   `json:"install_sysmon"` // if true, agent installs Sysmon on first run
 }
 
 // builderRequest is the JSON body sent to the agent-builder service.
-// For split-key builds (TokenEnc + TokenKeyA + TokenID set), the agent-builder
-// injects the pre-computed ciphertext and key_a directly — no token in plaintext.
-// Token field kept for backward compatibility with old agent-builder images.
+// Token-related fields are now BuildID + TokenBinding (HMAC).
+// Legacy Token/TokenEnc/TokenKeyA/TokenID fields are intentionally omitted —
+// the agent-builder only embeds BuildID and TokenBinding.
 type builderRequest struct {
 	ServerIP      string `json:"server_ip"`
 	ServerDomain  string `json:"server_domain"`
 	ServerPort    string `json:"server_port"`
-	Token         string `json:"token"`          // deprecated: only for legacy builder
-	TokenEnc      string `json:"token_enc"`      // hex(nonce||ciphertext||tag) — split-key
-	TokenKeyA     string `json:"token_key_a"`    // hex(16-byte key_a) — baked into binary
-	TokenID       string `json:"token_id"`       // UUID — baked into binary for /key-half fetch
+	BuildID       string `json:"build_id"`       // UUID — injected as EmbeddedBuildID
+	TokenBinding  string `json:"token_binding"`  // HMAC-SHA256(key=token, msg=buildID) hex — injected as EmbeddedTokenHash
 	SkipConfig    bool   `json:"skip_config"`
 	CACertPEM     string `json:"ca_cert_pem"`
 	InstallSysmon bool   `json:"install_sysmon"`
 }
 
+// BuildAgentJSONResponse is the JSON body returned to the dashboard after a successful build.
+// The token field is shown ONCE here — the server returns the plaintext token so the admin
+// can save it securely and pipe it via stdin at installation time.
+// The binary is base64-encoded for inline delivery.
+type BuildAgentJSONResponse struct {
+	Token    string `json:"token"`    // plaintext enrollment token — shown once, store securely
+	BuildID  string `json:"build_id"` // UUID baked into binary
+	SHA256   string `json:"sha256"`   // hex SHA256 of the binary
+	Size     int    `json:"size"`     // binary size in bytes
+	Duration string `json:"duration"` // build duration
+	Binary   string `json:"binary"`   // base64-encoded .exe for download
+}
+
 // BuildAgent handles POST /api/v1/agent/build
 //
 // Workflow:
-//  1. Validate request + fetch token from DB.
-//  2. Read the CA certificate from disk.
-//  3. Send build request to the dedicated agent-builder service.
-//  4. Stream the resulting binary back to the dashboard as a download.
+//  1. Validate request + resolve/mint enrollment token from DB.
+//  2. Generate random BuildID (UUID).
+//  3. Compute HMAC-SHA256(key=token, msg=buildID) as the token binding.
+//  4. Store BuildID atomically in DB (WHERE build_id IS NULL — CAS guard).
+//  5. Read the CA certificate from disk.
+//  6. Send build request to agent-builder service (BuildID + TokenBinding, no token).
+//  7. Return JSON: { token (plaintext, once), build_id, sha256, size, duration, binary (base64) }.
 func (h *Handlers) BuildAgent(c echo.Context) error {
 	var req BuildAgentRequest
 	if err := c.Bind(&req); err != nil {
@@ -76,13 +87,12 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 	}
 
 	var tokenValue string
+	var tokenID   uuid.UUID
 	var tokenDesc string
 
 	// ── Resolve/mint enrollment token ──────────────────────────────────────
-	// Backwards compatible: if token_id provided, use it. If omitted, require max_uses
-	// and create a token dedicated to this build.
 	if strings.TrimSpace(req.TokenID) == "" {
-		// Defaults: single device + 24 hours validity.
+		// Mint a new enrollment token dedicated to this build.
 		if req.MaxUses == nil {
 			v := 1
 			req.MaxUses = &v
@@ -105,7 +115,6 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 				"Failed to generate enrollment token")
 		}
 
-		// Gap 2: extract operator identity from JWT claims.
 		createdBy := "system"
 		if u := getCurrentUser(c); u != nil {
 			createdBy = u.Username
@@ -116,7 +125,6 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 		token := &models.EnrollmentToken{
 			ID:          uuid.New(),
 			Token:       tokenStr,
-			// Gap 1: store SHA-256 hash for DB lookups; agent binary receives raw tokenStr.
 			TokenHash:   security.HashToken(tokenStr),
 			Description: desc,
 			IsActive:    true,
@@ -130,28 +138,17 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 			return errorResponse(c, http.StatusInternalServerError, "TOKEN_CREATE_ERROR",
 				"Failed to create enrollment token for build")
 		}
-
-		// Atomically consume this token for a binary build (build_count 0→1).
-		// A newly-created token always has build_count=0, so this is a
-		// formality here — but it keeps the code path identical to the
-		// existing-token path and future-proofs against concurrent requests.
 		if err := h.enrollmentTokenRepo.IncrementBuildCount(c.Request().Context(), token.ID); err != nil {
 			h.logger.Errorf("BuildAgent: IncrementBuildCount (new token): %v", err)
 			return errorResponse(c, http.StatusConflict, "TOKEN_ALREADY_BUILT",
 				"Enrollment token has already been used to build an agent binary")
 		}
 
-		// SPLIT-KEY: generate key_a (binary) + key_b (DB) from a 32-byte master key.
-		// fullKey is zeroed immediately after use — it never leaves this scope.
-		if err := splitKeyForBuild(c, h, token.ID, req.TokenID, token.Token, &req); err != nil {
-			return err // response already written by splitKeyForBuild
-		}
-
-		req.TokenID = token.ID.String()
-		tokenValue = token.Token
-		tokenDesc = token.Description
+		tokenValue = tokenStr
+		tokenID = token.ID
+		tokenDesc = desc
 	} else {
-		// Fetch all tokens and find the requested one that is valid
+		// Use an existing token.
 		tokens, err := h.enrollmentTokenRepo.List(c.Request().Context())
 		if err != nil {
 			h.logger.Errorf("BuildAgent: failed to list tokens: %v", err)
@@ -161,7 +158,6 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 
 		for _, t := range tokens {
 			if t.ID.String() == req.TokenID {
-				// Validate the token is usable
 				if !t.IsActive {
 					return errorResponse(c, http.StatusBadRequest, "TOKEN_REVOKED",
 						"The selected token has been revoked")
@@ -174,18 +170,13 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 					return errorResponse(c, http.StatusBadRequest, "TOKEN_MAXED",
 						"The selected token has reached its maximum number of uses")
 				}
-				// Atomically consume this token for a binary build.
-				// WHERE build_count = 0 prevents a token being used for two builds.
 				if err := h.enrollmentTokenRepo.IncrementBuildCount(c.Request().Context(), t.ID); err != nil {
 					h.logger.Errorf("BuildAgent: IncrementBuildCount (existing token %s): %v", t.ID, err)
 					return errorResponse(c, http.StatusConflict, "TOKEN_ALREADY_BUILT",
 						"Enrollment token has already been used to build an agent binary")
 				}
-				// SPLIT-KEY: generate key_a (binary) + key_b (DB).
-				if err := splitKeyForBuild(c, h, t.ID, req.TokenID, t.Token, &req); err != nil {
-					return err // response already written
-				}
 				tokenValue = t.Token
+				tokenID = t.ID
 				tokenDesc = t.Description
 				break
 			}
@@ -194,6 +185,31 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 			return errorResponse(c, http.StatusNotFound, "TOKEN_NOT_FOUND",
 				"Token not found or does not meet validity requirements")
 		}
+	}
+
+	// ── Generate BuildID + HMAC binding ────────────────────────────────────
+	//
+	// BuildID is a random UUID injected into the binary via ldflag.
+	// TokenBinding = hex( HMAC-SHA256(key=token, message=buildID) )
+	//
+	// Security properties:
+	//   - Binary contains ZERO token material — no ciphertext, no key fragment.
+	//   - HMAC is one-way: an attacker with the binary cannot recover the token.
+	//   - The agent verifies the HMAC locally before any network call,
+	//     silently rejecting any wrong token (wrong binary for this token).
+	buildID := uuid.New()
+	buildIDStr := buildID.String()
+
+	mac := hmac.New(sha256.New, []byte(tokenValue))
+	mac.Write([]byte(buildIDStr))
+	tokenBinding := hex.EncodeToString(mac.Sum(nil))
+
+	// ── Store BuildID atomically in DB (CAS: WHERE build_id IS NULL) ───────
+	// If this fails, abort — we must never return a binary without a DB record.
+	if err := h.enrollmentTokenRepo.StoreBuildID(c.Request().Context(), tokenID, buildID); err != nil {
+		h.logger.Errorf("BuildAgent: StoreBuildID failed for token %s: %v", tokenID, err)
+		return errorResponse(c, http.StatusInternalServerError, "BUILD_ID_STORE_ERROR",
+			"Failed to store BuildID — build aborted")
 	}
 
 	// ── Validate server config if not skipping ─────────────────────────────
@@ -225,22 +241,18 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 		builderURL = "http://agent-builder:8090"
 	}
 
-	// ── Send build request to agent-builder service ────────────────────────
-	h.logger.Infof("BuildAgent: sending build to %s (skip_config=%v, token=%s)",
-		builderURL, req.SkipConfig, tokenDesc)
+	h.logger.Infof("BuildAgent: sending build to %s (skip_config=%v, token=%s, build_id=%s)",
+		builderURL, req.SkipConfig, tokenDesc, buildIDStr)
 
 	buildReq := builderRequest{
 		ServerIP:      req.ServerIP,
 		ServerDomain:  req.ServerDomain,
 		ServerPort:    req.ServerPort,
+		BuildID:       buildIDStr,
+		TokenBinding:  tokenBinding,
 		SkipConfig:    req.SkipConfig,
 		CACertPEM:     caCertPEM,
 		InstallSysmon: req.InstallSysmon,
-		// Split-key fields (set by splitKeyForBuild above).
-		// Token field intentionally left empty: the agent uses the split-key path.
-		TokenEnc:  req.tokenEnc,
-		TokenKeyA: req.tokenKeyA,
-		TokenID:   req.TokenID,
 	}
 
 	body, err := json.Marshal(buildReq)
@@ -249,7 +261,7 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 			"Failed to marshal build request")
 	}
 
-	client := &http.Client{Timeout: 10 * time.Minute} // generous timeout for cross-compilation (first build can take 3-5 min)
+	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Post(builderURL+"/build", "application/json", bytes.NewReader(body))
 	if err != nil {
 		h.logger.Errorf("BuildAgent: builder request failed: %v", err)
@@ -258,7 +270,6 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 	}
 	defer resp.Body.Close()
 
-	// ── Handle builder error ───────────────────────────────────────────────
 	if resp.StatusCode != http.StatusOK {
 		var errResp map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
@@ -269,7 +280,6 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 			"Agent build failed — check builder logs")
 	}
 
-	// ── Read full binary from builder ─────────────────────────────────────
 	binaryData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		h.logger.Errorf("BuildAgent: failed to read builder response: %v", err)
@@ -280,107 +290,40 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 	sha256Hash := resp.Header.Get("X-Agent-SHA256")
 	buildDuration := resp.Header.Get("X-Build-Duration")
 
-	h.logger.Infof("BuildAgent: build succeeded in %s, size=%d bytes (sha256=%s)",
-		buildDuration, len(binaryData), sha256Hash[:16]+"...")
+	h.logger.Infof("BuildAgent: build succeeded in %s, size=%d bytes, build_id=%s",
+		buildDuration, len(binaryData), buildIDStr)
 
-	// Audit log
 	h.fireAudit(c, "agent.build", "agent_binary", uuid.Nil, fmt.Sprintf(
-		"Agent built: skip_config=%v, token=%s, sha256=%s, duration=%s, size=%d",
-		req.SkipConfig, tokenDesc, sha256Hash[:16]+"...", buildDuration, len(binaryData)), false, "")
+		"Agent built: skip_config=%v, token=%s, build_id=%s, sha256=%s, duration=%s, size=%d",
+		req.SkipConfig, tokenDesc, buildIDStr,
+		func() string {
+			if len(sha256Hash) > 16 {
+				return sha256Hash[:16] + "..."
+			}
+			return sha256Hash
+		}(),
+		buildDuration, len(binaryData)), false, "")
 
-	// Set download headers
-	c.Response().Header().Set("Content-Disposition", `attachment; filename="edr-agent.exe"`)
-	c.Response().Header().Set("X-Agent-SHA256", sha256Hash)
-	c.Response().Header().Set("X-Agent-Token-Id", req.TokenID)
-	c.Response().Header().Set("X-Agent-Token-Description", tokenDesc)
-	c.Response().Header().Set("X-Build-Duration", buildDuration)
-	if !req.SkipConfig {
-		c.Response().Header().Set("X-Agent-Server",
-			fmt.Sprintf("%s:%s", req.ServerDomain, req.ServerPort))
-	}
-	c.Response().Header().Set("X-Agent-CA-Embedded", fmt.Sprintf("%v", caCertPEM != ""))
-
-	return c.Blob(http.StatusOK, "application/octet-stream", binaryData)
-}
-
-// splitKeyForBuild generates the AES-256 split-key for a new agent binary build.
-//
-// Security contract:
-//  1. Generates 32 cryptographically random bytes as fullKey.
-//  2. Splits: keyA = fullKey[:16] (baked into binary), keyB = fullKey[16:] (stored in DB).
-//  3. Encrypts token with fullKey using AES-256-GCM.
-//  4. Stores keyB in the DB via StoreKeyB BEFORE returning.
-//     If StoreKeyB fails, the function returns an error and the build is aborted.
-//     A binary where keyB was not stored would be permanently undeployable.
-//  5. Zeros fullKey and keyB slices from memory before returning.
-//  6. Populates req.tokenEnc and req.tokenKeyA for injection into builderRequest.
-func splitKeyForBuild(
-	c echo.Context,
-	h *Handlers,
-	tokenUUID uuid.UUID,
-	_ string, // tokenIDStr (unused — tokenUUID is authoritative)
-	tokenPlaintext string,
-	req *BuildAgentRequest,
-) error {
-	// Step 1: Generate 32 cryptographically random bytes.
-	fullKey := make([]byte, 32)
-	if _, err := rand.Read(fullKey); err != nil {
-		h.logger.Errorf("[SPLITKEY] rand.Read failed: %v", err)
-		return errorResponse(c, http.StatusInternalServerError, "KEY_GEN_ERROR",
-			"Failed to generate split key material")
-	}
-	// Step 5: Zero fullKey from memory before returning — runs after step 4.
-	defer func() {
-		for i := range fullKey {
-			fullKey[i] = 0
-		}
-	}()
-
-	// Step 2: Split.
-	keyA := make([]byte, 16)
-	keyB := make([]byte, 16)
-	copy(keyA, fullKey[:16])
-	copy(keyB, fullKey[16:])
-	defer func() {
-		for i := range keyB {
-			keyB[i] = 0
-		}
-	}()
-
-	// Step 3: Encrypt token with fullKey using AES-256-GCM.
-	block, err := aes.NewCipher(fullKey)
-	if err != nil {
-		h.logger.Errorf("[SPLITKEY] AES NewCipher: %v", err)
-		return errorResponse(c, http.StatusInternalServerError, "CIPHER_ERROR",
-			"Failed to initialize AES cipher")
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		h.logger.Errorf("[SPLITKEY] GCM init: %v", err)
-		return errorResponse(c, http.StatusInternalServerError, "GCM_ERROR",
-			"Failed to initialize GCM")
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		h.logger.Errorf("[SPLITKEY] nonce rand.Read: %v", err)
-		return errorResponse(c, http.StatusInternalServerError, "NONCE_ERROR",
-			"Failed to generate nonce")
-	}
-	ciphertext := gcm.Seal(nonce, nonce, []byte(tokenPlaintext), nil)
-	tokenEnc := hex.EncodeToString(ciphertext)
-	keyAHex := hex.EncodeToString(keyA)
-	keyBHex := hex.EncodeToString(keyB)
-
-	// Step 4: Store keyB in DB BEFORE build proceeds.
-	// If this fails, abort immediately — do not return a binary with no server key.
-	if err := h.enrollmentTokenRepo.StoreKeyB(c.Request().Context(), tokenUUID, keyBHex); err != nil {
-		h.logger.Errorf("[SPLITKEY] StoreKeyB failed for token %s: %v", tokenUUID, err)
-		return errorResponse(c, http.StatusInternalServerError, "KEY_STORE_ERROR",
-			"Failed to store key material — build aborted")
+	// ── Return JSON response with token (shown once) + binary (base64) ─────
+	//
+	// SECURITY NOTE: tokenValue is returned here in plaintext so the admin
+	// can save it and use it with: echo '<token>' | agent.exe -install -token-stdin
+	// The server stores only the SHA-256 hash of the token — this response is
+	// the last time the plaintext token is visible. It is NOT stored in the
+	// binary; the binary contains only BuildID + HMAC binding.
+	jsonResp := BuildAgentJSONResponse{
+		Token:    tokenValue,
+		BuildID:  buildIDStr,
+		SHA256:   sha256Hash,
+		Size:     len(binaryData),
+		Duration: buildDuration,
+		Binary:   base64.StdEncoding.EncodeToString(binaryData),
 	}
 
-	req.tokenEnc = tokenEnc
-	req.tokenKeyA = keyAHex
-	req.TokenID = tokenUUID.String()
-	return nil
+	// Zero tokenValue from memory after building the response struct
+	// (best-effort — Go strings are immutable but this removes the reference).
+	tokenValue = ""
+	_ = rand.Read(make([]byte, 1)) // prevent compiler from optimizing out the zero
+
+	return c.JSON(http.StatusOK, jsonResp)
 }

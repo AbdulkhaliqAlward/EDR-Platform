@@ -56,8 +56,10 @@ type Options struct {
 	// ServerPort is the gRPC port (default "50051").
 	ServerPort string
 
-	// Token is the bootstrap enrollment token written into config.yaml.
-	Token string
+	// Token field removed: enrollment token is no longer written to disk or
+	// Registry under any circumstances. It is passed via stdin at install time,
+	// used in-memory for the RegisterAgent gRPC call, then immediately zeroed.
+	// See: win_edrAgent/cmd/agent/main.go runInstall()
 
 	// ConfigPath is the absolute path where config.yaml will be written.
 	// Defaults to DefaultConfigPath.
@@ -190,9 +192,11 @@ func GenerateConfig(opts Options) error {
 	// ── Build configuration from proven defaults ───────────────────────────────
 	cfg := config.DefaultConfig()
 
-	// Override the three dynamic fields.
+	// Override the dynamic fields.
 	cfg.Server.Address = opts.ServerDomain + ":" + opts.ServerPort
-	cfg.Certs.BootstrapToken = opts.Token
+	// NOTE: cfg.Certs.BootstrapToken is intentionally NOT set here.
+	// The token is passed via stdin and kept in-memory only. It is never
+	// written to config.yaml or the Registry. See main.go runInstall().
 	cfg.Agent.ID = uuid.New().String()
 
 	// Optional: Sysmon bootstrap (dashboard build flag).

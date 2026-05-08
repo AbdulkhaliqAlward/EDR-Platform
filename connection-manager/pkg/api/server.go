@@ -93,10 +93,9 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 
 	// Zero-touch provisioning: public CA cert endpoint (no auth required)
 	v1.GET("/agent/ca", handlers.ServeCA)
-	// Split-key distribution: serves key_b exactly once, then NULLs it (no auth — agent has no creds yet)
-	v1.POST("/agent/key-half", handlers.ServeKeyHalf)
 	// Optional public Sysmon config endpoint (no auth required)
 	v1.GET("/agent/sysmon/config", handlers.ServeSysmonConfig)
+
 
 	// Auth endpoints (no auth required for login)
 	auth := v1.Group("/auth")

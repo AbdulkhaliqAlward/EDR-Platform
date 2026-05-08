@@ -3,19 +3,14 @@ package enrollment
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -201,9 +196,18 @@ func EnsureEnrolled(cfg *config.Config, logger *logging.Logger, configFilePath s
 	machineFingerprint := computeMachineFingerprint(cfg.Agent.Hostname)
 
 	tags := map[string]string{
-		"hardware_id":          hardwareID,
-		"machine_fingerprint":  machineFingerprint,
+		"hardware_id":         hardwareID,
+		"machine_fingerprint": machineFingerprint,
 	}
+	// Include build_id tag if set (new architecture).
+	// agent_service.go uses this for the BuildID-path lookup: GetByBuildID()
+	// then verifies the token hash matches before granting enrollment.
+	// Zero BuildID from cfg after copying to tags so it doesn't linger in memory.
+	if cfg.Certs.BuildID != "" {
+		tags["build_id"] = cfg.Certs.BuildID
+		cfg.Certs.BuildID = ""
+	}
+
 	req := &pb.AgentRegistrationRequest{
 		InstallationToken: cfg.Certs.BootstrapToken,
 		AgentId:           cfg.Agent.ID,
@@ -339,252 +343,8 @@ func firstNonLoopbackMAC() string {
 	return ""
 }
 
-// ============================================================================
-// FetchAndDecryptToken — split-key enrollment
-// ============================================================================
-//
-// This function implements the client side of the split-key protocol:
-//
-//  1. Compute machine fingerprint (SHA-256 of hostname|MAC|OS).
-//  2. Build a TLS http.Client that trusts only the embedded/file CA cert.
-//  3. POST /api/v1/agent/key-half with {token_id, machine_fingerprint}.
-//  4. Handle all server responses: 200 OK, 410 Gone, 429 Rate Limited, etc.
-//  5. Decode keyA from embeddedKeyAHex (embedded in binary).
-//  6. Decode keyB from server response.
-//  7. Construct fullKey = append(keyA, keyB...) — must be exactly 32 bytes.
-//  8. Decrypt ciphertext using fullKey via AES-256-GCM.
-//  9. Zero ALL key material before returning (deferred).
-// 10. Write sentinel file on success so the binary does not re-attempt /key-half.
-//
-// Parameters:
-//   - serverBaseURL:    HTTPS base URL, e.g. "https://edr.local:8443"
-//   - tokenID:          UUID string (EmbeddedTokenID)
-//   - embeddedTokenEnc: hex(nonce||ciphertext||tag) (EmbeddedTokenEnc)
-//   - embeddedKeyAHex:  hex(16 bytes) (EmbeddedTokenKeyA)
-//
-// Returns the plaintext enrollment token on success, or an error.
-// The error is always descriptive and suitable for os.Stderr output.
-func FetchAndDecryptToken(serverBaseURL, tokenID, embeddedTokenEnc, embeddedKeyAHex string) (string, error) {
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "unknown"
-	}
-	fingerprint := computeMachineFingerprint(hostname)
+// Note: FetchAndDecryptToken, writeSentinelFile, and aesDecryptToken were
+// removed — they were the client side of the split-key architecture.
+// Legacy aesDecryptToken is kept in cmd/agent/main.go for backward compat
+// with old binaries that still have EmbeddedTokenEnc + EmbeddedTokenKey.
 
-	// ── Step 2: Build TLS http.Client using the trusted CA cert ─────────────
-	// Priority: file CA cert → in-memory/embedded CA cert → system pool (last resort).
-	caPool := x509.NewCertPool()
-	caLoaded := false
-
-	// Try file path first (most common after first-boot CA fetch).
-	const defaultCAPath = `C:\ProgramData\EDR\ca-chain.crt`
-	if data, err := os.ReadFile(defaultCAPath); err == nil {
-		if caPool.AppendCertsFromPEM(data) {
-			caLoaded = true
-		}
-	}
-
-	// Fallback: embedded CA (baked into binary via dashboard build).
-	if !caLoaded {
-		if cfg, cfgErr := config.LoadFromRegistry(); cfgErr == nil && cfg != nil && len(cfg.Certs.CACertPEM) > 0 {
-			if caPool.AppendCertsFromPEM(cfg.Certs.CACertPEM) {
-				caLoaded = true
-			}
-		}
-	}
-
-	var tlsConf *tls.Config
-	if caLoaded {
-		tlsConf = &tls.Config{
-			RootCAs:    caPool,
-			MinVersion: tls.VersionTLS12,
-		}
-	} else {
-		// No CA available — use system trust store.
-		// This can happen on a fresh machine before the CA file is written.
-		tlsConf = &tls.Config{MinVersion: tls.VersionTLS12}
-	}
-
-	transport := &http.Transport{TLSClientConfig: tlsConf}
-	httpClient := &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
-	}
-
-	// ── Step 3: POST /api/v1/agent/key-half ──────────────────────────────────
-	reqBody, err := json.Marshal(map[string]string{
-		"token_id":            tokenID,
-		"machine_fingerprint": fingerprint,
-	})
-	if err != nil {
-		return "", fmt.Errorf("marshal key-half request: %w", err)
-	}
-
-	url := strings.TrimRight(serverBaseURL, "/") + "/api/v1/agent/key-half"
-	resp, err := httpClient.Post(url, "application/json", strings.NewReader(string(reqBody)))
-	if err != nil {
-		return "", fmt.Errorf("POST %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	// ── Step 4: Handle responses ──────────────────────────────────────────────
-	bodyBytes, _ := io.ReadAll(resp.Body)
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		// Proceed to key reconstruction below.
-	case http.StatusGone: // 410
-		return "", fmt.Errorf(
-			"token already consumed: this binary has already enrolled on another machine " +
-				"(server returned 410 Gone) — generate a new agent build from the dashboard")
-	case http.StatusTooManyRequests: // 429
-		return "", fmt.Errorf(
-			"rate limited by server (429 Too Many Requests) — wait 1 minute before retrying")
-	case http.StatusNotFound: // 404
-		return "", fmt.Errorf(
-			"token not found on server (404) — the token may have been deleted or the token_id is invalid")
-	default:
-		snippet := string(bodyBytes)
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		return "", fmt.Errorf(
-			"unexpected server response %d from /key-half: %s", resp.StatusCode, snippet)
-	}
-
-	// Parse 200 response: {"key_b": "<hex>"}
-	var respBody struct {
-		KeyB string `json:"key_b"`
-	}
-	if err := json.Unmarshal(bodyBytes, &respBody); err != nil {
-		return "", fmt.Errorf("parse key-half response: %w", err)
-	}
-	if respBody.KeyB == "" {
-		return "", fmt.Errorf("server returned empty key_b in /key-half response")
-	}
-
-	// ── Steps 5-9: Reconstruct fullKey and decrypt ────────────────────────────
-	// ALL key material is zeroed before return via defer — even if decryption panics.
-	keyA, err := hex.DecodeString(embeddedKeyAHex)
-	if err != nil {
-		return "", fmt.Errorf("decode embedded key_a: %w", err)
-	}
-	defer func() {
-		for i := range keyA {
-			keyA[i] = 0
-		}
-	}()
-
-	keyB, err := hex.DecodeString(respBody.KeyB)
-	if err != nil {
-		return "", fmt.Errorf("decode key_b from server: %w", err)
-	}
-	defer func() {
-		for i := range keyB {
-			keyB[i] = 0
-		}
-	}()
-
-	// Reconstruct fullKey = keyA || keyB (must be exactly 32 bytes).
-	if len(keyA) != 16 || len(keyB) != 16 {
-		return "", fmt.Errorf("key halves have wrong length: keyA=%d keyB=%d (expected 16 each)",
-			len(keyA), len(keyB))
-	}
-	fullKey := make([]byte, 32)
-	copy(fullKey[:16], keyA)
-	copy(fullKey[16:], keyB)
-	defer func() {
-		for i := range fullKey {
-			fullKey[i] = 0
-		}
-	}()
-
-	// Decrypt using fullKey. aesDecryptToken expects a hex-encoded key.
-	fullKeyHex := hex.EncodeToString(fullKey)
-	defer func() {
-		// Zero the hex string's backing array too (best-effort).
-		bs := []byte(fullKeyHex)
-		for i := range bs {
-			bs[i] = 0
-		}
-	}()
-
-	plaintext, err := aesDecryptToken(embeddedTokenEnc, fullKeyHex)
-	if err != nil {
-		return "", fmt.Errorf("AES-GCM decrypt with reconstructed key: %w", err)
-	}
-
-	// ── Step 10: Write sentinel file ──────────────────────────────────────────
-	// This prevents the agent from re-attempting /key-half on subsequent runs.
-	// The sentinel is written AFTER successful decryption (key_b is gone from DB).
-	if wErr := writeSentinelFile(tokenID, fingerprint); wErr != nil {
-		// Non-fatal: log and continue. The binary can still enroll; the sentinel
-		// is a convenience guard, not a security control.
-		fmt.Fprintf(os.Stderr, "[WARN] Failed to write enrollment sentinel: %v\n", wErr)
-	}
-
-	return plaintext, nil
-}
-
-// writeSentinelFile writes the enrollment sentinel file.
-// Path: %ProgramData%\EDRAgent\.token_consumed
-// Content: token_id=<uuid>\ntimestamp=<unix-seconds>\nmachine=<fingerprint>\n
-// Permissions: 0600 (owner-only).
-func writeSentinelFile(tokenID, machineFingerprint string) error {
-	pd := os.Getenv("ProgramData")
-	if pd == "" {
-		pd = `C:\ProgramData`
-	}
-	dir := pd + `\EDRAgent`
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("writeSentinelFile: mkdir: %w", err)
-	}
-	path := dir + `\.token_consumed`
-	content := fmt.Sprintf(
-		"token_id=%s\ntimestamp=%d\nmachine=%s\n",
-		tokenID,
-		time.Now().Unix(),
-		machineFingerprint,
-	)
-	return os.WriteFile(path, []byte(content), 0600)
-}
-
-// aesDecryptToken decrypts AES-256-GCM-encrypted data.
-// ciphertextHex: hex(nonce || ciphertext || tag)
-// fullKeyHex: hex(32 bytes)
-// Key bytes are zeroed immediately after use.
-func aesDecryptToken(ciphertextHex, fullKeyHex string) (string, error) {
-	keyBytes, err := hex.DecodeString(fullKeyHex)
-	if err != nil {
-		return "", fmt.Errorf("decode key hex: %w", err)
-	}
-	defer func() {
-		for i := range keyBytes {
-			keyBytes[i] = 0
-		}
-	}()
-
-	ciphertext, err := hex.DecodeString(ciphertextHex)
-	if err != nil {
-		return "", fmt.Errorf("decode ciphertext hex: %w", err)
-	}
-
-	block, err := aes.NewCipher(keyBytes)
-	if err != nil {
-		return "", fmt.Errorf("new AES cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("new GCM: %w", err)
-	}
-	if len(ciphertext) < gcm.NonceSize() {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	nonce := ciphertext[:gcm.NonceSize()]
-	data := ciphertext[gcm.NonceSize():]
-	plaintext, err := gcm.Open(nil, nonce, data, nil)
-	if err != nil {
-		return "", fmt.Errorf("AES-GCM decrypt: %w", err)
-	}
-	return string(plaintext), nil
-}
