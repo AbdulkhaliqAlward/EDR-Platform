@@ -10,6 +10,7 @@ import (
 
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/pkg/models"
+	"github.com/edr-platform/connection-manager/pkg/security"
 )
 
 // --------------------------------------------------------------------------
@@ -32,6 +33,8 @@ type EnrollmentTokenResponse struct {
 	ExpiresAt   *time.Time `json:"expires_at"`
 	UseCount    int        `json:"use_count"`
 	MaxUses     *int       `json:"max_uses"`
+	// BuildCount is 0 (not yet built into a binary) or 1 (binary already produced).
+	BuildCount  int        `json:"build_count"`
 	CreatedBy   string     `json:"created_by"`
 	CreatedAt   time.Time  `json:"created_at"`
 	RevokedAt   *time.Time `json:"revoked_at"`
@@ -46,6 +49,7 @@ func enrollmentTokenToResponse(t *models.EnrollmentToken) EnrollmentTokenRespons
 		ExpiresAt:   t.ExpiresAt,
 		UseCount:    t.UseCount,
 		MaxUses:     t.MaxUses,
+		BuildCount:  t.BuildCount,
 		CreatedBy:   t.CreatedBy,
 		CreatedAt:   t.CreatedAt,
 		RevokedAt:   t.RevokedAt,
@@ -112,13 +116,22 @@ func (h *Handlers) GenerateEnrollmentToken(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
 	}
 
+	// Gap 2: extract operator identity from JWT claims instead of hardcoding.
+	createdBy := "system"
+	if u := getCurrentUser(c); u != nil {
+		createdBy = u.Username
+	}
+
 	token := &models.EnrollmentToken{
 		ID:          uuid.New(),
 		Token:       tokenStr,
+		// Gap 1: store SHA-256 hash for DB lookups; raw value stays in Token
+		// for the API response (enrollmentTokenToResponse reads token.Token).
+		TokenHash:   security.HashToken(tokenStr),
 		Description: req.Description,
 		IsActive:    true,
 		MaxUses:     req.MaxUses,
-		CreatedBy:   "admin", // TODO: extract from JWT claims
+		CreatedBy:   createdBy,
 	}
 
 	if req.ExpiresInH != nil && *req.ExpiresInH > 0 {
@@ -131,6 +144,8 @@ func (h *Handlers) GenerateEnrollmentToken(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create token"})
 	}
 
+	// token.Token still holds the raw value — enrollmentTokenToResponse returns
+	// it as-is so the dashboard can display and copy the token once on creation.
 	return c.JSON(http.StatusCreated, enrollmentTokenToResponse(token))
 }
 

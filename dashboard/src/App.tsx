@@ -24,6 +24,7 @@ const EndpointRisk = lazy(() => import('./pages/EndpointRisk'));
 const Threats = lazy(() => import('./pages/Threats'));
 const AuditLogs = lazy(() => import('./pages/AuditLogs'));
 const EnrollmentTokens = lazy(() => import('./pages/EnrollmentTokens'));
+const SecurityEvents = lazy(() => import('./pages/SecurityEvents'));
 const ActionCenter = lazy(() => import('./pages/ActionCenter'));
 const AgentDeployment = lazy(() => import('./pages/AgentDeployment'));
 const SystemLayout = lazy(() => import('./pages/SystemLayout'));
@@ -331,6 +332,13 @@ function AppRoutes() {
             <Route path="/security/tokens" element={
               <ProtectedRoute roles={['admin', 'security', 'analyst', 'operations', 'viewer']}>
                 <EnrollmentTokens />
+              </ProtectedRoute>
+            } />
+
+            {/* Security Events: audit:read → admin, security */}
+            <Route path="/security/events" element={
+              <ProtectedRoute roles={['admin', 'security']}>
+                <SecurityEvents />
               </ProtectedRoute>
             } />
 

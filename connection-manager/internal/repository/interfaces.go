@@ -107,11 +107,26 @@ type CertificateRepository interface {
 	// MarkSuperseded marks a certificate as superseded by a new one.
 	MarkSuperseded(ctx context.Context, id uuid.UUID) error
 
+	// SupersedeAllForAgent marks all active certs for an agent as "superseded".
+	SupersedeAllForAgent(ctx context.Context, agentID uuid.UUID) error
+
 	// GetExpiring retrieves certificates expiring within the given duration.
 	GetExpiring(ctx context.Context, within time.Duration) ([]*models.Certificate, error)
 
 	// List retrieves certificates with optional filters.
 	List(ctx context.Context, agentID uuid.UUID, status *string) ([]*models.Certificate, error)
+
+	// UpdateLastSeen updates last_seen_at for a certificate identified by fingerprint.
+	UpdateLastSeen(ctx context.Context, fingerprint string) error
+
+	// AddToCRL inserts a serial number into the certificate_revocation_list table.
+	AddToCRL(ctx context.Context, serialNumber, fingerprint, reason string) error
+
+	// GetCRLFingerprints returns all revoked fingerprints from the CRL table.
+	GetCRLFingerprints(ctx context.Context) ([]string, error)
+
+	// GetStale returns active certs whose last_seen_at is older than the given duration.
+	GetStale(ctx context.Context, threshold time.Duration) ([]*models.Certificate, error)
 }
 
 // CSRRepository defines the interface for CSR data access.
@@ -164,8 +179,31 @@ type EnrollmentTokenRepository interface {
 	// GetByID retrieves an enrollment token by its ID.
 	GetByID(ctx context.Context, id uuid.UUID) (*models.EnrollmentToken, error)
 
-	// GetByToken retrieves an enrollment token by its token string.
+	// GetByToken retrieves an enrollment token by its raw token string.
+	// Deprecated for security-sensitive lookups: prefer GetByTokenHash.
 	GetByToken(ctx context.Context, token string) (*models.EnrollmentToken, error)
+
+	// GetByTokenHash retrieves an enrollment token by its SHA-256 hex hash.
+	// The caller must hash the raw incoming token with security.HashToken()
+	// before passing it here.  This is the correct lookup path for agent
+	// registration — the raw token never travels to the DB layer.
+	GetByTokenHash(ctx context.Context, hash string) (*models.EnrollmentToken, error)
+
+	// IncrementBuildCount atomically increments build_count from 0 to 1.
+	// Returns ErrTokenAlreadyBuilt if build_count is already >= 1 (CAS: WHERE build_count = 0).
+	// One token is allowed to produce exactly one agent binary — no exceptions.
+	IncrementBuildCount(ctx context.Context, tokenID uuid.UUID) error
+
+	// StoreKeyB persists the hex-encoded second key half (key_b) onto the token row.
+	// Called by agent-builder immediately after split-key generation.
+	// Returns ErrNotFound if the tokenID does not exist.
+	StoreKeyB(ctx context.Context, tokenID uuid.UUID, keyB string) error
+
+	// ServeKeyB atomically serves and NULLs the key_b value in one CTE.
+	// Returns the key_b string on success, ErrKeyBAlreadyServed if the
+	// CAS predicate fails (already served / revoked / expired / not found).
+	// This MUST be a single atomic SQL statement — no SELECT then UPDATE.
+	ServeKeyB(ctx context.Context, tokenID uuid.UUID) (string, error)
 
 	// List retrieves all enrollment tokens ordered by creation date.
 	List(ctx context.Context) ([]*models.EnrollmentToken, error)

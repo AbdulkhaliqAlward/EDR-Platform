@@ -44,6 +44,7 @@ func (h *Handlers) Login(c echo.Context) error {
 				MarkFailed(err.Error())
 			go h.auditRepo.Create(c.Request().Context(), audit) //nolint:errcheck
 		}
+		h.auditLogger.LoginFailed(req.Username, ip, ua, err.Error())
 
 		return errorResponse(c, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Invalid username or password")
 	}
@@ -141,6 +142,9 @@ func (h *Handlers) issueSessionTokens(c echo.Context, loginResp *service.LoginRe
 		if listErr != nil {
 			h.logger.WithError(listErr).Warn("Failed to list previous sessions")
 		}
+		if len(oldSessions) > 0 {
+			h.auditLogger.SessionSuperseded(loginResp.User.ID, loginResp.User.Username, ip, ua)
+		}
 		for _, old := range oldSessions {
 			if h.redis != nil && old.AccessJTI != "" {
 				if blErr := h.redis.BlacklistToken(ctx, old.AccessJTI, time.Now().Add(1*time.Hour), "superseded"); blErr != nil {
@@ -178,6 +182,7 @@ func (h *Handlers) issueSessionTokens(c echo.Context, loginResp *service.LoginRe
 			WithContext(ip, ua)
 		go h.auditRepo.Create(ctx, audit) //nolint:errcheck
 	}
+	h.auditLogger.LoginSuccess(loginResp.User.ID, loginResp.User.Username, ip, ua)
 
 	return c.JSON(http.StatusOK, LoginResponse{
 		AccessToken:  accessToken,
@@ -251,6 +256,11 @@ func (h *Handlers) refreshWithSession(c echo.Context, rawRefreshToken string) er
 			if revokeErr := h.sessionRepo.RevokeAllForUser(ctx, session.UserID, "security"); revokeErr != nil {
 				h.logger.WithError(revokeErr).Error("Failed to revoke sessions on reuse detection")
 			}
+			ip, ua := auditContext(c)
+			h.auditLogger.TokenReuseDetected(&session.UserID, session.UserID.String(), ip, ua)
+		} else {
+			ip, ua := auditContext(c)
+			h.auditLogger.TokenReuseDetected(nil, "unknown", ip, ua)
 		}
 		return errorResponse(c, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Invalid or expired refresh token")
 	}
@@ -305,6 +315,10 @@ func (h *Handlers) refreshWithSession(c echo.Context, rawRefreshToken string) er
 		h.logger.WithError(err).Error("Failed to rotate session")
 		return errorResponse(c, http.StatusInternalServerError, "SESSION_ERROR", "Failed to rotate session")
 	}
+	{
+		ip, ua := auditContext(c)
+		h.auditLogger.TokenRefreshed(session.UserID, username, ip, ua)
+	}
 
 	return c.JSON(http.StatusOK, RefreshTokenResponse{
 		AccessToken:  newAccessToken,
@@ -352,7 +366,7 @@ func (h *Handlers) Logout(c echo.Context) error {
 	}
 
 	// Audit: logout
-	if h.auditRepo != nil {
+	{
 		user := getCurrentUser(c)
 		userID := uuid.Nil
 		username := "unknown"
@@ -362,9 +376,12 @@ func (h *Handlers) Logout(c echo.Context) error {
 				userID = uid
 			}
 		}
-		audit := models.NewAuditLog(userID, username, models.AuditActionUserLogout, "user", userID).
-			WithContext(ip, ua)
-		go h.auditRepo.Create(ctx, audit) //nolint:errcheck
+		if h.auditRepo != nil {
+			audit := models.NewAuditLog(userID, username, models.AuditActionUserLogout, "user", userID).
+				WithContext(ip, ua)
+			go h.auditRepo.Create(ctx, audit) //nolint:errcheck
+		}
+		h.auditLogger.Logout(userID, username, ip, ua)
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{

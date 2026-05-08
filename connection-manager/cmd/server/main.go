@@ -31,6 +31,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/api"
+	"github.com/edr-platform/connection-manager/pkg/audit"
 	"github.com/edr-platform/connection-manager/pkg/handlers"
 	"github.com/edr-platform/connection-manager/pkg/kafka"
 	"github.com/edr-platform/connection-manager/pkg/metrics"
@@ -268,6 +269,8 @@ func main() {
 	// can use it for durable event storage when Kafka is unavailable.
 	ctx := context.Background()
 	var agentSvc service.AgentService
+	var certSvc service.CertificateService    // hoisted for renewal worker access
+	var crlCache *repository.CRLCache         // hoisted for interceptor injection
 	var authSvc service.AuthService
 	var commandApprovalSvc service.CommandApprovalService
 	var enrollmentTokenRepo repository.EnrollmentTokenRepository
@@ -282,6 +285,7 @@ func main() {
 	var executionRepo repository.PlaybookExecutionRepository
 	var automationMetricsRepo repository.AutomationMetricsRepository
 	var agentPackageRepo repository.AgentPackageRepository
+	var auditLogger *audit.Logger               // non-blocking security event logger
 	var dbPool *database.PostgresPool // scoped outside if-block for fallback access
 
 	dbPoolInst, dbErr := database.NewPostgresPool(ctx, &database.PostgresConfig{
@@ -330,8 +334,14 @@ func main() {
 		executionRepo = repository.NewPostgresPlaybookExecutionRepository(pool)
 		automationMetricsRepo = repository.NewPostgresAutomationMetricsRepository(pool)
 
+		// Non-blocking security audit logger — persists to security_events table.
+		auditLogger = audit.New(pool, logger)
+		logger.Info("[Audit] Security event logger started")
+
+		// CRL cache: in-memory, DB-backed, never hits DB on hot path.
+		crlCache = repository.NewCRLCache(certRepo, logger)
+
 		// Certificate service: prefer KeyStore (in-memory CA key) over disk paths.
-		var certSvc service.CertificateService
 		if keyStore != nil {
 			certSvc = service.NewCertificateServiceWithKeys(
 				certRepo, agentRepo, auditRepo, redisClient, logger,
@@ -344,6 +354,10 @@ func main() {
 				certRepo, agentRepo, auditRepo, redisClient, logger,
 				caCertPath, caKeyPath,
 			)
+		}
+		// Inject audit logger into cert service (type-assert to concrete impl).
+		if impl, ok := certSvc.(interface{ SetAuditLogger(*audit.Logger) }); ok {
+			impl.SetAuditLogger(auditLogger)
 		}
 
 		// Create agent service (with cert service for auto-issuance on Register)
@@ -563,6 +577,15 @@ func main() {
 		logger.Info("Audit log querying enabled")
 	}
 
+	// Wire security event logger + query repo into REST handlers.
+	if auditLogger != nil {
+		apiHandlers.SetAuditLogger(auditLogger)
+		if dbPool != nil {
+			apiHandlers.SetSecurityEventRepo(audit.NewRepository(dbPool.Pool()))
+		}
+		logger.Info("[Audit] Security event endpoints enabled (/api/v1/security/events)")
+	}
+
 	// Wire AlertRepository into REST handlers for Alert Stats and querying.
 	if alertRepo != nil {
 		apiHandlers.SetAlertRepo(alertRepo)
@@ -644,6 +667,25 @@ func main() {
 		logger.Info("Expired agent package sweeper started (interval: 1m)")
 	}
 
+	// Wire CRL cache into gRPC interceptor (DB-backed, cache-only hot path).
+	if crlCache != nil && grpcServer.GetInterceptor() != nil {
+		grpcServer.GetInterceptor().SetCRLCache(crlCache)
+		defer crlCache.Stop()
+		logger.Info("[CRL] DB-backed in-memory CRL cache wired into gRPC interceptor")
+	}
+	// Wire audit logger into gRPC interceptor for CRL rejection events.
+	if auditLogger != nil && grpcServer.GetInterceptor() != nil {
+		grpcServer.GetInterceptor().SetAuditLogger(auditLogger)
+	}
+
+	// Start certificate auto-renewal worker (every 6h, 30-day look-ahead).
+	if certSvc != nil {
+		renewalCtx, renewalCancel := context.WithCancel(context.Background())
+		defer renewalCancel()
+		go certSvc.StartRenewalWorker(renewalCtx, 30)
+		logger.Info("[CertRenewal] Auto-renewal worker started (6h interval, 30-day look-ahead)")
+	}
+
 	// Start gRPC server in goroutine
 	go func() {
 		if err := grpcServer.Start(); err != nil {
@@ -670,6 +712,12 @@ func main() {
 	// Shutdown gRPC server
 	if err := grpcServer.Shutdown(shutdownCtx); err != nil {
 		logger.Warnf("gRPC server shutdown error: %v", err)
+	}
+
+	// Flush the security audit logger — drain any buffered events.
+	if auditLogger != nil {
+		auditLogger.Shutdown(shutdownCtx)
+		logger.Info("[Audit] Security event logger flushed")
 	}
 
 	logger.Info("Server stopped")

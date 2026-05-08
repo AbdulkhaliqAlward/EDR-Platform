@@ -12,6 +12,8 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -55,7 +57,23 @@ var (
 	// NOTE: the agent no longer carries any uninstall secret. Uninstall is a
 	// server-authorised C2 action (UNINSTALL_AGENT), so there is nothing to
 	// embed in the binary that could be extracted and replayed by an attacker.
-	EmbeddedTokenObf      = "" // XOR-obfuscated enrollment token (for zero-touch install ONLY)
+
+	// SPLIT-KEY ARCHITECTURE (current, preferred):
+	//   EmbeddedTokenEnc  — AES-256-GCM ciphertext (hex): hex(nonce||ciphertext||tag)
+	//   EmbeddedTokenKeyA — first 16 bytes of AES key (hex). key_b lives in DB.
+	//   EmbeddedTokenID   — UUID of the enrollment token, used to fetch key_b
+	//                        from POST /api/v1/agent/key-half at enrollment time.
+	//   fullKey = concat(keyA, keyB) — 32 bytes — fed into aesDecryptToken.
+	EmbeddedTokenEnc  = ""
+	EmbeddedTokenKeyA = "" // 16-byte key half A — in binary
+	EmbeddedTokenID   = "" // token UUID for /key-half fetch
+
+	// LEGACY SINGLE-KEY (deprecated, kept for binaries built before split-key):
+	//   EmbeddedTokenKey — full 32-byte AES key. Both ciphertext + key in binary.
+	EmbeddedTokenKey = ""
+
+	// LEGACY XOR (deprecated, kept for oldest binaries):
+	EmbeddedTokenObf      = ""
 	EmbeddedInstallSysmon = "" // "true" when dashboard build enabled Sysmon bootstrap
 )
 
@@ -396,19 +414,60 @@ func runInstall(
 		runUpdate(logger, serverIP, serverDomain, serverPort, token, configPath)
 	}
 
-	// ── Resolve parameters: CLI > Embedded > empty ───────────────────────────
-	// Token resolution (zero-touch support):
-	//   1. CLI -token flag (highest priority)
-	//   2. XOR-obfuscated token in binary (decoded at runtime, then zeroed)
-	//   3. Empty → installation fails (token is REQUIRED)
+	// ── Sentinel file: detect already-enrolled binaries ─────────────────────
+	// Path: %ProgramData%\EDRAgent\.token_consumed
+	// Written by enroll.go after RegisterAgent succeeds on the split-key path.
+	// If it exists and cert is present: skip token flow (already enrolled).
+	// If it exists but cert is absent: inconsistent state — key_b is gone, exit(3).
+	sentinelPath := sentinelFilePath()
+	if _, statErr := os.Stat(sentinelPath); statErr == nil {
+		// Sentinel exists. Check whether enrollment already completed.
+		certExists := certFileExists()
+		if certExists {
+			// Normal re-run of an already-enrolled binary — skip token flow.
+			fmt.Println("  Sentinel file found + cert present: binary already enrolled, skipping token fetch.")
+			goto afterTokenResolution
+		}
+		// Inconsistent state: sentinel present but no cert. key_b is gone from
+		// the server — there is no recovery path. The binary is single-use.
+		fmt.Fprintln(os.Stderr, "[FATAL] Sentinel file exists but agent cert is missing.")
+		fmt.Fprintln(os.Stderr, "  key_b has already been consumed from the server.")
+		fmt.Fprintln(os.Stderr, "  This binary cannot re-enroll. Generate a new build from the dashboard.")
+		os.Exit(3)
+	}
+
+	// ── Token resolution: 5-priority chain ───────────────────────────────────
+	// Priority:
+	//   2. EmbeddedTokenKeyA + EmbeddedTokenID  → split-key fetch from server
+	//   3. EmbeddedTokenKey                     → legacy single AES (key in binary)
+	//   4. EmbeddedTokenObf                     → legacy XOR (oldest binaries)
+	//   5. CLI -token flag                       → manual install
 	//
-	// The binary NEVER contains any uninstall secret. Uninstall is a server-
-	// authorised C2 action, so the only embedded value is:
-	//   - EmbeddedTokenObf  (XOR-obfuscated enrollment token for zero-touch install)
-	if token == "" && EmbeddedTokenObf != "" {
-		// Decode the obfuscated token for enrollment
+	if token == "" && EmbeddedTokenKeyA != "" && EmbeddedTokenID != "" {
+		// SPLIT-KEY PATH: fetch key_b from server, reconstruct fullKey, decrypt.
+		// The server NULLs key_b immediately — only one successful fetch per token.
+		fmt.Println("  Using split-key enrollment (fetching key_b from server)...")
+		baseURL := resolveHTTPSBaseURL(serverIP, serverDomain, serverPort)
+		decrypted, err := enrollment.FetchAndDecryptToken(baseURL, EmbeddedTokenID, EmbeddedTokenEnc, EmbeddedTokenKeyA)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[FATAL] Split-key token fetch failed: %v\n", err)
+			os.Exit(1)
+		}
+		token = decrypted
+		fmt.Println("  Split-key enrollment token decrypted. ****" + token[max(0, len(token)-4):])
+	} else if token == "" && EmbeddedTokenEnc != "" && EmbeddedTokenKey != "" {
+		// LEGACY SINGLE-KEY PATH: both key and ciphertext embedded in binary.
+		decrypted, err := aesDecryptToken(EmbeddedTokenEnc, EmbeddedTokenKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[FATAL] Failed to decrypt embedded token: %v\n", err)
+			os.Exit(1)
+		}
+		token = decrypted
+		fmt.Println("  Using dashboard-configured token (AES-256-GCM legacy): ****" + token[max(0, len(token)-4):])
+	} else if token == "" && EmbeddedTokenObf != "" {
+		// LEGACY XOR PATH: backward-compatible with oldest builds.
 		token = xorDeobfuscate(EmbeddedTokenObf)
-		fmt.Println("  Using dashboard-configured token: ****" + token[max(0, len(token)-4):])
+		fmt.Println("  Using dashboard-configured token (legacy XOR): ****" + token[max(0, len(token)-4):])
 	} else if token != "" {
 		mask := token
 		if len(mask) > 4 {
@@ -416,6 +475,8 @@ func runInstall(
 		}
 		fmt.Printf("  Using CLI token: %s\n", mask)
 	}
+afterTokenResolution:
+
 
 	serverIP = resolveInstallParam(serverIP, EmbeddedServerIP, "server-ip")
 	serverDomain = resolveInstallParam(serverDomain, EmbeddedServerDomain, "server-domain")
@@ -614,8 +675,13 @@ func runUpdate(
 	}
 
 	// Resolve params (CLI overrides are optional; empty means keep current)
-	if token == "" && EmbeddedTokenObf != "" {
-		token = xorDeobfuscate(EmbeddedTokenObf)
+	if token == "" && EmbeddedTokenEnc != "" && EmbeddedTokenKey != "" {
+		decrypted, err := aesDecryptToken(EmbeddedTokenEnc, EmbeddedTokenKey)
+		if err == nil {
+			token = decrypted
+		}
+	} else if token == "" && EmbeddedTokenObf != "" {
+		token = xorDeobfuscate(EmbeddedTokenObf) // legacy backward compat
 	}
 	serverIP = resolveInstallParam(serverIP, EmbeddedServerIP, "server-ip")
 	serverDomain = resolveInstallParam(serverDomain, EmbeddedServerDomain, "server-domain")
@@ -863,12 +929,8 @@ func runStandalone(cfg *config.Config, logger *logging.Logger, configPath string
 }
 
 // xorDeobfuscate decodes the XOR-obfuscated enrollment token.
-// The obfuscated value is hex-encoded; this function decodes hex, then XOR's
-// with the same key used by the agent-builder to recover the plaintext.
-//
-// The plaintext should be used immediately for the enrollment CSR call and
-// then allowed to go out of scope (eligible for GC) — it is never stored
-// on disk, in config files, or in persistent memory.
+// DEPRECATED: kept for backward compatibility with binaries produced before the
+// AES-256-GCM upgrade. New binaries use aesDecryptToken.
 func xorDeobfuscate(obfuscatedHex string) string {
 	data, err := hex.DecodeString(obfuscatedHex)
 	if err != nil {
@@ -880,4 +942,129 @@ func xorDeobfuscate(obfuscatedHex string) string {
 		data[i] ^= key[i%len(key)]
 	}
 	return string(data)
+}
+
+// aesDecryptToken decrypts an AES-256-GCM-encrypted enrollment token.
+//
+// ciphertextHex: hex( 12-byte-nonce || ciphertext || 16-byte-GCM-tag )
+// keyHex:        hex( 32-byte AES-256 key )
+//
+// The key bytes are zeroed from memory immediately after decryption —
+// the caller should also zero the returned string bytes after use.
+func aesDecryptToken(ciphertextHex, keyHex string) (string, error) {
+	keyBytes, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return "", fmt.Errorf("decode key hex: %w", err)
+	}
+	// Zero key bytes from memory after use regardless of success or failure.
+	defer func() {
+		for i := range keyBytes {
+			keyBytes[i] = 0
+		}
+	}()
+
+	ciphertext, err := hex.DecodeString(ciphertextHex)
+	if err != nil {
+		return "", fmt.Errorf("decode ciphertext hex: %w", err)
+	}
+
+	block, err := aes.NewCipher(keyBytes)
+	if err != nil {
+		return "", fmt.Errorf("new AES cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("new GCM: %w", err)
+	}
+	if len(ciphertext) < gcm.NonceSize() {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+
+	nonce := ciphertext[:gcm.NonceSize()]
+	data := ciphertext[gcm.NonceSize():]
+
+	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	if err != nil {
+		return "", fmt.Errorf("AES-GCM decrypt: %w", err)
+	}
+	return string(plaintext), nil
+}
+
+// ============================================================================
+// Sentinel file — split-key enrollment state tracking
+// ============================================================================
+//
+// Path: %ProgramData%\EDRAgent\.token_consumed
+//
+// Written by WriteSentinelFile after a split-key enrollment succeeds.
+// On next run, main.go reads this file before attempting the /key-half fetch —
+// if the sentinel exists AND the cert is present the token flow is skipped.
+//
+// File format (plain text, UTF-8):
+//   token_id=<uuid>
+//   timestamp=<unix-seconds>
+//   machine=<64-char-hex-fingerprint>
+
+// sentinelFilePath returns the canonical path for the enrollment sentinel file.
+func sentinelFilePath() string {
+	pd := os.Getenv("ProgramData")
+	if pd == "" {
+		pd = `C:\ProgramData`
+	}
+	return filepath.Join(pd, "EDRAgent", ".token_consumed")
+}
+
+// certFileExists reports whether the default agent client certificate exists.
+// Used by the sentinel check: if the sentinel is present but the cert is gone,
+// the binary is in an irrecoverable state.
+func certFileExists() bool {
+	_, err := os.Stat(`C:\ProgramData\EDR\client.crt`)
+	return err == nil
+}
+
+// WriteSentinelFile writes the enrollment sentinel file after a successful
+// split-key registration. This is called by enrollment/enroll.go after
+// RegisterAgent returns APPROVED on the split-key path.
+//
+// File permissions: 0600 (SYSTEM-only on Windows via the installer hardening step).
+func WriteSentinelFile(tokenID, machineFingerprint string) error {
+	dir := filepath.Dir(sentinelFilePath())
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("WriteSentinelFile: mkdir %s: %w", dir, err)
+	}
+	content := fmt.Sprintf(
+		"token_id=%s\ntimestamp=%d\nmachine=%s\n",
+		tokenID,
+		time.Now().Unix(),
+		machineFingerprint,
+	)
+	return os.WriteFile(sentinelFilePath(), []byte(content), 0600)
+}
+
+// resolveHTTPSBaseURL constructs the HTTPS base URL for the connection-manager
+// REST API from the resolved server parameters.
+//
+// The HTTP port is derived from the gRPC port via a well-known mapping:
+//   gRPC :50051 → HTTP :8443 (production default)
+//   gRPC :47051 → HTTP :8443
+//   fallback     → HTTP :8443
+//
+// If a different HTTP port is needed, set AGENT_HTTP_PORT in the environment.
+func resolveHTTPSBaseURL(serverIP, serverDomain, _ string) string {
+	if override := os.Getenv("AGENT_HTTP_PORT"); override != "" {
+		host := serverDomain
+		if host == "" {
+			host = serverIP
+		}
+		return "https://" + host + ":" + override
+	}
+	host := serverDomain
+	if host == "" {
+		host = serverIP
+	}
+	if host == "" {
+		host = "localhost"
+	}
+	// Connection-manager REST API always listens on :8443 in production.
+	return "https://" + host + ":8443"
 }

@@ -528,6 +528,11 @@ export const PlatformAppShell = memo(function PlatformAppShell({ children }: { c
                                     Enrollment Tokens
                                 </DropdownLink>
                             )}
+                            {authApi.canViewAuditLogs() && (
+                                <DropdownLink to="/security/events" onNavigate={() => setOpenId(null)}>
+                                    Security Events
+                                </DropdownLink>
+                            )}
                         </NavDropdown>
 
                         <div className="w-px h-4 bg-[var(--xc-nav-border)] mx-1 shrink-0" />

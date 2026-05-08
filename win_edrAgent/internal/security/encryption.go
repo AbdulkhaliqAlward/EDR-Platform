@@ -196,3 +196,17 @@ func dpApiUnprotect(ciphertext []byte) ([]byte, error) {
 	defer procLocalFree.Call(uintptr(unsafe.Pointer(out.pbData)))
 	return out.bytes(), nil
 }
+
+// ProtectPrivateKey encrypts raw PEM key bytes using DPAPI with
+// CRYPTPROTECT_LOCAL_MACHINE scope (machine-bound, any SYSTEM process
+// on this machine can decrypt). Returns the encrypted blob.
+func ProtectPrivateKey(keyPEM []byte) ([]byte, error) {
+	return dpApiProtect(keyPEM)
+}
+
+// UnprotectPrivateKey decrypts a DPAPI blob produced by ProtectPrivateKey
+// back to the original plaintext PEM bytes.
+func UnprotectPrivateKey(encryptedBlob []byte) ([]byte, error) {
+	return dpApiUnprotect(encryptedBlob)
+}
+

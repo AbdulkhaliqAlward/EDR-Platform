@@ -1,12 +1,14 @@
 import { useNavigate, Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
-    AlertTriangle, Activity, Monitor, Shield, Cpu, BarChart3
+    AlertTriangle, Activity, Monitor, Shield, Cpu, BarChart3, ShieldAlert
 } from 'lucide-react';
 import { SkeletonKPICards } from '../components';
 import StatCard from '../components/StatCard';
 import ThreatMeter from '../components/ThreatMeter';
 import InsightHero from '../components/InsightHero';
 import { useDashboard } from '../hooks/useDashboard';
+import { securityEventsApi, authApi } from '../api/client';
 import {
     OSDonut,
     MitreQuickStats,
@@ -16,6 +18,31 @@ import {
     EndpointsPulse,
     SystemActionLog,
 } from '../components/dashboard';
+
+function SecurityEventsWidget() {
+    const navigate = useNavigate();
+    const { data: summaryData } = useQuery({
+        queryKey: ['securityEventsSummaryDash'],
+        queryFn: () => securityEventsApi.getSummary(),
+        staleTime: 60_000,
+    });
+    const items = summaryData?.data ?? [];
+    const total = items.reduce((acc, i) => acc + i.count, 0);
+    const critical = items.filter(i => i.severity === 'critical').reduce((acc, i) => acc + i.count, 0);
+    const warning = items.filter(i => i.severity === 'warning').reduce((acc, i) => acc + i.count, 0);
+    const info = total - critical - warning;
+
+    return (
+        <StatCard
+            title="Security Events (24h)"
+            value={total}
+            icon={ShieldAlert}
+            color="red"
+            subtext={`${critical} critical · ${warning} warning · ${info} info`}
+            onClick={() => navigate('/security/events')}
+        />
+    );
+}
 
 export default function Dashboard() {
     const navigate = useNavigate();
@@ -96,7 +123,7 @@ export default function Dashboard() {
             />
 
             {/* ── Row 1: KPI Cards ── */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 animate-slide-up-fade">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 animate-slide-up-fade">
                 <StatCard
                     title="Alerts (24h)"
                     value={alertStats?.last_24h || 0}
@@ -130,6 +157,7 @@ export default function Dashboard() {
                     color="cyan"
                     subtext="Average rule confidence"
                 />
+                {authApi.canViewAuditLogs() && <SecurityEventsWidget />}
             </div>
 
             {/* ── Row 2: Threat Meter + MITRE Bar + OS Donut ── */}

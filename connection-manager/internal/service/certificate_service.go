@@ -18,6 +18,7 @@ import (
 
 	"github.com/edr-platform/connection-manager/internal/cache"
 	"github.com/edr-platform/connection-manager/internal/repository"
+	"github.com/edr-platform/connection-manager/pkg/audit"
 	"github.com/edr-platform/connection-manager/pkg/models"
 )
 
@@ -37,6 +38,9 @@ type CertificateService interface {
 
 	// IsRevoked checks if a certificate fingerprint is revoked.
 	IsRevoked(ctx context.Context, fingerprint string) (bool, error)
+
+	// StartRenewalWorker starts a background goroutine that auto-renews expiring certificates.
+	StartRenewalWorker(ctx context.Context, renewBeforeDays int)
 }
 
 // IssuedCertificate contains an issued certificate and metadata.
@@ -51,18 +55,19 @@ type IssuedCertificate struct {
 
 // certServiceImpl implements CertificateService.
 type certServiceImpl struct {
-	certRepo  repository.CertificateRepository
-	agentRepo repository.AgentRepository
-	auditRepo repository.AuditLogRepository
-	redis     *cache.RedisClient
-	logger    *logrus.Logger
+	certRepo    repository.CertificateRepository
+	agentRepo   repository.AgentRepository
+	auditRepo   repository.AuditLogRepository
+	redis       *cache.RedisClient
+	logger      *logrus.Logger
+	auditLogger *audit.Logger // non-blocking security event logger (nil-safe)
 
-	// CA configuration: paths to Root CA cert and private key (for signing agent CSRs)
+	// CA configuration
 	caCertPath string
 	caKeyPath  string
 	caCert     *x509.Certificate
 	caKey      interface{}
-	caCertPEM  []byte // PEM-encoded CA cert to return in IssuedCertificate.CACert
+	caCertPEM  []byte
 	validDays  int
 }
 
@@ -93,6 +98,11 @@ func NewCertificateService(
 		}
 	}
 	return s
+}
+
+// SetAuditLogger wires the non-blocking security event logger into the cert service.
+func (s *certServiceImpl) SetAuditLogger(l *audit.Logger) {
+	s.auditLogger = l
 }
 
 // NewCertificateServiceWithKeys creates a CertificateService using pre-loaded
@@ -262,7 +272,13 @@ func (s *certServiceImpl) Issue(ctx context.Context, agentID uuid.UUID, csrPEM [
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	fingerprint := models.GenerateFingerprint(certDER)
 
-	// 4. Store certificate in database (store PEM for consistency)
+	// 4. Supersede any existing active certificates for this agent
+	if err := s.certRepo.SupersedeAllForAgent(ctx, agentID); err != nil {
+		s.logger.WithError(err).Warn("Failed to supersede old certificates")
+		// Non-fatal: continue with issuance
+	}
+
+	// 5. Store certificate in database (store PEM for consistency)
 	cert := &models.Certificate{
 		ID:              uuid.New(),
 		AgentID:         agentID,
@@ -292,9 +308,10 @@ func (s *certServiceImpl) Issue(ctx context.Context, agentID uuid.UUID, csrPEM [
 	}
 
 	// 6. Audit log
-	audit := models.NewAuditLog(uuid.Nil, "system", models.AuditActionCertIssued, "certificate", cert.ID)
-	audit.WithDetail("agent_id", agentID.String())
-	s.auditRepo.Create(ctx, audit)
+	auditEntry := models.NewAuditLog(uuid.Nil, "system", models.AuditActionCertIssued, "certificate", cert.ID)
+	auditEntry.WithDetail("agent_id", agentID.String())
+	s.auditRepo.Create(ctx, auditEntry)
+	s.auditLogger.AgentEnrolled(agentID, cert.ID, fingerprint)
 
 	s.logger.WithFields(logrus.Fields{
 		"agent_id": agentID,
@@ -355,15 +372,21 @@ func (s *certServiceImpl) Revoke(ctx context.Context, certID uuid.UUID, revokedB
 		return err
 	}
 
-	// 2. Add to Redis revocation cache (skip when Redis unavailable)
+	// 2. Add to DB CRL table
+	if err := s.certRepo.AddToCRL(ctx, cert.SerialNumber, cert.CertFingerprint, reason); err != nil {
+		s.logger.WithError(err).Warn("Failed to add certificate to CRL table")
+	}
+
+	// 3. Add to Redis revocation cache (skip when Redis unavailable)
 	if s.redis != nil {
 		s.redis.AddCertToRevocationList(ctx, cert.CertFingerprint, cert.ExpiresAt)
 	}
 
-	// 3. Audit log
-	audit := models.NewAuditLog(revokedBy, "", models.AuditActionCertRevoked, "certificate", certID)
-	audit.WithDetail("reason", reason)
-	s.auditRepo.Create(ctx, audit)
+	// 4. Audit log
+	auditEntry := models.NewAuditLog(revokedBy, "", models.AuditActionCertRevoked, "certificate", certID)
+	auditEntry.WithDetail("reason", reason)
+	s.auditRepo.Create(ctx, auditEntry)
+	s.auditLogger.CertRevoked(revokedBy, revokedBy.String(), certID, cert.AgentID.String(), reason)
 
 	s.logger.WithFields(logrus.Fields{
 		"cert_id":    certID,
@@ -396,4 +419,156 @@ func (s *certServiceImpl) IsRevoked(ctx context.Context, fingerprint string) (bo
 	}
 
 	return cert.Status == models.CertStatusRevoked, nil
+}
+
+// StartRenewalWorker starts a background goroutine that auto-renews certificates
+// expiring within the specified number of days. Runs every 6 hours.
+// Respects ctx cancellation for clean shutdown.
+func (s *certServiceImpl) StartRenewalWorker(ctx context.Context, renewBeforeDays int) {
+	within := time.Duration(renewBeforeDays) * 24 * time.Hour
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	s.logger.WithField("renew_before_days", renewBeforeDays).Info("[CertRenewal] Auto-renewal worker started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("[CertRenewal] Worker shutting down")
+			return
+		case <-ticker.C:
+			s.runRenewalCycle(ctx, within)
+		}
+	}
+}
+
+// runRenewalCycle finds expiring certificates and auto-renews them.
+func (s *certServiceImpl) runRenewalCycle(ctx context.Context, within time.Duration) {
+	expiring, err := s.certRepo.GetExpiring(ctx, within)
+	if err != nil {
+		s.logger.WithError(err).Warn("[CertRenewal] Failed to query expiring certificates")
+		return
+	}
+
+	if len(expiring) == 0 {
+		s.logger.Debug("[CertRenewal] No certificates expiring soon")
+		return
+	}
+
+	s.logger.WithField("count", len(expiring)).Info("[CertRenewal] Found expiring certificates")
+
+	for _, cert := range expiring {
+		if ctx.Err() != nil {
+			return // context cancelled
+		}
+
+		// The existing cert has the agent's public key (PEM). We can't re-sign
+		// without a new CSR from the agent. Instead, we re-issue using the
+		// existing public key embedded in the stored PEM certificate.
+		// Parse the stored PEM to extract the public key.
+		newCert, renewErr := s.reissueCertFromExisting(ctx, cert)
+		if renewErr != nil {
+			s.logger.WithError(renewErr).WithField("agent_id", cert.AgentID).Warn("[CertRenewal] Failed to auto-renew")
+			continue
+		}
+
+		s.logger.WithFields(logrus.Fields{
+			"agent_id":   cert.AgentID,
+			"old_cert":   cert.ID,
+			"new_expiry": newCert.ExpiresAt,
+		}).Info("[CertRenewal] Auto-renewed certificate")
+	}
+}
+
+// reissueCertFromExisting re-issues a certificate for the same agent using the
+// public key from the existing certificate PEM. This is a server-side renewal
+// that does not require a new CSR from the agent.
+func (s *certServiceImpl) reissueCertFromExisting(ctx context.Context, old *models.Certificate) (*IssuedCertificate, error) {
+	if s.caCert == nil || s.caKey == nil {
+		return nil, fmt.Errorf("CA not loaded")
+	}
+
+	// Parse the old certificate's PEM to extract the public key
+	block, _ := pem.Decode(old.PublicKey) // PublicKey field stores PEM-encoded cert
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode old certificate PEM")
+	}
+	oldCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse old certificate: %w", err)
+	}
+
+	// Build new certificate template
+	now := time.Now()
+	expiresAt := now.AddDate(0, 0, s.validDays)
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+
+	expectedCN := "agent-" + old.AgentID.String()
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      oldCert.Subject,
+		NotBefore:    now,
+		NotAfter:     expiresAt,
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		DNSNames:     []string{expectedCN},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		IPAddresses:           []net.IP{},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, s.caCert, oldCert.PublicKey, s.caKey)
+	if err != nil {
+		return nil, fmt.Errorf("sign certificate: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	fingerprint := models.GenerateFingerprint(certDER)
+
+	// Supersede old cert
+	if err := s.certRepo.MarkSuperseded(ctx, old.ID); err != nil {
+		s.logger.WithError(err).Warn("[CertRenewal] Failed to mark old cert as superseded")
+	}
+
+	// Store new cert
+	newCert := &models.Certificate{
+		ID:              uuid.New(),
+		AgentID:         old.AgentID,
+		CertFingerprint: fingerprint,
+		PublicKey:       certPEM,
+		SerialNumber:    serialNumber.String(),
+		Status:          models.CertStatusActive,
+		IssuedAt:        now,
+		ExpiresAt:       expiresAt,
+	}
+	if err := s.certRepo.Create(ctx, newCert); err != nil {
+		return nil, fmt.Errorf("store renewed cert: %w", err)
+	}
+
+	// Update agent record
+	agent, agentErr := s.agentRepo.GetByID(ctx, old.AgentID)
+	if agentErr == nil && agent != nil {
+		agent.CurrentCertID = &newCert.ID
+		agent.CertExpiresAt = &expiresAt
+		s.agentRepo.Update(ctx, agent)
+	}
+
+	// Audit
+	auditEntry := models.NewAuditLog(uuid.Nil, "system", models.AuditActionCertRenewed, "certificate", old.ID)
+	auditEntry.WithDetail("agent_id", old.AgentID.String())
+	auditEntry.WithDetail("new_fingerprint", fingerprint)
+	s.auditRepo.Create(ctx, auditEntry)
+	s.auditLogger.CertRenewed(old.AgentID.String(), old.ID, newCert.ID)
+
+	return &IssuedCertificate{
+		Certificate:  certPEM,
+		CACert:       s.caCertPEM,
+		Fingerprint:  fingerprint,
+		SerialNumber: serialNumber.String(),
+		IssuedAt:     now,
+		ExpiresAt:    expiresAt,
+	}, nil
 }

@@ -1411,6 +1411,56 @@ export const auditApi = {
 };
 
 // ============================================================================
+// Security Events API
+// ============================================================================
+
+export interface SecurityEvent {
+    id: string;
+    event_type: string;
+    severity: 'info' | 'warning' | 'critical';
+    actor_id?: string;
+    actor_name: string;
+    target_id?: string;
+    target_type: string;
+    ip_address: string;
+    user_agent: string;
+    description: string;
+    metadata?: Record<string, unknown>;
+    created_at: string;
+}
+
+export interface SecurityEventSummaryItem {
+    event_type: string;
+    severity: string;
+    count: number;
+}
+
+export const securityEventsApi = {
+    getEvents: async (params?: {
+        event_type?: string;
+        severity?: string;
+        actor_id?: string;
+        from?: string;
+        to?: string;
+        limit?: number;
+        offset?: number;
+    }) => {
+        const response = await connectionApi.get<{
+            data: SecurityEvent[];
+            meta: { count: number; limit: number; offset: number };
+        }>('/api/v1/security/events', { params });
+        return response.data;
+    },
+    getSummary: async () => {
+        const response = await connectionApi.get<{
+            data: SecurityEventSummaryItem[];
+            meta: { window: string };
+        }>('/api/v1/security/events/summary');
+        return response.data;
+    },
+};
+
+// ============================================================================
 // Enrollment Tokens API
 // ============================================================================
 

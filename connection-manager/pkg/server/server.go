@@ -69,6 +69,7 @@ type Server struct {
 	forensicRepo     repository.ForensicRepository
 	incidentRepo     repository.IncidentRepository
 	playbookEngine   PlaybookEngine
+	interceptor      *Interceptor // stored for post-construction injection (e.g. CRL cache)
 }
 
 // PlaybookEngine is the interface the gRPC server uses to trigger playbooks.
@@ -176,6 +177,7 @@ func NewServer(
 		agentService:     agentSvc,
 		eventHandler:     evtHandler,
 		heartbeatHandler: hbHandler,
+		interceptor:      interceptor,
 	}
 
 	// Create and wire the AgentRegistry for real-time presence and C2
@@ -244,6 +246,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // GetGRPCServer returns the underlying gRPC server.
 func (s *Server) GetGRPCServer() *grpc.Server {
 	return s.grpcServer
+}
+
+// GetInterceptor returns the gRPC interceptor for post-construction injection.
+func (s *Server) GetInterceptor() *Interceptor {
+	return s.interceptor
 }
 
 // ============================================================================

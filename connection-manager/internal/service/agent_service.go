@@ -13,6 +13,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/cache"
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/pkg/models"
+	"github.com/edr-platform/connection-manager/pkg/security"
 )
 
 // AgentService provides business logic for agent operations.
@@ -162,7 +163,10 @@ func (s *agentServiceImpl) Register(ctx context.Context, req *RegisterAgentReque
 	var enrollmentToken *models.EnrollmentToken
 
 	if s.enrollmentTokenRepo != nil {
-		if et, err := s.enrollmentTokenRepo.GetByToken(ctx, req.InstallationToken); err == nil {
+		// Hash the incoming raw token before lookup — the raw value must never
+		// be passed to the DB layer.  The agent always sends the raw 64-char hex
+		// token; the server computes SHA-256(raw) and looks up by token_hash.
+		if et, err := s.enrollmentTokenRepo.GetByTokenHash(ctx, security.HashToken(req.InstallationToken)); err == nil {
 			// Validate in a way that supports idempotency: if the token is maxed-out
 			// but THIS hardware_id already consumed it, allow re-enrollment without
 			// consuming another seat (still reject true expiry).

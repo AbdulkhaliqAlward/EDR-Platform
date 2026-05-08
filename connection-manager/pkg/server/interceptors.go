@@ -21,6 +21,8 @@ import (
 
 	"github.com/edr-platform/connection-manager/config"
 	"github.com/edr-platform/connection-manager/internal/cache"
+	"github.com/edr-platform/connection-manager/internal/repository"
+	"github.com/edr-platform/connection-manager/pkg/audit"
 	"github.com/edr-platform/connection-manager/pkg/contextkeys"
 	"github.com/edr-platform/connection-manager/pkg/security"
 	edrv1 "github.com/edr-platform/connection-manager/proto/v1"
@@ -43,6 +45,8 @@ type Interceptor struct {
 	redis       *cache.RedisClient
 	jwtManager  *security.JWTManager
 	rateLimiter *cache.RateLimiter
+	crlCache    *repository.CRLCache // DB-backed in-memory CRL (optional)
+	auditLogger *audit.Logger        // non-blocking security event logger (nil-safe)
 
 	// Local cert revocation cache — synced from Redis periodically.
 	// When Redis is down, this cache enables fail-closed behavior:
@@ -65,6 +69,16 @@ func NewInterceptor(cfg *config.Config, logger *logrus.Logger, redis *cache.Redi
 	// Seed the timestamp so we don't immediately fail-closed on boot.
 	i.lastCacheSync.Store(time.Now().Unix())
 	return i
+}
+
+// SetCRLCache injects the DB-backed CRL cache for fingerprint revocation checks.
+func (i *Interceptor) SetCRLCache(cache *repository.CRLCache) {
+	i.crlCache = cache
+}
+
+// SetAuditLogger wires the non-blocking security event logger.
+func (i *Interceptor) SetAuditLogger(l *audit.Logger) {
+	i.auditLogger = l
 }
 
 // ============================================================================
@@ -312,6 +326,18 @@ func (i *Interceptor) validateClientCertificate(ctx context.Context) (string, er
 	// ── Certificate Revocation Check (fail-closed) ──
 	fingerprint := generateFingerprint(clientCert.Raw)
 
+	// Layer 1: DB-backed in-memory CRL cache (never hits DB, cache-only)
+	if i.crlCache != nil && i.crlCache.IsRevoked(fingerprint) {
+		// Extract peer address for audit (best-effort).
+		remoteAddr := ""
+		if p, ok := peer.FromContext(ctx); ok && p != nil && p.Addr != nil {
+			remoteAddr = p.Addr.String()
+		}
+		i.auditLogger.CertRejectedCRL(fingerprint, agentID, remoteAddr)
+		return "", status.Error(codes.PermissionDenied, "certificate revoked")
+	}
+
+	// Layer 2: Redis-backed revocation check (existing mechanism)
 	if i.redis != nil {
 		// Redis is configured — try live check
 		revoked, err := i.redis.IsCertRevoked(ctx, fingerprint)
@@ -327,6 +353,10 @@ func (i *Interceptor) validateClientCertificate(ctx context.Context) (string, er
 			}
 			// Not revoked — ensure it's not in local cache either
 			i.revokedCerts.Delete(fingerprint)
+			// Record last_seen_at asynchronously — never block gRPC call
+			if i.crlCache != nil {
+				go i.crlCache.RecordLastSeen(fingerprint)
+			}
 			return agentID, nil
 		}
 	}
@@ -345,6 +375,11 @@ func (i *Interceptor) validateClientCertificate(ctx context.Context) (string, er
 			"max_cache_age":   revocationCacheMaxAge.String(),
 		}).Warn("Cert revocation cache stale and Redis unavailable — REJECTING connection (fail-closed)")
 		return "", status.Error(codes.Unauthenticated, "certificate revocation check unavailable — try again later")
+	}
+
+	// Record last_seen_at asynchronously — never block gRPC call
+	if i.crlCache != nil {
+		go i.crlCache.RecordLastSeen(fingerprint)
 	}
 
 	// Cache is fresh enough — allow connection

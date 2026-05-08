@@ -3,6 +3,10 @@ package api
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +19,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/edr-platform/connection-manager/pkg/models"
+	"github.com/edr-platform/connection-manager/pkg/security"
 )
 
 // BuildAgentRequest is the JSON body for agent build requests from the dashboard.
@@ -29,17 +34,27 @@ type BuildAgentRequest struct {
 	ExpiresInH   *int   `json:"expires_in_hours"` // nil = default 24 hours
 	SkipConfig   bool   `json:"skip_config"` // if true, only token + CA are embedded
 	InstallSysmon bool  `json:"install_sysmon"` // if true, agent will install + enable Sysmon on first run
+
+	// internal: populated by splitKeyForBuild, never from JSON
+	tokenEnc  string
+	tokenKeyA string
 }
 
 // builderRequest is the JSON body sent to the agent-builder service.
+// For split-key builds (TokenEnc + TokenKeyA + TokenID set), the agent-builder
+// injects the pre-computed ciphertext and key_a directly — no token in plaintext.
+// Token field kept for backward compatibility with old agent-builder images.
 type builderRequest struct {
-	ServerIP     string `json:"server_ip"`
-	ServerDomain string `json:"server_domain"`
-	ServerPort   string `json:"server_port"`
-	Token        string `json:"token"`
-	SkipConfig   bool   `json:"skip_config"`
-	CACertPEM    string `json:"ca_cert_pem"`
-	InstallSysmon bool  `json:"install_sysmon"`
+	ServerIP      string `json:"server_ip"`
+	ServerDomain  string `json:"server_domain"`
+	ServerPort    string `json:"server_port"`
+	Token         string `json:"token"`          // deprecated: only for legacy builder
+	TokenEnc      string `json:"token_enc"`      // hex(nonce||ciphertext||tag) — split-key
+	TokenKeyA     string `json:"token_key_a"`    // hex(16-byte key_a) — baked into binary
+	TokenID       string `json:"token_id"`       // UUID — baked into binary for /key-half fetch
+	SkipConfig    bool   `json:"skip_config"`
+	CACertPEM     string `json:"ca_cert_pem"`
+	InstallSysmon bool   `json:"install_sysmon"`
 }
 
 // BuildAgent handles POST /api/v1/agent/build
@@ -90,22 +105,46 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 				"Failed to generate enrollment token")
 		}
 
+		// Gap 2: extract operator identity from JWT claims.
+		createdBy := "system"
+		if u := getCurrentUser(c); u != nil {
+			createdBy = u.Username
+		}
+
 		desc := fmt.Sprintf("build-token (max_uses=%d, expires_in_hours=%d)", *req.MaxUses, *req.ExpiresInH)
 		exp := time.Now().Add(time.Duration(*req.ExpiresInH) * time.Hour)
 		token := &models.EnrollmentToken{
 			ID:          uuid.New(),
 			Token:       tokenStr,
+			// Gap 1: store SHA-256 hash for DB lookups; agent binary receives raw tokenStr.
+			TokenHash:   security.HashToken(tokenStr),
 			Description: desc,
 			IsActive:    true,
 			MaxUses:     req.MaxUses,
 			ExpiresAt:   &exp,
-			CreatedBy:   "admin", // TODO: extract from JWT claims
+			CreatedBy:   createdBy,
 		}
 
 		if err := h.enrollmentTokenRepo.Create(c.Request().Context(), token); err != nil {
 			h.logger.Errorf("BuildAgent: failed to create build token: %v", err)
 			return errorResponse(c, http.StatusInternalServerError, "TOKEN_CREATE_ERROR",
 				"Failed to create enrollment token for build")
+		}
+
+		// Atomically consume this token for a binary build (build_count 0→1).
+		// A newly-created token always has build_count=0, so this is a
+		// formality here — but it keeps the code path identical to the
+		// existing-token path and future-proofs against concurrent requests.
+		if err := h.enrollmentTokenRepo.IncrementBuildCount(c.Request().Context(), token.ID); err != nil {
+			h.logger.Errorf("BuildAgent: IncrementBuildCount (new token): %v", err)
+			return errorResponse(c, http.StatusConflict, "TOKEN_ALREADY_BUILT",
+				"Enrollment token has already been used to build an agent binary")
+		}
+
+		// SPLIT-KEY: generate key_a (binary) + key_b (DB) from a 32-byte master key.
+		// fullKey is zeroed immediately after use — it never leaves this scope.
+		if err := splitKeyForBuild(c, h, token.ID, req.TokenID, token.Token, &req); err != nil {
+			return err // response already written by splitKeyForBuild
 		}
 
 		req.TokenID = token.ID.String()
@@ -134,6 +173,17 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 				if t.MaxUses != nil && t.UseCount >= *t.MaxUses {
 					return errorResponse(c, http.StatusBadRequest, "TOKEN_MAXED",
 						"The selected token has reached its maximum number of uses")
+				}
+				// Atomically consume this token for a binary build.
+				// WHERE build_count = 0 prevents a token being used for two builds.
+				if err := h.enrollmentTokenRepo.IncrementBuildCount(c.Request().Context(), t.ID); err != nil {
+					h.logger.Errorf("BuildAgent: IncrementBuildCount (existing token %s): %v", t.ID, err)
+					return errorResponse(c, http.StatusConflict, "TOKEN_ALREADY_BUILT",
+						"Enrollment token has already been used to build an agent binary")
+				}
+				// SPLIT-KEY: generate key_a (binary) + key_b (DB).
+				if err := splitKeyForBuild(c, h, t.ID, req.TokenID, t.Token, &req); err != nil {
+					return err // response already written
 				}
 				tokenValue = t.Token
 				tokenDesc = t.Description
@@ -180,13 +230,17 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 		builderURL, req.SkipConfig, tokenDesc)
 
 	buildReq := builderRequest{
-		ServerIP:     req.ServerIP,
-		ServerDomain: req.ServerDomain,
-		ServerPort:   req.ServerPort,
-		Token:        tokenValue,
-		SkipConfig:   req.SkipConfig,
-		CACertPEM:    caCertPEM,
+		ServerIP:      req.ServerIP,
+		ServerDomain:  req.ServerDomain,
+		ServerPort:    req.ServerPort,
+		SkipConfig:    req.SkipConfig,
+		CACertPEM:     caCertPEM,
 		InstallSysmon: req.InstallSysmon,
+		// Split-key fields (set by splitKeyForBuild above).
+		// Token field intentionally left empty: the agent uses the split-key path.
+		TokenEnc:  req.tokenEnc,
+		TokenKeyA: req.tokenKeyA,
+		TokenID:   req.TokenID,
 	}
 
 	body, err := json.Marshal(buildReq)
@@ -247,4 +301,86 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 	c.Response().Header().Set("X-Agent-CA-Embedded", fmt.Sprintf("%v", caCertPEM != ""))
 
 	return c.Blob(http.StatusOK, "application/octet-stream", binaryData)
+}
+
+// splitKeyForBuild generates the AES-256 split-key for a new agent binary build.
+//
+// Security contract:
+//  1. Generates 32 cryptographically random bytes as fullKey.
+//  2. Splits: keyA = fullKey[:16] (baked into binary), keyB = fullKey[16:] (stored in DB).
+//  3. Encrypts token with fullKey using AES-256-GCM.
+//  4. Stores keyB in the DB via StoreKeyB BEFORE returning.
+//     If StoreKeyB fails, the function returns an error and the build is aborted.
+//     A binary where keyB was not stored would be permanently undeployable.
+//  5. Zeros fullKey and keyB slices from memory before returning.
+//  6. Populates req.tokenEnc and req.tokenKeyA for injection into builderRequest.
+func splitKeyForBuild(
+	c echo.Context,
+	h *Handlers,
+	tokenUUID uuid.UUID,
+	_ string, // tokenIDStr (unused — tokenUUID is authoritative)
+	tokenPlaintext string,
+	req *BuildAgentRequest,
+) error {
+	// Step 1: Generate 32 cryptographically random bytes.
+	fullKey := make([]byte, 32)
+	if _, err := rand.Read(fullKey); err != nil {
+		h.logger.Errorf("[SPLITKEY] rand.Read failed: %v", err)
+		return errorResponse(c, http.StatusInternalServerError, "KEY_GEN_ERROR",
+			"Failed to generate split key material")
+	}
+	// Step 5: Zero fullKey from memory before returning — runs after step 4.
+	defer func() {
+		for i := range fullKey {
+			fullKey[i] = 0
+		}
+	}()
+
+	// Step 2: Split.
+	keyA := make([]byte, 16)
+	keyB := make([]byte, 16)
+	copy(keyA, fullKey[:16])
+	copy(keyB, fullKey[16:])
+	defer func() {
+		for i := range keyB {
+			keyB[i] = 0
+		}
+	}()
+
+	// Step 3: Encrypt token with fullKey using AES-256-GCM.
+	block, err := aes.NewCipher(fullKey)
+	if err != nil {
+		h.logger.Errorf("[SPLITKEY] AES NewCipher: %v", err)
+		return errorResponse(c, http.StatusInternalServerError, "CIPHER_ERROR",
+			"Failed to initialize AES cipher")
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		h.logger.Errorf("[SPLITKEY] GCM init: %v", err)
+		return errorResponse(c, http.StatusInternalServerError, "GCM_ERROR",
+			"Failed to initialize GCM")
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		h.logger.Errorf("[SPLITKEY] nonce rand.Read: %v", err)
+		return errorResponse(c, http.StatusInternalServerError, "NONCE_ERROR",
+			"Failed to generate nonce")
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(tokenPlaintext), nil)
+	tokenEnc := hex.EncodeToString(ciphertext)
+	keyAHex := hex.EncodeToString(keyA)
+	keyBHex := hex.EncodeToString(keyB)
+
+	// Step 4: Store keyB in DB BEFORE build proceeds.
+	// If this fails, abort immediately — do not return a binary with no server key.
+	if err := h.enrollmentTokenRepo.StoreKeyB(c.Request().Context(), tokenUUID, keyBHex); err != nil {
+		h.logger.Errorf("[SPLITKEY] StoreKeyB failed for token %s: %v", tokenUUID, err)
+		return errorResponse(c, http.StatusInternalServerError, "KEY_STORE_ERROR",
+			"Failed to store key material — build aborted")
+	}
+
+	req.tokenEnc = tokenEnc
+	req.tokenKeyA = keyAHex
+	req.TokenID = tokenUUID.String()
+	return nil
 }

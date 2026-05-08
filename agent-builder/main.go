@@ -22,6 +22,9 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,13 +42,19 @@ import (
 
 // BuildRequest is the JSON body accepted by POST /build.
 type BuildRequest struct {
-	ServerIP     string `json:"server_ip"`
-	ServerDomain string `json:"server_domain"`
-	ServerPort   string `json:"server_port"`
-	Token        string `json:"token"`
-	SkipConfig   bool   `json:"skip_config"`
-	CACertPEM    string `json:"ca_cert_pem"` // PEM-encoded CA certificate to embed
-	InstallSysmon bool  `json:"install_sysmon"`
+	ServerIP      string `json:"server_ip"`
+	ServerDomain  string `json:"server_domain"`
+	ServerPort    string `json:"server_port"`
+	// Token is the legacy single-key enrollment token (XOR or single AES).
+	// New builds use TokenEnc + TokenKeyA + TokenID (split-key architecture).
+	Token         string `json:"token"`
+	// Split-key fields (set by connection-manager handlers_build.go).
+	TokenEnc      string `json:"token_enc"`   // hex(nonce||ciphertext||tag)
+	TokenKeyA     string `json:"token_key_a"` // hex(16-byte key_a) — baked into binary
+	TokenID       string `json:"token_id"`    // UUID — baked into binary for /key-half fetch
+	SkipConfig    bool   `json:"skip_config"`
+	CACertPEM     string `json:"ca_cert_pem"` // PEM-encoded CA certificate to embed
+	InstallSysmon bool   `json:"install_sysmon"`
 }
 
 // ─── Build Cache ────────────────────────────────────────────────────────────
@@ -325,16 +334,25 @@ func main() {
 			ldflags = append(ldflags, fmt.Sprintf("-X main.GitCommit=%s", srcCommit))
 		}
 
-		if req.Token != "" {
-			// SECURITY: The enrollment token is embedded ONLY as an
-			// XOR-obfuscated blob for zero-touch registration. No uninstall
-			// secret is embedded: removal is a server-authorised C2 action
-			// (UNINSTALL_AGENT), so there is nothing in the binary that an
-			// attacker with filesystem access could extract and replay to
-			// tear down the agent. The token is decoded at runtime for the
-			// single CSR call, then zeroed from memory.
-			tokenObf := xorObfuscate(req.Token)
-			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenObf=%s", tokenObf))
+		if req.TokenEnc != "" && req.TokenKeyA != "" && req.TokenID != "" {
+			// SPLIT-KEY path (new): key was split server-side in handlers_build.go.
+			// key_b is already stored in the DB; we only embed key_a + ciphertext + token ID.
+			// The agent fetches key_b from POST /api/v1/agent/key-half at enrollment time.
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenEnc=%s", req.TokenEnc))
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenKeyA=%s", req.TokenKeyA))
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenID=%s", req.TokenID))
+		} else if req.Token != "" {
+			// LEGACY path: generate single-key AES (no split) for backward compatibility.
+			tokenEnc, tokenKey, err := aesEncryptToken(req.Token)
+			if err != nil {
+				log.Printf("[BUILD] Failed to encrypt token: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "Failed to encrypt enrollment token: " + err.Error(),
+				})
+				return
+			}
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenEnc=%s", tokenEnc))
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedTokenKey=%s", tokenKey))
 		}
 
 		if !req.SkipConfig {
@@ -444,27 +462,43 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 }
 
 // sha256Hex returns the lowercase hex-encoded SHA-256 hash of s.
-// Used to compute the token hash before embedding it into the agent binary.
 func sha256Hex(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
 }
 
-// xorObfuscate XOR-encrypts the plaintext with a fixed key and returns it as hex.
-// This prevents `strings binary` from revealing the enrollment token.
-// The same key is compiled into the agent for decoding at runtime.
+// aesEncryptToken encrypts plaintext using AES-256-GCM with a randomly-generated
+// per-build key.  Returns (ciphertextHex, keyHex, error).
 //
-// NOTE: This is NOT cryptographic encryption — it is obfuscation to raise the
-// bar against casual extraction. The real security comes from:
-//   - DACL protection on the agent process/service (SYSTEM-only access)
-//   - The token being a one-time enrollment secret (consumed on first use)
-//   - The uninstall path using SHA-256 hash (irreversible)
-func xorObfuscate(plaintext string) string {
-	// 32-byte XOR key — compiled into both builder and agent.
-	key := []byte("EDR-Agent-XOR-Key-2026!@#$%^&*()")
-	data := []byte(plaintext)
-	for i := range data {
-		data[i] ^= key[i%len(key)]
+// Format of ciphertextHex (all concatenated, hex-encoded):
+//
+//	12-byte nonce || AES-GCM ciphertext+tag
+//
+// The key is 32 random bytes (AES-256).
+func aesEncryptToken(plaintext string) (ciphertextHex, keyHex string, err error) {
+	// Generate random 32-byte key (AES-256).
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", "", fmt.Errorf("generate AES key: %w", err)
 	}
-	return hex.EncodeToString(data)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", "", fmt.Errorf("new AES cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", "", fmt.Errorf("new GCM: %w", err)
+	}
+
+	// Random 12-byte nonce (standard GCM nonce size).
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", "", fmt.Errorf("generate nonce: %w", err)
+	}
+
+	// Seal appends ciphertext + 16-byte GCM tag to nonce.
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+
+	return hex.EncodeToString(ciphertext), hex.EncodeToString(key), nil
 }

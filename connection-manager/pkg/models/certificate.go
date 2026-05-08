@@ -18,8 +18,9 @@ type Certificate struct {
 	SerialNumber    string    `db:"serial_number" json:"serial_number"`
 	Status          string    `db:"status" json:"status"` // active, expired, revoked, superseded
 
-	IssuedAt  time.Time `db:"issued_at" json:"issued_at"`
-	ExpiresAt time.Time `db:"expires_at" json:"expires_at"`
+	IssuedAt   time.Time  `db:"issued_at" json:"issued_at"`
+	ExpiresAt  time.Time  `db:"expires_at" json:"expires_at"`
+	LastSeenAt *time.Time `db:"last_seen_at" json:"last_seen_at,omitempty"`
 
 	// Revocation info
 	RevokedAt    time.Time `db:"revoked_at" json:"revoked_at"`

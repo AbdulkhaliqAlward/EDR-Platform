@@ -14,6 +14,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/cache"
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/internal/service"
+	"github.com/edr-platform/connection-manager/pkg/audit"
 	"github.com/edr-platform/connection-manager/pkg/handlers"
 	"github.com/edr-platform/connection-manager/pkg/security"
 )
@@ -52,6 +53,8 @@ type Handlers struct {
 	signatureSyncSvc    *service.SignatureSyncService          // background MalwareBazaar sync
 	commandApprovalSvc  service.CommandApprovalService         // optional: out-of-band OTP gate for manual commands
 	sessionRepo         repository.SessionRepository           // session tracking for refresh token rotation
+	securityEventRepo   *audit.Repository                     // security audit event queries
+	auditLogger         *audit.Logger                         // non-blocking security event writer
 }
 
 // NewHandlers creates a new handlers instance.
@@ -188,6 +191,16 @@ func (h *Handlers) SetSignatureSyncSvc(svc *service.SignatureSyncService) {
 // SetSessionRepo sets the SessionRepository for refresh token rotation.
 func (h *Handlers) SetSessionRepo(repo repository.SessionRepository) {
 	h.sessionRepo = repo
+}
+
+// SetSecurityEventRepo sets the audit.Repository for security event queries.
+func (h *Handlers) SetSecurityEventRepo(repo *audit.Repository) {
+	h.securityEventRepo = repo
+}
+
+// SetAuditLogger wires the non-blocking security event logger.
+func (h *Handlers) SetAuditLogger(l *audit.Logger) {
+	h.auditLogger = l
 }
 
 // UserClaims represents authenticated user info.

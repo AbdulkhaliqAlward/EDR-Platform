@@ -19,12 +19,13 @@ import (
 
 // CertManager handles agent certificate lifecycle.
 type CertManager struct {
-	logger    *logging.Logger
-	certDir   string
-	certPath  string
-	keyPath   string
-	caPath    string
-	tokenPath string
+	logger       *logging.Logger
+	certDir      string
+	certPath     string
+	keyPath      string      // legacy plaintext path (migration only)
+	dpapiKeyPath string      // DPAPI-encrypted private key blob
+	caPath       string
+	tokenPath    string
 
 	// Loaded credentials
 	cert       *tls.Certificate
@@ -39,12 +40,13 @@ func NewCertManager(certDir string, logger *logging.Logger) *CertManager {
 	}
 
 	return &CertManager{
-		logger:    logger,
-		certDir:   certDir,
-		certPath:  filepath.Join(certDir, "client.crt"),
-		keyPath:   filepath.Join(certDir, "private.key"),
-		caPath:    filepath.Join(certDir, "ca-chain.crt"),
-		tokenPath: filepath.Join(certDir, "bootstrap.token"),
+		logger:       logger,
+		certDir:      certDir,
+		certPath:     filepath.Join(certDir, "client.crt"),
+		keyPath:      filepath.Join(certDir, "private.key"),
+		dpapiKeyPath: filepath.Join(certDir, "private.key.dpapi"),
+		caPath:       filepath.Join(certDir, "ca-chain.crt"),
+		tokenPath:    filepath.Join(certDir, "bootstrap.token"),
 	}
 }
 
@@ -71,14 +73,16 @@ func NewCertManagerFromConfig(cfg *config.Config, logger *logging.Logger) *CertM
 
 	certDir := filepath.Dir(certPath)
 	tokenPath := filepath.Join(certDir, "bootstrap.token")
+	dpapiKeyPath := keyPath + ".dpapi"
 
 	return &CertManager{
-		logger:    logger,
-		certDir:   certDir,
-		certPath:  certPath,
-		keyPath:   keyPath,
-		caPath:    caPath,
-		tokenPath: tokenPath,
+		logger:       logger,
+		certDir:      certDir,
+		certPath:     certPath,
+		keyPath:      keyPath,
+		dpapiKeyPath: dpapiKeyPath,
+		caPath:       caPath,
+		tokenPath:    tokenPath,
 	}
 }
 
@@ -92,16 +96,23 @@ func (m *CertManager) EnsureDirectories() error {
 
 // HasValidCertificate checks if a valid certificate exists.
 func (m *CertManager) HasValidCertificate() bool {
-	// Check if files exist
+	// Check if cert file exists
 	if _, err := os.Stat(m.certPath); os.IsNotExist(err) {
 		return false
 	}
-	if _, err := os.Stat(m.keyPath); os.IsNotExist(err) {
-		return false
+	// Check if DPAPI key or plaintext key exists
+	hasDPAPI := false
+	if _, err := os.Stat(m.dpapiKeyPath); err == nil {
+		hasDPAPI = true
+	}
+	if !hasDPAPI {
+		if _, err := os.Stat(m.keyPath); os.IsNotExist(err) {
+			return false
+		}
 	}
 
-	// Try to load and validate
-	cert, err := tls.LoadX509KeyPair(m.certPath, m.keyPath)
+	// Try to load and validate via DPAPI path
+	cert, err := loadKeyPairDPAPI(m.certPath, m.dpapiKeyPath, m.keyPath)
 	if err != nil {
 		m.logger.Debugf("Failed to load certificate: %v", err)
 		return false
@@ -124,10 +135,10 @@ func (m *CertManager) HasValidCertificate() bool {
 	return true
 }
 
-// LoadCertificate loads existing certificate and CA chain.
+// LoadCertificate loads existing certificate and DPAPI-protected private key.
 func (m *CertManager) LoadCertificate() error {
-	// Load client certificate
-	cert, err := tls.LoadX509KeyPair(m.certPath, m.keyPath)
+	// Load client certificate + private key via DPAPI (auto-migrates plaintext if needed).
+	cert, err := loadKeyPairDPAPI(m.certPath, m.dpapiKeyPath, m.keyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load certificate: %w", err)
 	}
@@ -219,7 +230,8 @@ func (m *CertManager) GenerateCSR(agentID, hostname string) ([]byte, error) {
 	return csrPEM, nil
 }
 
-// savePrivateKey saves the private key to disk.
+// savePrivateKey encrypts the private key with DPAPI and saves the blob to disk.
+// No plaintext key file is ever written. The keyPEM is zeroed in memory.
 func (m *CertManager) savePrivateKey(key *rsa.PrivateKey) error {
 	if err := m.EnsureDirectories(); err != nil {
 		return err
@@ -231,12 +243,17 @@ func (m *CertManager) savePrivateKey(key *rsa.PrivateKey) error {
 		Bytes: keyBytes,
 	})
 
-	// Save with restricted permissions
-	if err := os.WriteFile(m.keyPath, keyPEM, 0600); err != nil {
-		return fmt.Errorf("failed to save private key: %w", err)
+	// Zero the raw DER bytes immediately — we only need the PEM.
+	for i := range keyBytes {
+		keyBytes[i] = 0
 	}
 
-	m.logger.Debug("Private key saved")
+	// Encrypt with DPAPI and save — keyPEM is zeroed inside savePrivateKeyDPAPI.
+	if err := savePrivateKeyDPAPI(keyPEM, m.dpapiKeyPath); err != nil {
+		return err
+	}
+
+	m.logger.Debug("Private key saved (DPAPI-protected)")
 	return nil
 }
 
