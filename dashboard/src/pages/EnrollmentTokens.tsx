@@ -1,8 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
     Key, Plus, Copy, ShieldOff, CheckCircle, XCircle,
-    Clock, AlertTriangle, RefreshCw, Hash
+    Clock, AlertTriangle, RefreshCw, Hash, Eye, EyeOff, Download, Terminal
 } from 'lucide-react';
 import { enrollmentTokensApi, authApi, type EnrollmentToken } from '../api/client';
 import { Modal, SkeletonTable } from '../components';
@@ -130,57 +130,92 @@ function GenerateTokenModal({
 }
 
 // --------------------------------------------------------------------------
-// Token Created Success Modal (shows once after generation to copy)
+// Token Created / Build Reveal Modal (shows once — token will not be shown again)
 // --------------------------------------------------------------------------
 function TokenCreatedModal({
     token,
     isOpen,
     onClose,
+    installCommand,
+    binaryBlob,
+    title,
 }: {
     token: EnrollmentToken | null;
     isOpen: boolean;
     onClose: () => void;
+    /** If provided, shows the stdin install command (post-build reveal). */
+    installCommand?: string;
+    /** If provided, shows a download button for the agent binary. */
+    binaryBlob?: Blob | null;
+    title?: string;
 }) {
     const [copied, setCopied] = useState(false);
+    const [cmdCopied, setCmdCopied] = useState(false);
 
-    const handleCopy = async () => {
-        if (!token) return;
+    const handleCopy = async (text: string, setter: (v: boolean) => void) => {
         try {
-            await navigator.clipboard.writeText(token.token);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
+            await navigator.clipboard.writeText(text);
         } catch {
-            // Fallback for non-HTTPS
             const el = document.createElement('textarea');
-            el.value = token.token;
+            el.value = text;
             document.body.appendChild(el);
             el.select();
             document.execCommand('copy');
             document.body.removeChild(el);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
         }
+        setter(true);
+        setTimeout(() => setter(false), 2000);
+    };
+
+    const handleDownload = () => {
+        if (!binaryBlob) return;
+        const url = URL.createObjectURL(binaryBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'edr-agent.exe';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     };
 
     if (!token) return null;
 
+    const isPostBuild = !!installCommand;
+
     return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Token Generated Successfully" size="md">
+        <Modal isOpen={isOpen} onClose={onClose} title={title ?? 'Token Generated Successfully'} size="lg">
             <div className="space-y-4 animate-slide-up-fade">
+                {/* Warning banner for post-build reveals */}
+                {isPostBuild && (
+                    <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+                        <p className="text-xs text-amber-700 dark:text-amber-300 font-medium">
+                            This token will <strong>not</strong> be shown again. The server does not store it.
+                            Copy it now and keep it secure.
+                        </p>
+                    </div>
+                )}
+
+                {/* Token value */}
                 <div className="p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
                     <div className="flex items-center gap-2 mb-2">
                         <CheckCircle className="w-5 h-5 text-green-600" />
-                        <span className="font-medium text-green-800 dark:text-green-300">Token Ready</span>
+                        <span className="font-medium text-green-800 dark:text-green-300">
+                            {isPostBuild ? 'Plaintext Enrollment Token' : 'Token Ready'}
+                        </span>
                     </div>
-                    <p className="text-xs text-green-700 dark:text-green-400 mb-3">
-                        Copy this token now. You can always copy it later from the token list.
-                    </p>
+                    {!isPostBuild && (
+                        <p className="text-xs text-green-700 dark:text-green-400 mb-3">
+                            Copy this token now. You can always copy it later from the token list.
+                        </p>
+                    )}
                     <div className="flex items-center gap-2">
-                        <code className="flex-1 p-2 bg-white dark:bg-slate-900 border border-green-300 dark:border-green-700 rounded font-mono text-xs break-all text-slate-900 dark:text-slate-100">
+                        <code className="flex-1 p-2 bg-white dark:bg-slate-900 border border-green-300 dark:border-green-700 rounded font-mono text-xs break-all text-slate-900 dark:text-slate-100 select-all">
                             {token.token}
                         </code>
                         <button
-                            onClick={handleCopy}
+                            onClick={() => handleCopy(token.token, setCopied)}
                             className={`btn ${copied ? 'btn-success' : 'btn-primary'} flex items-center gap-1 whitespace-nowrap`}
                         >
                             {copied ? <CheckCircle className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
@@ -189,14 +224,48 @@ function TokenCreatedModal({
                     </div>
                 </div>
 
+                {/* Install command — post-build only */}
+                {isPostBuild && installCommand && (
+                    <div>
+                        <div className="flex items-center gap-2 mb-2">
+                            <Terminal className="w-4 h-4 text-slate-500" />
+                            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                                Ready-to-use Install Command (run as Administrator):
+                            </span>
+                        </div>
+                        <div className="relative group">
+                            <pre className="p-3 bg-slate-900 dark:bg-black rounded-lg text-xs text-green-400 font-mono break-all whitespace-pre-wrap">
+                                {installCommand}
+                            </pre>
+                            <button
+                                onClick={() => handleCopy(installCommand, setCmdCopied)}
+                                className="absolute top-1.5 right-1.5 p-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-md opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-xs"
+                                title="Copy command"
+                            >
+                                {cmdCopied ? <CheckCircle className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+                                {cmdCopied ? 'Copied' : 'Copy'}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 {token.description && (
                     <p className="text-sm text-slate-600 dark:text-slate-400">
                         <strong>Label:</strong> {token.description}
                     </p>
                 )}
 
-                <div className="flex justify-end">
-                    <button onClick={onClose} className="btn btn-secondary">Close</button>
+                <div className="flex items-center justify-between gap-3 pt-1">
+                    {binaryBlob && (
+                        <button
+                            onClick={handleDownload}
+                            className="btn btn-secondary flex items-center gap-2"
+                        >
+                            <Download className="w-4 h-4" />
+                            Download agent.exe
+                        </button>
+                    )}
+                    <button onClick={onClose} className="btn btn-primary ml-auto">Done</button>
                 </div>
             </div>
         </Modal>
@@ -224,6 +293,20 @@ function getStatusBadge(token: EnrollmentToken): { label: string; color: string;
     return { label: 'Active', color: 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20', icon: CheckCircle };
 }
 
+// ---------------------------------------------------------------------------
+// Build-reveal session storage key: AgentDeployment.tsx writes here after a
+// successful build, then navigates (or the admin switches tabs) to this page.
+// ---------------------------------------------------------------------------
+const BUILD_REVEAL_KEY = 'edr_post_build_reveal';
+
+interface BuildRevealPayload {
+    token: string;
+    tokenId: string;
+    description: string;
+    serverIP?: string;
+    serverDomain?: string;
+}
+
 // --------------------------------------------------------------------------
 // Main Page
 // --------------------------------------------------------------------------
@@ -232,6 +315,41 @@ export default function EnrollmentTokens() {
     const [showGenerateModal, setShowGenerateModal] = useState(false);
     const [createdToken, setCreatedToken] = useState<EnrollmentToken | null>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
+    const [showExpired, setShowExpired] = useState(false);
+
+    // Post-build reveal state — populated from sessionStorage (written by AgentDeployment)
+    const [buildReveal, setBuildReveal] = useState<{
+        fakeToken: EnrollmentToken;
+        installCommand: string;
+    } | null>(null);
+
+    // On mount: check if AgentDeployment left a post-build reveal payload.
+    useEffect(() => {
+        const raw = sessionStorage.getItem(BUILD_REVEAL_KEY);
+        if (!raw) return;
+        sessionStorage.removeItem(BUILD_REVEAL_KEY); // consume immediately
+        try {
+            const payload: BuildRevealPayload = JSON.parse(raw);
+            const serverIP = payload.serverIP ?? '<SERVER_IP>';
+            const serverDomain = payload.serverDomain ?? '<DOMAIN>';
+            const cmd = `echo '${payload.token}' | .\\edr-agent.exe -install -token-stdin -server-ip ${serverIP} -server-domain ${serverDomain}`;
+            // Construct a fake EnrollmentToken shell just to reuse TokenCreatedModal.
+            setBuildReveal({
+                fakeToken: {
+                    id: payload.tokenId,
+                    token: payload.token,
+                    description: payload.description,
+                    is_active: true,
+                    use_count: 0,
+                    max_uses: null,
+                    expires_at: null,
+                    created_at: new Date().toISOString(),
+                    created_by: 'build',
+                },
+                installCommand: cmd,
+            });
+        } catch { /* ignore malformed payload */ }
+    }, []);
 
     const canManage = authApi.canManageTokens();
 
@@ -249,7 +367,10 @@ export default function EnrollmentTokens() {
         },
     });
 
-    const tokens = data?.data || [];
+    const tokens: EnrollmentToken[] = data?.data || [];
+
+    // Change 2: Filter out expired tokens unless the admin toggles "Show expired".
+    const visibleTokens = showExpired ? tokens : tokens.filter(t => !isExpired(t));
 
     const handleCopyToken = async (token: string, id: string) => {
         try {
@@ -367,7 +488,7 @@ export default function EnrollmentTokens() {
                         <div className="p-4">
                             <SkeletonTable rows={5} columns={7} />
                         </div>
-                    ) : tokens.length === 0 ? (
+                {tokens.length === 0 ? (
                         <div className="text-center py-12 flex-1 flex flex-col justify-center items-center">
                             <Key className="w-12 h-12 text-slate-400 mx-auto mb-4 opacity-50" />
                             <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-2">
@@ -385,6 +506,17 @@ export default function EnrollmentTokens() {
                                 </button>
                             )}
                         </div>
+                    ) : visibleTokens.length === 0 ? (
+                        <div className="text-center py-12 flex-1 flex flex-col justify-center items-center">
+                            <Clock className="w-10 h-10 text-slate-400 mx-auto mb-3 opacity-40" />
+                            <p className="text-slate-500">All tokens have expired.</p>
+                            <button
+                                onClick={() => setShowExpired(true)}
+                                className="mt-3 text-sm text-cyan-600 dark:text-cyan-400 hover:underline"
+                            >
+                                Show expired tokens
+                            </button>
+                        </div>
                     ) : (
                         <div className="flex-1 overflow-auto custom-scrollbar">
                             <table className="w-full text-left border-collapse">
@@ -400,7 +532,7 @@ export default function EnrollmentTokens() {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                {tokens.map((token) => {
+                                {visibleTokens.map((token) => {
                                     const status = getStatusBadge(token);
                                     const StatusIcon = status.icon;
 
@@ -491,7 +623,19 @@ export default function EnrollmentTokens() {
                 {/* Footer Strip */}
                 {tokens.length > 0 && (
                     <div className="shrink-0 px-4 py-3 bg-slate-50/50 dark:bg-slate-900/40 border-t border-slate-200 dark:border-slate-800/60 text-sm text-slate-500 flex justify-between items-center">
-                        <span>Showing {tokens.length} provisioning tokens</span>
+                        <span>
+                            Showing {visibleTokens.length} of {tokens.length} tokens
+                            {!showExpired && tokens.some(isExpired) && (
+                                <span className="ml-2 text-xs text-amber-500">({tokens.filter(isExpired).length} expired hidden)</span>
+                            )}
+                        </span>
+                        <button
+                            onClick={() => setShowExpired(v => !v)}
+                            className="flex items-center gap-1 text-xs text-slate-500 hover:text-cyan-500 transition-colors"
+                        >
+                            {showExpired ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            {showExpired ? 'Hide expired' : 'Show expired'}
+                        </button>
                     </div>
                 )}
             </div>
@@ -502,13 +646,25 @@ export default function EnrollmentTokens() {
                 onClose={() => setShowGenerateModal(false)}
                 onGenerated={handleTokenGenerated}
             />
+
+            {/* Simple generation reveal */}
             <TokenCreatedModal
                 token={createdToken}
                 isOpen={!!createdToken}
                 onClose={() => setCreatedToken(null)}
             />
+
+            {/* Post-build one-time reveal (populated by AgentDeployment via sessionStorage) */}
+            {buildReveal && (
+                <TokenCreatedModal
+                    token={buildReveal.fakeToken}
+                    isOpen={!!buildReveal}
+                    onClose={() => setBuildReveal(null)}
+                    installCommand={buildReveal.installCommand}
+                    title="Agent Built — Save Your Token"
+                />
+            )}
         </div>
         </div>
     );
 }
-

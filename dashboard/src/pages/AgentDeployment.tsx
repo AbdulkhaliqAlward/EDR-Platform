@@ -121,6 +121,22 @@ function BuildModal({
             });
             setBuildProgress('');
             clearFormState();
+
+            // Write token to sessionStorage so the Enrollment Tokens page can display
+            // the one-time reveal modal. Consumed immediately on mount by that page.
+            const revealPayload = JSON.stringify({
+                token: result.token,
+                tokenId: form.tokenId,
+                description: tokens.find(t => t.id === form.tokenId)?.description ?? 'Agent Build',
+                serverIP: skip ? undefined : form.serverIP,
+                serverDomain: skip ? undefined : form.serverDomain,
+            });
+            sessionStorage.setItem('edr_post_build_reveal', revealPayload);
+
+            // Navigate to Enrollment Tokens page to show the one-time reveal modal.
+            onClose();
+            navigate('/security/tokens');
+
         } catch (err: unknown) {
             // Try to read error from blob response
             let message = 'Build failed. Check server logs for details.';
