@@ -345,6 +345,7 @@ export default function EnrollmentTokens() {
                     expires_at: null,
                     created_at: new Date().toISOString(),
                     created_by: 'build',
+                    revoked_at: null,
                 },
                 installCommand: cmd,
             });
