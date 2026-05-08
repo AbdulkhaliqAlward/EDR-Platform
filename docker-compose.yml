@@ -49,6 +49,8 @@ services:
       # requires a 6-digit OTP delivered to this address. Leave blank to keep
       # the legacy behaviour (no per-command approval).
       EC2_EMAIL_VERIFY: "${EC2_EMAIL_VERIFY-}"
+      # Key Encryption — derives AES-256 KEK for encrypting ca.key, server.key, jwt_private.pem at rest.
+      MASTER_KEY_PASSPHRASE: "${MASTER_KEY_PASSPHRASE:?MASTER_KEY_PASSPHRASE missing in .env}"
       KAFKA_BROKERS: "kafka:9092"        # INTERNAL listener (containers)
       GRPC_PORT: "50051"
       HTTP_PORT: "8082"

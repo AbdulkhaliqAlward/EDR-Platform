@@ -3,8 +3,12 @@ package security
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -97,6 +101,20 @@ func NewJWTManager(privateKeyPath, publicKeyPath, issuer, audience string, acces
 		accessTTL:  accessTTL,
 		refreshTTL: refreshTTL,
 	}, nil
+}
+
+// NewJWTManagerFromKeys creates a JWTManager from pre-loaded RSA keys.
+// This is used when keys are held in memory by the KeyStore (encrypted at rest)
+// instead of being read from disk paths.
+func NewJWTManagerFromKeys(privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey, issuer, audience string, accessTTL, refreshTTL time.Duration) *JWTManager {
+	return &JWTManager{
+		privateKey: privateKey,
+		publicKey:  publicKey,
+		issuer:     issuer,
+		audience:   audience,
+		accessTTL:  accessTTL,
+		refreshTTL: refreshTTL,
+	}
 }
 
 // GenerateTokenPair creates a new access and refresh token pair for a user.
@@ -226,4 +244,59 @@ type TokenBlacklist interface {
 
 	// IsBlacklisted checks if a token is blacklisted.
 	IsBlacklisted(ctx context.Context, jti string) (bool, error)
+}
+
+// GenerateOpaqueToken creates a cryptographically random 32-byte opaque token.
+// Returns (rawBase64URL, sha256Hex, error). The raw token is sent to the
+// client; only the SHA-256 hash is stored server-side.
+func GenerateOpaqueToken() (raw string, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", fmt.Errorf("generate opaque token: %w", err)
+	}
+	raw = base64.RawURLEncoding.EncodeToString(b)
+	sum := sha256.Sum256([]byte(raw))
+	hash = hex.EncodeToString(sum[:])
+	return raw, hash, nil
+}
+
+// HashToken computes the SHA-256 hex digest of a raw opaque token string.
+func HashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+// GenerateAccessTokenOnly creates a single access token (JWT) without a
+// refresh token. Used during session-based refresh where the refresh token
+// is an opaque value managed outside the JWT system.
+func (m *JWTManager) GenerateAccessTokenOnly(userID, username string, roles []string) (token string, jti string, exp time.Time, err error) {
+	exp = time.Now().Add(m.accessTTL)
+	tokenJTI := uuid.New().String()
+
+	claims := &Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        tokenJTI,
+			Subject:   userID,
+			Issuer:    m.issuer,
+			Audience:  jwt.ClaimStrings{m.audience},
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(exp),
+		},
+		AgentID:  userID,
+		Username: username,
+		Roles:    roles,
+		Type:     "access",
+	}
+
+	signed := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token, err = signed.SignedString(m.privateKey)
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("sign access token: %w", err)
+	}
+	return token, tokenJTI, exp, nil
+}
+
+// RefreshTTL returns the configured refresh token TTL.
+func (m *JWTManager) RefreshTTL() time.Duration {
+	return m.refreshTTL
 }

@@ -95,6 +95,32 @@ func NewCertificateService(
 	return s
 }
 
+// NewCertificateServiceWithKeys creates a CertificateService using pre-loaded
+// CA key material from the KeyStore (encrypted at rest). This avoids reading
+// ca.key and ca.crt from disk at runtime.
+func NewCertificateServiceWithKeys(
+	certRepo repository.CertificateRepository,
+	agentRepo repository.AgentRepository,
+	auditRepo repository.AuditLogRepository,
+	redis *cache.RedisClient,
+	logger *logrus.Logger,
+	caCert *x509.Certificate,
+	caKey interface{},
+	caCertPEM []byte,
+) CertificateService {
+	return &certServiceImpl{
+		certRepo:  certRepo,
+		agentRepo: agentRepo,
+		auditRepo: auditRepo,
+		redis:     redis,
+		logger:    logger,
+		caCert:    caCert,
+		caKey:     caKey,
+		caCertPEM: caCertPEM,
+		validDays: 90,
+	}
+}
+
 // loadCA loads the Root CA certificate and private key from disk.
 func (s *certServiceImpl) loadCA() error {
 	caCertPEM, err := os.ReadFile(s.caCertPath)

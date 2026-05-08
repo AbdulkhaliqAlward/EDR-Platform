@@ -83,6 +83,32 @@ func LoadServerTLSConfig(cfg *TLSConfig) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
+// LoadServerTLSConfigFromMemory builds the same mTLS tls.Config as
+// LoadServerTLSConfig but uses an in-memory tls.Certificate (from the
+// KeyStore) and raw CA PEM bytes instead of reading files from disk.
+func LoadServerTLSConfigFromMemory(serverCert tls.Certificate, caCertPEM []byte) (*tls.Config, error) {
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate PEM")
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		MinVersion:   tls.VersionTLS13,
+
+		CipherSuites: []uint16{
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_128_GCM_SHA256,
+		},
+
+		PreferServerCipherSuites: true,
+	}
+	return tlsConfig, nil
+}
+
 // LoadClientTLSConfig loads TLS configuration for gRPC clients.
 func LoadClientTLSConfig(cfg *TLSConfig) (*tls.Config, error) {
 	// Load client certificate and key

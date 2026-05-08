@@ -6,8 +6,8 @@
 import { useState } from 'react';
 import { 
     FileText, Download, BarChart3, TrendingUp, 
-    AlertTriangle, CheckCircle, Server, Shield, Activity,
-    ChevronDown, ChevronUp
+    AlertTriangle, CheckCircle, Shield, Activity,
+    ChevronDown, ChevronUp, Bug, ClipboardList, Terminal
 } from 'lucide-react';
 import {
     BarChart,
@@ -147,23 +147,21 @@ export function ProfessionalReportView({
                         <KpiCard 
                             title="Total Alerts" 
                             value={data.summary.totalAlerts} 
-                            trend={+12} 
                             color={config.colorScheme.primary}
                         />
                         <KpiCard 
                             title="Critical" 
                             value={data.summary.criticalCount} 
-                            trend={-5}
                             color={config.colorScheme.danger}
                         />
                         <KpiCard 
-                            title="High Severity" 
-                            value={data.summary.highCount}
+                            title="Vulnerabilities" 
+                            value={data.summary.totalVulnerabilities}
                             color={config.colorScheme.warning}
                         />
                         <KpiCard 
-                            title="Response Time" 
-                            value={`${data.summary.avgResponseTime || 0}m`}
+                            title="MTTR" 
+                            value={data.summary.mttr ? `${data.summary.mttr}m` : 'N/A'}
                             color={config.colorScheme.accent}
                         />
                     </div>
@@ -172,8 +170,9 @@ export function ProfessionalReportView({
                             During the period <strong>{new Date(data.period.from).toLocaleDateString()}</strong> to{' '}
                             <strong>{new Date(data.period.to).toLocaleDateString()}</strong>, the EDR platform detected{' '}
                             <strong>{data.summary.totalAlerts}</strong> security events across{' '}
-                            <strong>{data.summary.totalDevices}</strong> monitored endpoints. 
-                            Critical attention is required for <strong>{data.summary.criticalCount}</strong> high-risk alerts.
+                            <strong>{data.summary.totalDevices}</strong> monitored endpoints.
+                            {data.summary.criticalCount > 0 && <> Critical attention is required for <strong>{data.summary.criticalCount}</strong> high-risk alerts.</>}
+                            {data.summary.totalVulnerabilities > 0 && <> Additionally, <strong>{data.summary.totalVulnerabilities}</strong> vulnerability findings were identified{data.summary.kevCount > 0 ? <>, including <strong>{data.summary.kevCount}</strong> CISA KEV-listed entries</> : ''}.</>}
                         </p>
                     </div>
                 </ReportSection>}
@@ -190,8 +189,14 @@ export function ProfessionalReportView({
                         <StatPill label="Alerts" value={data.summary.totalAlerts} color="bg-blue-500" />
                         <StatPill label="Critical" value={data.summary.criticalCount} color="bg-red-500" />
                         <StatPill label="High" value={data.summary.highCount} color="bg-orange-500" />
-                        <StatPill label="Medium" value={data.summary.mediumCount} color="bg-yellow-500" />
-                        <StatPill label="Low" value={data.summary.lowCount} color="bg-blue-400" />
+                        <StatPill label="Devices" value={data.summary.totalDevices} color="bg-green-500" />
+                        <StatPill label="Vulns" value={data.summary.totalVulnerabilities} color="bg-purple-500" />
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+                        <StatPill label="KEV" value={data.summary.kevCount} color="bg-red-600" />
+                        <StatPill label="Exploitable" value={data.summary.exploitableCount} color="bg-rose-500" />
+                        <StatPill label="Cmd Success" value={`${data.summary.commandSuccessRate}%`} color="bg-cyan-500" />
+                        <StatPill label="Online" value={data.summary.onlineDevices} color="bg-emerald-500" />
                     </div>
                 </ReportSection>}
 
@@ -343,23 +348,150 @@ export function ProfessionalReportView({
                     </ReportSection>
                 )}
 
-                {/* OS Distribution */}
-                {shouldShowSection('os') && data.charts.osDistribution.length > 0 && (
+                {/* Vulnerability Summary */}
+                {shouldShowSection('vulns') && data.charts.vulnBySeverity.length > 0 && (
                     <ReportSection
-                        title="Operating System Distribution"
-                        icon={Server}
-                        color={config.colorScheme.success}
-                        isExpanded={expandedSections.has('os')}
-                        onToggle={() => toggleSection('os')}
+                        title={`Vulnerability Findings (${data.summary.totalVulnerabilities} total)`}
+                        icon={Bug}
+                        color={config.colorScheme.warning}
+                        isExpanded={expandedSections.has('vulns')}
+                        onToggle={() => toggleSection('vulns')}
                     >
-                        <div className="flex flex-wrap gap-4">
-                            {data.charts.osDistribution.map((os) => (
-                                <div key={os.os} className="flex items-center gap-2 px-4 py-2 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
-                                    <Server className="w-4 h-4 text-slate-500" />
-                                    <span className="font-medium capitalize">{os.os}</span>
-                                    <span className="text-slate-500">({os.count})</span>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
+                            <div className="h-64">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={data.charts.vulnBySeverity}>
+                                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                                        <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                                        <YAxis tick={{ fontSize: 11 }} />
+                                        <Tooltip contentStyle={{ background: 'rgba(15, 23, 42, 0.95)', border: 'none', borderRadius: '8px', color: 'white' }} />
+                                        <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                                            {data.charts.vulnBySeverity.map((entry, idx) => (
+                                                <Cell key={`vuln-${idx}`} fill={entry.color} />
+                                            ))}
+                                        </Bar>
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                            <div className="space-y-3">
+                                <div className="flex items-center justify-between p-3 bg-red-50 dark:bg-red-900/20 rounded-lg">
+                                    <span className="text-sm font-medium">CISA KEV Listed</span>
+                                    <span className="text-sm font-bold text-red-600">{data.summary.kevCount}</span>
                                 </div>
-                            ))}
+                                <div className="flex items-center justify-between p-3 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
+                                    <span className="text-sm font-medium">Exploit Available</span>
+                                    <span className="text-sm font-bold text-orange-600">{data.summary.exploitableCount}</span>
+                                </div>
+                                {data.charts.topVulnPackages.slice(0, 5).map((pkg) => (
+                                    <div key={pkg.package} className="flex items-center justify-between p-2 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
+                                        <span className="text-xs font-mono">{pkg.package}</span>
+                                        <span className="text-xs font-bold">{pkg.count} CVEs</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                        {data.tables.vulnerabilities.length > 0 && (
+                            <div className="overflow-x-auto mt-4">
+                                <table className="min-w-full text-sm">
+                                    <thead className="bg-slate-100 dark:bg-slate-800">
+                                        <tr>
+                                            <th className="px-4 py-2 text-left font-semibold">CVE</th>
+                                            <th className="px-4 py-2 text-left font-semibold">Severity</th>
+                                            <th className="px-4 py-2 text-left font-semibold">Package</th>
+                                            <th className="px-4 py-2 text-left font-semibold">Host</th>
+                                            <th className="px-4 py-2 text-left font-semibold">KEV</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                                        {data.tables.vulnerabilities.slice(0, 5).map((v: any, idx: number) => (
+                                            <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                                                <td className="px-4 py-2 font-mono text-xs">{v.cve}</td>
+                                                <td className="px-4 py-2"><SeverityBadge severity={v.severity} /></td>
+                                                <td className="px-4 py-2 text-xs">{v.package_name}@{v.installed_version}</td>
+                                                <td className="px-4 py-2 text-slate-600">{v.hostname || v.agent_id?.slice(0, 8)}</td>
+                                                <td className="px-4 py-2">{v.kev_listed ? <span className="text-red-600 font-bold text-xs">KEV</span> : '—'}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                {data.tables.vulnerabilities.length > 5 && (
+                                    <p className="text-center text-xs text-slate-500 py-2">+ {data.tables.vulnerabilities.length - 5} more in full report</p>
+                                )}
+                            </div>
+                        )}
+                    </ReportSection>
+                )}
+
+                {/* Commands Summary */}
+                {shouldShowSection('commands') && data.charts.commandsByStatus.length > 0 && (
+                    <ReportSection
+                        title={`Command Execution (${data.summary.totalCommands} total)`}
+                        icon={Terminal}
+                        color={config.colorScheme.accent}
+                        isExpanded={expandedSections.has('commands')}
+                        onToggle={() => toggleSection('commands')}
+                    >
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                            <KpiCard title="Success Rate" value={`${data.summary.commandSuccessRate}%`} color={config.colorScheme.success} />
+                            <KpiCard title="Pending" value={data.summary.pendingCommands} color={config.colorScheme.warning} />
+                            <KpiCard title="Failed" value={data.summary.failedCommands} color={config.colorScheme.danger} />
+                            <KpiCard title="Total" value={data.summary.totalCommands} color={config.colorScheme.primary} />
+                        </div>
+                        <div className="h-48">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <BarChart data={data.charts.commandsByStatus}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                                    <XAxis dataKey="status" tick={{ fontSize: 11 }} />
+                                    <YAxis tick={{ fontSize: 11 }} />
+                                    <Tooltip contentStyle={{ background: 'rgba(15, 23, 42, 0.95)', border: 'none', borderRadius: '8px', color: 'white' }} />
+                                    <Bar dataKey="count" fill={config.colorScheme.accent} radius={[4, 4, 0, 0]} />
+                                </BarChart>
+                            </ResponsiveContainer>
+                        </div>
+                    </ReportSection>
+                )}
+
+                {/* Audit Trail */}
+                {shouldShowSection('auditLog') && data.tables.auditLogs.length > 0 && (
+                    <ReportSection
+                        title={`Audit Trail (${data.tables.auditLogs.length} events)`}
+                        icon={ClipboardList}
+                        color={config.colorScheme.secondary}
+                        isExpanded={expandedSections.has('auditLog')}
+                        onToggle={() => toggleSection('auditLog')}
+                    >
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-sm">
+                                <thead className="bg-slate-100 dark:bg-slate-800">
+                                    <tr>
+                                        <th className="px-4 py-2 text-left font-semibold">Time</th>
+                                        <th className="px-4 py-2 text-left font-semibold">User</th>
+                                        <th className="px-4 py-2 text-left font-semibold">Action</th>
+                                        <th className="px-4 py-2 text-left font-semibold">Resource</th>
+                                        <th className="px-4 py-2 text-left font-semibold">Result</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                                    {data.tables.auditLogs.slice(0, 5).map((log: any, idx: number) => (
+                                        <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                                            <td className="px-4 py-2 text-slate-600 dark:text-slate-400 text-xs">
+                                                {new Date(log.timestamp).toLocaleString()}
+                                            </td>
+                                            <td className="px-4 py-2 font-medium">{log.username}</td>
+                                            <td className="px-4 py-2 capitalize">{log.action?.replace(/_/g, ' ')}</td>
+                                            <td className="px-4 py-2 text-xs text-slate-600">{log.resource_type}</td>
+                                            <td className="px-4 py-2">
+                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${log.result === 'success' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'}`}>
+                                                    {log.result}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            {data.tables.auditLogs.length > 5 && (
+                                <p className="text-center text-xs text-slate-500 py-2">+ {data.tables.auditLogs.length - 5} more in full report</p>
+                            )}
                         </div>
                     </ReportSection>
                 )}
@@ -419,7 +551,7 @@ function KpiCard({ title, value, trend, color }: { title: string; value: number 
     );
 }
 
-function StatPill({ label, value, color }: { label: string; value: number; color: string }) {
+function StatPill({ label, value, color }: { label: string; value: number | string; color: string }) {
     return (
         <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
             <div className={`w-2 h-2 rounded-full ${color}`} />

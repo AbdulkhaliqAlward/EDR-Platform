@@ -61,3 +61,11 @@ temp/
 # Protobuf files explicitly tracked
 !*.proto
 !*.pb.go
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Private keys and encrypted-at-rest key material (NEVER commit)
+# ─────────────────────────────────────────────────────────────────────────────
+certs/*.key
+certs/*.pem
+certs/*.enc
+certs/.keystore.salt

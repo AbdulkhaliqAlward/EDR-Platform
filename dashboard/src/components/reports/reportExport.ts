@@ -73,6 +73,18 @@ async function exportToExcel(data: ReportData, template: ReportTemplate): Promis
         ['Medium', data.summary.mediumCount],
         ['Low', data.summary.lowCount],
         ['Total Devices', data.summary.totalDevices],
+        ['Online Devices', data.summary.onlineDevices],
+        ['Offline Devices', data.summary.offlineDevices],
+        ['Avg Health Score', data.summary.avgHealthScore],
+        ['Total Vulnerabilities', data.summary.totalVulnerabilities],
+        ['KEV Listed', data.summary.kevCount],
+        ['Exploitable', data.summary.exploitableCount],
+        ['Total Commands', data.summary.totalCommands],
+        ['Command Success Rate', `${data.summary.commandSuccessRate}%`],
+        ['Pending Commands', data.summary.pendingCommands],
+        ['Failed Commands', data.summary.failedCommands],
+        ['MTTR (minutes)', data.summary.mttr ?? 'N/A'],
+        ['Avg Confidence', data.summary.avgConfidence],
         ['Generated At', new Date(data.generatedAt).toLocaleString()],
     ];
     const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
@@ -100,6 +112,18 @@ async function exportToExcel(data: ReportData, template: ReportTemplate): Promis
     if (data.charts.timeline.length > 0) {
         const timelineSheet = XLSX.utils.json_to_sheet(data.charts.timeline);
         XLSX.utils.book_append_sheet(workbook, timelineSheet, 'Timeline');
+    }
+
+    // Vulnerabilities sheet
+    if (data.tables.vulnerabilities.length > 0) {
+        const vulnSheet = XLSX.utils.json_to_sheet(data.tables.vulnerabilities);
+        XLSX.utils.book_append_sheet(workbook, vulnSheet, 'Vulnerabilities');
+    }
+
+    // Audit Logs sheet
+    if (data.tables.auditLogs.length > 0) {
+        const auditSheet = XLSX.utils.json_to_sheet(data.tables.auditLogs);
+        XLSX.utils.book_append_sheet(workbook, auditSheet, 'Audit Logs');
     }
     
     // Download
@@ -170,6 +194,33 @@ async function exportToCSV(data: ReportData, template: ReportTemplate): Promise<
         rows.push(headers);
         data.tables.alerts.forEach(alert => {
             rows.push(headers.map(h => String(alert[h] ?? '')));
+        });
+        rows.push([]);
+    }
+
+    // Vulnerabilities
+    if (data.tables.vulnerabilities.length > 0) {
+        rows.push(['VULNERABILITIES']);
+        rows.push(['CVE', 'Severity', 'Package', 'Installed Version', 'Fixed Version', 'Host', 'KEV', 'Exploit Available', 'CVSS']);
+        data.tables.vulnerabilities.forEach((v: any) => {
+            rows.push([
+                v.cve || '', v.severity || '', v.package_name || '', v.installed_version || '',
+                v.fixed_version || '', v.hostname || v.agent_id || '', v.kev_listed ? 'YES' : 'NO',
+                v.exploit_available ? 'YES' : 'NO', String(v.cvss ?? ''),
+            ]);
+        });
+        rows.push([]);
+    }
+
+    // Audit Logs
+    if (data.tables.auditLogs.length > 0) {
+        rows.push(['AUDIT LOGS']);
+        rows.push(['Timestamp', 'User', 'Action', 'Resource', 'Result']);
+        data.tables.auditLogs.forEach((log: any) => {
+            rows.push([
+                log.timestamp || '', log.username || '', log.action || '',
+                log.resource_type || '', log.result || '',
+            ]);
         });
         rows.push([]);
     }
@@ -345,12 +396,16 @@ function generateHTMLReport(data: ReportData, template: string, title: string, f
             <div class="kpi-label">High</div>
         </div>
         <div class="kpi-card">
-            <div class="kpi-value" style="color: ${severityColors.medium}">${data.summary.mediumCount}</div>
-            <div class="kpi-label">Medium</div>
+            <div class="kpi-value" style="color: ${severityColors.medium}">${data.summary.totalVulnerabilities}</div>
+            <div class="kpi-label">Vulnerabilities</div>
         </div>
         <div class="kpi-card">
             <div class="kpi-value">${data.summary.totalDevices}</div>
             <div class="kpi-label">Devices</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-value">${data.summary.commandSuccessRate}%</div>
+            <div class="kpi-label">Command Success</div>
         </div>
     </div>
     
@@ -403,6 +458,88 @@ function generateHTMLReport(data: ReportData, template: string, title: string, f
         </table>
         ${data.tables.devices.length > 30 ? `<p style="color: #64748b; font-size: 14px;">+ ${data.tables.devices.length - 30} more devices in full report</p>` : ''}
     </div>
+    
+    ${data.tables.vulnerabilities.length > 0 ? `
+    <div class="section">
+        <h2>Vulnerability Findings (${data.summary.totalVulnerabilities} total | ${data.summary.kevCount} KEV | ${data.summary.exploitableCount} Exploitable)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>CVE</th>
+                    <th>Severity</th>
+                    <th>Package</th>
+                    <th>Host</th>
+                    <th>KEV</th>
+                    <th>Exploit</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${data.tables.vulnerabilities.slice(0, 30).map((v: any) => `
+                <tr>
+                    <td>${v.cve || 'N/A'}</td>
+                    <td><span class="severity severity-${v.severity}">${v.severity}</span></td>
+                    <td>${v.package_name || 'N/A'}@${v.installed_version || ''}</td>
+                    <td>${v.hostname || v.agent_id?.slice(0, 8) || 'N/A'}</td>
+                    <td>${v.kev_listed ? '<strong style="color:#dc2626">KEV</strong>' : '—'}</td>
+                    <td>${v.exploit_available ? '<strong style="color:#f97316">YES</strong>' : '—'}</td>
+                </tr>
+                `).join('')}
+            </tbody>
+        </table>
+        ${data.tables.vulnerabilities.length > 30 ? `<p style="color: #64748b; font-size: 14px;">+ ${data.tables.vulnerabilities.length - 30} more vulnerabilities in full report</p>` : ''}
+    </div>` : ''}
+
+    ${data.tables.commands.length > 0 ? `
+    <div class="section">
+        <h2>Command Execution Summary (${data.summary.commandSuccessRate}% success rate)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Agent</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${data.tables.commands.slice(0, 20).map((c: any) => `
+                <tr>
+                    <td>${c.issued_at ? new Date(c.issued_at).toLocaleString() : 'N/A'}</td>
+                    <td>${c.command_type || 'N/A'}</td>
+                    <td>${c.status || 'N/A'}</td>
+                    <td>${c.agent_id?.slice(0, 8) || 'N/A'}</td>
+                </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    </div>` : ''}
+
+    ${data.tables.auditLogs.length > 0 ? `
+    <div class="section">
+        <h2>Audit Trail</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>User</th>
+                    <th>Action</th>
+                    <th>Resource</th>
+                    <th>Result</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${data.tables.auditLogs.slice(0, 20).map((log: any) => `
+                <tr>
+                    <td>${log.timestamp ? new Date(log.timestamp).toLocaleString() : 'N/A'}</td>
+                    <td>${log.username || 'N/A'}</td>
+                    <td>${log.action?.replace(/_/g, ' ') || 'N/A'}</td>
+                    <td>${log.resource_type || 'N/A'}</td>
+                    <td>${log.result || 'N/A'}</td>
+                </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    </div>` : ''}
     
     <div class="section no-print" style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
         <p style="color: #94a3b8; font-size: 12px; text-align: center;">

@@ -12,10 +12,11 @@ import (
 
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/models"
+	"github.com/edr-platform/connection-manager/pkg/security"
 )
 
 // Login handles user login — authenticates against the database and issues
-// a JWT with the user's real role from the users table.
+// a JWT access token + opaque refresh token with server-side session tracking.
 func (h *Handlers) Login(c echo.Context) error {
 	if h.authSvc == nil {
 		if h.jwtManager == nil {
@@ -68,28 +69,8 @@ func (h *Handlers) Login(c echo.Context) error {
 		})
 	}
 
-	// Audit: login success
-	if h.auditRepo != nil {
-		audit := models.NewAuditLog(loginResp.User.ID, loginResp.User.Username, models.AuditActionLoginSuccess, "user", loginResp.User.ID).
-			WithContext(ip, ua)
-		go h.auditRepo.Create(c.Request().Context(), audit) //nolint:errcheck
-	}
-
-	return c.JSON(http.StatusOK, LoginResponse{
-		AccessToken:  loginResp.AccessToken,
-		RefreshToken: loginResp.RefreshToken,
-		ExpiresIn:    int64(time.Until(loginResp.AccessExp).Seconds()),
-		TokenType:    "Bearer",
-		User: UserResponse{
-			ID:         loginResp.User.ID,
-			Username:   loginResp.User.Username,
-			Email:      loginResp.User.Email,
-			FullName:   loginResp.User.FullName,
-			Role:       loginResp.User.Role,
-			Status:     loginResp.User.Status,
-			MFAEnabled: loginResp.User.MFAEnabled,
-		},
-	})
+	// ── Session-based token issuance ─────────────────────────────────────
+	return h.issueSessionTokens(c, loginResp, ip, ua)
 }
 
 // VerifyMFA completes a login started by Login() when the user has MFA
@@ -126,18 +107,82 @@ func (h *Handlers) VerifyMFA(c echo.Context) error {
 		return errorResponse(c, http.StatusUnauthorized, "MFA_FAILED", "MFA verification failed")
 	}
 
-	// Audit: login success (deferred from Login so it reflects the real moment
-	// the user became authenticated).
+	return h.issueSessionTokens(c, loginResp, ip, ua)
+}
+
+// issueSessionTokens is the common path for Login and VerifyMFA after
+// successful credential verification. It creates the session record,
+// enforces single active session, and returns the token response.
+func (h *Handlers) issueSessionTokens(c echo.Context, loginResp *service.LoginResponse, ip, ua string) error {
+	ctx := c.Request().Context()
+
+	// Generate access token (JWT)
+	accessToken, accessJTI, accessExp, err := h.jwtManager.GenerateAccessTokenOnly(
+		loginResp.User.ID.String(), loginResp.User.Username, []string{loginResp.User.Role},
+	)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to generate access token")
+		return errorResponse(c, http.StatusInternalServerError, "TOKEN_ERROR", "Failed to generate tokens")
+	}
+
+	// Generate opaque refresh token
+	rawRefresh, refreshHash, err := security.GenerateOpaqueToken()
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to generate refresh token")
+		return errorResponse(c, http.StatusInternalServerError, "TOKEN_ERROR", "Failed to generate tokens")
+	}
+
+	// ── Single Active Session enforcement ────────────────────────────────
+	// Revoke any existing active sessions for this user before creating a new one.
+	// Also blacklist their access JTIs in Redis so the old browser gets an
+	// immediate 401 instead of silently working until the JWT expires.
+	if h.sessionRepo != nil {
+		oldSessions, listErr := h.sessionRepo.GetActiveForUser(ctx, loginResp.User.ID)
+		if listErr != nil {
+			h.logger.WithError(listErr).Warn("Failed to list previous sessions")
+		}
+		for _, old := range oldSessions {
+			if h.redis != nil && old.AccessJTI != "" {
+				if blErr := h.redis.BlacklistToken(ctx, old.AccessJTI, time.Now().Add(1*time.Hour), "superseded"); blErr != nil {
+					h.logger.WithError(blErr).Warn("Failed to blacklist superseded access JTI")
+				}
+			}
+		}
+		if err := h.sessionRepo.RevokeAllForUser(ctx, loginResp.User.ID, "superseded"); err != nil {
+			h.logger.WithError(err).Warn("Failed to revoke previous sessions")
+			// Non-fatal: continue with login
+		}
+
+		// Create new session record
+		now := time.Now()
+		session := &models.Session{
+			ID:               uuid.New(),
+			UserID:           loginResp.User.ID,
+			RefreshTokenHash: refreshHash,
+			AccessJTI:        accessJTI,
+			IPAddress:        ip,
+			UserAgent:        ua,
+			CreatedAt:        now,
+			LastActiveAt:     now,
+			ExpiresAt:        now.Add(h.jwtManager.RefreshTTL()),
+		}
+		if err := h.sessionRepo.Create(ctx, session); err != nil {
+			h.logger.WithError(err).Error("Failed to create session")
+			return errorResponse(c, http.StatusInternalServerError, "SESSION_ERROR", "Failed to create session")
+		}
+	}
+
+	// Audit: login success
 	if h.auditRepo != nil {
 		audit := models.NewAuditLog(loginResp.User.ID, loginResp.User.Username, models.AuditActionLoginSuccess, "user", loginResp.User.ID).
 			WithContext(ip, ua)
-		go h.auditRepo.Create(c.Request().Context(), audit) //nolint:errcheck
+		go h.auditRepo.Create(ctx, audit) //nolint:errcheck
 	}
 
 	return c.JSON(http.StatusOK, LoginResponse{
-		AccessToken:  loginResp.AccessToken,
-		RefreshToken: loginResp.RefreshToken,
-		ExpiresIn:    int64(time.Until(loginResp.AccessExp).Seconds()),
+		AccessToken:  accessToken,
+		RefreshToken: rawRefresh,
+		ExpiresIn:    int64(time.Until(accessExp).Seconds()),
 		TokenType:    "Bearer",
 		User: UserResponse{
 			ID:         loginResp.User.ID,
@@ -151,7 +196,14 @@ func (h *Handlers) VerifyMFA(c echo.Context) error {
 	})
 }
 
-// RefreshToken handles token refresh.
+// RefreshToken handles token refresh with rotation and reuse detection.
+//
+// Flow:
+//  1. Hash the incoming opaque refresh token
+//  2. Look up session by hash in the DB
+//  3. If NOT found or revoked → reuse detection: revoke ALL user sessions
+//  4. If found and active → rotate: new access token + new refresh token,
+//     update session, blacklist old access JTI
 func (h *Handlers) RefreshToken(c echo.Context) error {
 	if h.jwtManager == nil {
 		return errorResponse(c, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "JWT authentication is not configured")
@@ -162,20 +214,109 @@ func (h *Handlers) RefreshToken(c echo.Context) error {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 	}
 
+	// ── Session-based rotation (primary path) ────────────────────────────
+	if h.sessionRepo != nil {
+		return h.refreshWithSession(c, req.RefreshToken)
+	}
+
+	// ── Legacy fallback (no session repo — should not happen in prod) ────
 	accessToken, expiresAt, err := h.jwtManager.RefreshAccessToken(req.RefreshToken)
 	if err != nil {
 		return errorResponse(c, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Invalid or expired refresh token")
 	}
-
 	return c.JSON(http.StatusOK, RefreshTokenResponse{
 		AccessToken: accessToken,
 		ExpiresIn:   int64(time.Until(expiresAt).Seconds()),
 	})
 }
 
+// refreshWithSession performs the session-based refresh token rotation.
+func (h *Handlers) refreshWithSession(c echo.Context, rawRefreshToken string) error {
+	ctx := c.Request().Context()
+	tokenHash := security.HashToken(rawRefreshToken)
+
+	session, err := h.sessionRepo.FindByRefreshTokenHash(ctx, tokenHash)
+	if err != nil {
+		h.logger.WithError(err).Error("Session lookup failed")
+		return errorResponse(c, http.StatusInternalServerError, "SESSION_ERROR", "Session lookup failed")
+	}
+
+	// ── Reuse Detection ──────────────────────────────────────────────────
+	// Token not found OR session already revoked → possible theft.
+	// Revoke ALL sessions for the user as a security measure.
+	if session == nil || !session.IsActive() {
+		h.logger.Warn("Refresh token reuse detected — revoking all sessions for user")
+		if session != nil {
+			// We know the user — revoke everything.
+			if revokeErr := h.sessionRepo.RevokeAllForUser(ctx, session.UserID, "security"); revokeErr != nil {
+				h.logger.WithError(revokeErr).Error("Failed to revoke sessions on reuse detection")
+			}
+		}
+		return errorResponse(c, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Invalid or expired refresh token")
+	}
+
+	// ── Generate new tokens ──────────────────────────────────────────────
+	// Look up the user to get current username and role.
+	userID := session.UserID.String()
+	username := ""
+	var roles []string
+
+	// Extract username/roles from the old access token (best-effort).
+	if session.AccessJTI != "" && h.jwtManager != nil {
+		// We can't look up by JTI alone; use session.UserID instead.
+		// The username is embedded in the JWT claims of the access token.
+		// Since we don't store it in the session, we'll query the user repo.
+	}
+
+	// Query user from DB for fresh role/username.
+	if h.userRepo != nil {
+		user, userErr := h.userRepo.GetByID(ctx, session.UserID)
+		if userErr != nil || user == nil {
+			h.logger.WithError(userErr).Error("Failed to lookup user for session refresh")
+			return errorResponse(c, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Session user not found")
+		}
+		username = user.Username
+		roles = []string{user.Role}
+	}
+
+	newAccessToken, newAccessJTI, newAccessExp, err := h.jwtManager.GenerateAccessTokenOnly(userID, username, roles)
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to generate new access token")
+		return errorResponse(c, http.StatusInternalServerError, "TOKEN_ERROR", "Failed to generate access token")
+	}
+
+	newRawRefresh, newRefreshHash, err := security.GenerateOpaqueToken()
+	if err != nil {
+		h.logger.WithError(err).Error("Failed to generate new refresh token")
+		return errorResponse(c, http.StatusInternalServerError, "TOKEN_ERROR", "Failed to generate refresh token")
+	}
+
+	// ── Blacklist old access token JTI (Redis — existing mechanism) ──────
+	if h.redis != nil && session.AccessJTI != "" {
+		blacklistExp := time.Now().Add(24 * time.Hour)
+		if blErr := h.redis.BlacklistToken(ctx, session.AccessJTI, blacklistExp, "rotation"); blErr != nil {
+			h.logger.WithError(blErr).Warn("Failed to blacklist old access token JTI")
+		}
+	}
+
+	// ── Rotate session in DB (atomic update) ─────────────────────────────
+	// Keep original expires_at — no sliding window.
+	if err := h.sessionRepo.RotateSession(ctx, session.ID, newRefreshHash, newAccessJTI); err != nil {
+		h.logger.WithError(err).Error("Failed to rotate session")
+		return errorResponse(c, http.StatusInternalServerError, "SESSION_ERROR", "Failed to rotate session")
+	}
+
+	return c.JSON(http.StatusOK, RefreshTokenResponse{
+		AccessToken:  newAccessToken,
+		RefreshToken: newRawRefresh,
+		ExpiresIn:    int64(time.Until(newAccessExp).Seconds()),
+	})
+}
+
 // Logout handles user logout.
 func (h *Handlers) Logout(c echo.Context) error {
 	ip, ua := auditContext(c)
+	ctx := c.Request().Context()
 
 	// Extract token and add to blacklist
 	authHeader := c.Request().Header.Get("Authorization")
@@ -188,9 +329,22 @@ func (h *Handlers) Logout(c echo.Context) error {
 				if err != nil {
 					h.logger.WithError(err).Warn("Failed to get token ID")
 				} else {
+					// Blacklist access token in Redis (existing mechanism — kept)
 					expiresAt := time.Now().Add(24 * time.Hour)
-					if err := h.redis.BlacklistToken(c.Request().Context(), jti, expiresAt, "logout"); err != nil {
+					if err := h.redis.BlacklistToken(ctx, jti, expiresAt, "logout"); err != nil {
 						h.logger.WithError(err).Warn("Failed to blacklist token")
+					}
+
+					// Revoke session record by access JTI
+					if h.sessionRepo != nil {
+						session, sessErr := h.sessionRepo.FindByAccessJTI(ctx, jti)
+						if sessErr != nil {
+							h.logger.WithError(sessErr).Warn("Failed to find session by JTI")
+						} else if session != nil {
+							if revokeErr := h.sessionRepo.Revoke(ctx, session.ID, "logout"); revokeErr != nil {
+								h.logger.WithError(revokeErr).Warn("Failed to revoke session")
+							}
+						}
 					}
 				}
 			}
@@ -210,7 +364,7 @@ func (h *Handlers) Logout(c echo.Context) error {
 		}
 		audit := models.NewAuditLog(userID, username, models.AuditActionUserLogout, "user", userID).
 			WithContext(ip, ua)
-		go h.auditRepo.Create(c.Request().Context(), audit) //nolint:errcheck
+		go h.auditRepo.Create(ctx, audit) //nolint:errcheck
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{

@@ -12,7 +12,7 @@
   --xc-nav-hover: rgba(255, 255, 255, 0.08);
   --xc-nav-text: #c0ced6;
   --xc-nav-active: #f19637;
-  --xc-nav-border: rgba(255, 255, 255, 0.06);
+  --xc-nav-border: rgba(255, 255, 255, 0.2);
   /* Protocol / product original accent (logo + primary actions only) */
   --xc-brand-original: #22d3ee;
 

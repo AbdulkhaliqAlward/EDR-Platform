@@ -100,8 +100,9 @@ type RefreshTokenRequest struct {
 
 // RefreshTokenResponse after token refresh.
 type RefreshTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresIn   int64  `json:"expires_in"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token,omitempty"` // new rotated opaque token
+	ExpiresIn    int64  `json:"expires_in"`
 }
 
 // ============================================================================

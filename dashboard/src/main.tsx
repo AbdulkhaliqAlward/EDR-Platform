@@ -3,6 +3,13 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 
+const savedDarkMode = localStorage.getItem('darkMode');
+if (savedDarkMode === 'true') {
+  document.documentElement.classList.add('dark');
+} else {
+  document.documentElement.classList.remove('dark');
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

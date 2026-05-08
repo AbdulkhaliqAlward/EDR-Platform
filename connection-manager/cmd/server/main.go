@@ -181,43 +181,71 @@ func main() {
 		defer redisClient.Close()
 	}
 
-	// TLS configuration: skip when GRPC_INSECURE=1 or true (plaintext gRPC for debugging / Host-VM connectivity)
+	// ── Encrypted KeyStore Bootstrap ─────────────────────────────────────
+	// All private keys (ca.key, server.key, jwt_private.pem) are stored
+	// encrypted at rest using AES-256-GCM with an Argon2id-derived KEK.
+	// On first boot: generates keys → encrypts → deletes plaintext.
+	// On subsequent boots: decrypts .enc files into memory.
 	var tlsConfig *tls.Config
+	var keyStore *security.KeyStore
+
 	if grpcInsecure() {
 		logger.Warn("GRPC_INSECURE is set — gRPC server will use PLAINTEXT (no TLS). Use only for debugging.")
 		tlsConfig = nil
 	} else {
-		// ── Full PKI Bootstrap ──────────────────────────────────────────
-		// Auto-generates ALL crypto material on first run:
-		//   1. CA cert + key       (if missing)
-		//   2. Server cert + key   (if missing or IPs changed)
-		//   3. JWT signing keys    (if missing)
-		// Safe to call on every startup — only generates what is missing.
-		caKeyPath := filepath.Join(filepath.Dir(cfg.Server.CACertPath), "ca.key")
-		if err := security.EnsureFullPKI(
-			cfg.Server.CACertPath, caKeyPath,
-			cfg.Server.TLSCertPath, cfg.Server.TLSKeyPath,
-			cfg.JWT.PrivateKeyPath, cfg.JWT.PublicKeyPath,
-			logger,
-		); err != nil {
-			logger.Fatalf("PKI Bootstrap failed: %v", err)
+		masterPassphrase := os.Getenv("MASTER_KEY_PASSPHRASE")
+		if masterPassphrase == "" {
+			logger.Fatal("MASTER_KEY_PASSPHRASE environment variable is required. " +
+				"This passphrase is used to derive the Key Encryption Key (KEK) that protects " +
+				"ca.key, server.key, and jwt_private.pem at rest. " +
+				"Set it in your .env file or environment before starting the server.")
 		}
 
-		var err error
-		tlsConfig, err = security.LoadServerTLSConfig(&security.TLSConfig{
-			CertPath:   cfg.Server.TLSCertPath,
-			KeyPath:    cfg.Server.TLSKeyPath,
-			CACertPath: cfg.Server.CACertPath,
-		})
-		if err != nil {
-			logger.Fatalf("Failed to load TLS configuration: %v", err)
+		caKeyPath := filepath.Join(filepath.Dir(cfg.Server.CACertPath), "ca.key")
+		var ksErr error
+		keyStore, ksErr = security.NewKeyStore(masterPassphrase, security.KeyStorePaths{
+			CACertPath:     cfg.Server.CACertPath,
+			CAKeyPath:      caKeyPath,
+			ServerCertPath: cfg.Server.TLSCertPath,
+			ServerKeyPath:  cfg.Server.TLSKeyPath,
+			JWTPrivatePath: cfg.JWT.PrivateKeyPath,
+			JWTPublicPath:  cfg.JWT.PublicKeyPath,
+		}, logger)
+		if ksErr != nil {
+			logger.Fatalf("KeyStore creation failed: %v", ksErr)
+		}
+
+		if ksErr = keyStore.Initialize(masterPassphrase); ksErr != nil {
+			logger.Fatalf("KeyStore initialization failed: %v", ksErr)
+		}
+
+		// Build TLS config from in-memory keys (server.key never read from disk).
+		var tlsErr error
+		tlsConfig, tlsErr = security.LoadServerTLSConfigFromMemory(
+			keyStore.ServerTLSCert(),
+			keyStore.CACertPEM(),
+		)
+		if tlsErr != nil {
+			logger.Fatalf("Failed to build TLS configuration from KeyStore: %v", tlsErr)
 		}
 	}
 
-	// Initialize JWT Manager (optional - mTLS-only if keys not available)
+	// Initialize JWT Manager from KeyStore (in-memory keys) or fall back to mTLS-only.
 	var jwtManager *security.JWTManager
-	if cfg.JWT.PrivateKeyPath != "" && cfg.JWT.PublicKeyPath != "" {
-		jwtManager, err = security.NewJWTManager(
+	if keyStore != nil && keyStore.JWTPrivateKey() != nil {
+		jwtManager = security.NewJWTManagerFromKeys(
+			keyStore.JWTPrivateKey(),
+			keyStore.JWTPublicKey(),
+			cfg.JWT.Issuer,
+			cfg.JWT.Audience,
+			cfg.JWT.AccessTTL,
+			cfg.JWT.RefreshTTL,
+		)
+		logger.Info("JWT Manager initialized from KeyStore — dual auth (mTLS + JWT) enabled")
+	} else if cfg.JWT.PrivateKeyPath != "" && cfg.JWT.PublicKeyPath != "" {
+		// Fallback for GRPC_INSECURE mode: load from disk paths (no KeyStore).
+		var jwtErr error
+		jwtManager, jwtErr = security.NewJWTManager(
 			cfg.JWT.PrivateKeyPath,
 			cfg.JWT.PublicKeyPath,
 			cfg.JWT.Issuer,
@@ -225,11 +253,11 @@ func main() {
 			cfg.JWT.AccessTTL,
 			cfg.JWT.RefreshTTL,
 		)
-		if err != nil {
-			logger.Warnf("JWT Manager initialization failed (mTLS-only mode): %v", err)
+		if jwtErr != nil {
+			logger.Warnf("JWT Manager initialization failed (mTLS-only mode): %v", jwtErr)
 			jwtManager = nil
 		} else {
-			logger.Info("JWT Manager initialized - dual auth (mTLS + JWT) enabled")
+			logger.Info("JWT Manager initialized from disk — dual auth (mTLS + JWT) enabled")
 		}
 	} else {
 		logger.Warn("JWT key paths not configured - running in mTLS-only mode")
@@ -302,14 +330,21 @@ func main() {
 		executionRepo = repository.NewPostgresPlaybookExecutionRepository(pool)
 		automationMetricsRepo = repository.NewPostgresAutomationMetricsRepository(pool)
 
-		// CA paths for signing agent certificates (ca.key next to ca.crt)
-		caCertPath := cfg.Server.CACertPath
-		caKeyPath := filepath.Join(filepath.Dir(caCertPath), "ca.key")
-
-		certSvc := service.NewCertificateService(
-			certRepo, agentRepo, auditRepo, redisClient, logger,
-			caCertPath, caKeyPath,
-		)
+		// Certificate service: prefer KeyStore (in-memory CA key) over disk paths.
+		var certSvc service.CertificateService
+		if keyStore != nil {
+			certSvc = service.NewCertificateServiceWithKeys(
+				certRepo, agentRepo, auditRepo, redisClient, logger,
+				keyStore.CACert(), keyStore.CAKey(), keyStore.CACertPEM(),
+			)
+		} else {
+			caCertPath := cfg.Server.CACertPath
+			caKeyPath := filepath.Join(filepath.Dir(caCertPath), "ca.key")
+			certSvc = service.NewCertificateService(
+				certRepo, agentRepo, auditRepo, redisClient, logger,
+				caCertPath, caKeyPath,
+			)
+		}
 
 		// Create agent service (with cert service for auto-issuance on Register)
 		agentSvc = service.NewAgentService(agentRepo, tokenRepo, enrollmentTokenRepo, auditRepo, redisClient, logger, certSvc)
@@ -539,6 +574,7 @@ func main() {
 		pool := dbPool.Pool()
 		apiHandlers.SetUserRepo(repository.NewPostgresUserRepository(pool))
 		apiHandlers.SetRoleRepo(repository.NewPostgresRoleRepository(pool))
+		apiHandlers.SetSessionRepo(repository.NewPostgresSessionRepository(pool))
 		apiHandlers.SetContextPolicyRepo(repository.NewPostgresContextPolicyRepository(pool))
 		agentPackageRepo = repository.NewPostgresAgentPackageRepository(pool)
 		apiHandlers.SetAgentPackageRepo(agentPackageRepo)

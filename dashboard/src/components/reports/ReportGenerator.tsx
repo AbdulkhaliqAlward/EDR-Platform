@@ -14,6 +14,8 @@ import {
     alertsApi,
     agentsApi,
     commandsApi,
+    vulnerabilityApi,
+    auditApi,
 } from '../../api/client';
 import { REPORT_TEMPLATES, REPORT_FORMATS, type ReportTemplate, type ReportFormat, type ReportData } from './ReportTemplates';
 
@@ -77,7 +79,7 @@ export function ReportGenerator() {
         const toIso = new Date(dateRange.to).toISOString();
 
         // Fetch all required data in parallel
-        const [alertsRes, agentsRes, commandsRes] = await Promise.all([
+        const [alertsRes, agentsRes, commandsRes, vulnRes, agentStatsRes, cmdStatsRes, auditRes] = await Promise.allSettled([
             alertsApi.list({
                 limit: 1000,
                 date_from: fromIso,
@@ -88,11 +90,19 @@ export function ReportGenerator() {
             }),
             agentsApi.list({ limit: 500 }),
             commandsApi.list({ limit: 500 }),
+            vulnerabilityApi.listFindings({ limit: 200 }),
+            agentsApi.stats(),
+            commandsApi.stats(),
+            auditApi.list({ limit: 200 }),
         ]);
 
-        const alerts = alertsRes.alerts || [];
-        const agents = agentsRes.data || [];
-        const commands = commandsRes.data || [];
+        const alerts = alertsRes.status === 'fulfilled' ? (alertsRes.value.alerts || []) : [];
+        const agents = agentsRes.status === 'fulfilled' ? (agentsRes.value.data || []) : [];
+        const commands = commandsRes.status === 'fulfilled' ? (commandsRes.value.data || []) : [];
+        const vulnFindings = vulnRes.status === 'fulfilled' ? (vulnRes.value.data || []) : [];
+        const agentStats = agentStatsRes.status === 'fulfilled' ? agentStatsRes.value : null;
+        const _cmdStats = cmdStatsRes.status === 'fulfilled' ? cmdStatsRes.value : null; void _cmdStats;
+        const auditLogs = auditRes.status === 'fulfilled' ? (auditRes.value.data || []) : [];
 
         // Create agent map
         const agentMap = new Map(agents.map((a: { id: string; hostname: string }) => [a.id, a.hostname]));
@@ -102,6 +112,26 @@ export function ReportGenerator() {
         const highCount = alerts.filter((a: { severity: string }) => a.severity === 'high').length;
         const mediumCount = alerts.filter((a: { severity: string }) => a.severity === 'medium').length;
         const lowCount = alerts.filter((a: { severity: string }) => a.severity === 'low').length;
+
+        // Vulnerability stats
+        const kevCount = vulnFindings.filter((v: any) => v.kev_listed).length;
+        const exploitableCount = vulnFindings.filter((v: any) => v.exploit_available).length;
+
+        // Command stats
+        const completedCmds = commands.filter((c: any) => c.status === 'completed').length;
+        const failedCmds = commands.filter((c: any) => c.status === 'failed').length;
+        const pendingCmds = commands.filter((c: any) => c.status === 'pending' || c.status === 'sent').length;
+        const cmdSuccessRate = commands.length > 0 ? Math.round((completedCmds / commands.length) * 100) : 0;
+
+        // MTTR calculation: avg time from alert creation to resolution
+        const resolvedAlerts = alerts.filter((a: any) => a.resolved_at && a.timestamp);
+        let mttr: number | undefined;
+        if (resolvedAlerts.length > 0) {
+            const totalMinutes = resolvedAlerts.reduce((sum: number, a: any) => {
+                return sum + (new Date(a.resolved_at).getTime() - new Date(a.timestamp).getTime()) / 60000;
+            }, 0);
+            mttr = Math.round(totalMinutes / resolvedAlerts.length);
+        }
 
         // Calculate timeline (last 7 days)
         const timeline: ReportData['charts']['timeline'] = [];
@@ -148,6 +178,41 @@ export function ReportGenerator() {
         const osDistribution = Array.from(osCounts.entries())
             .map(([os, count]) => ({ os, count }));
 
+        // Vulnerability severity distribution
+        const vulnSevCounts = new Map<string, number>();
+        vulnFindings.forEach((v: any) => {
+            vulnSevCounts.set(v.severity, (vulnSevCounts.get(v.severity) || 0) + 1);
+        });
+        const vulnBySeverity = [
+            { name: 'Critical', value: vulnSevCounts.get('critical') || 0, color: '#ef4444' },
+            { name: 'High', value: vulnSevCounts.get('high') || 0, color: '#f97316' },
+            { name: 'Medium', value: vulnSevCounts.get('medium') || 0, color: '#f59e0b' },
+            { name: 'Low', value: vulnSevCounts.get('low') || 0, color: '#3b82f6' },
+        ].filter(s => s.value > 0);
+
+        // Top vulnerable packages
+        const pkgCounts = new Map<string, number>();
+        vulnFindings.forEach((v: any) => {
+            if (v.package_name) pkgCounts.set(v.package_name, (pkgCounts.get(v.package_name) || 0) + 1);
+        });
+        const topVulnPackages = Array.from(pkgCounts.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10)
+            .map(([pkg, count]) => ({ package: pkg, count }));
+
+        // Commands by status
+        const statusCounts = new Map<string, number>();
+        commands.forEach((c: any) => {
+            statusCounts.set(c.status, (statusCounts.get(c.status) || 0) + 1);
+        });
+        const commandsByStatus = Array.from(statusCounts.entries())
+            .map(([status, count]) => ({ status, count }));
+
+        // Avg confidence
+        const avgConfidence = alerts.length > 0
+            ? Math.round(alerts.reduce((s: number, a: any) => s + (a.confidence || 0), 0) / alerts.length * 100) / 100
+            : 0;
+
         // Enrich alerts with hostnames
         const enrichedAlerts = alerts.slice(0, 100).map((a: { agent_id: string }) => ({
             ...a,
@@ -169,18 +234,34 @@ export function ReportGenerator() {
                 highCount,
                 mediumCount,
                 lowCount,
+                mttr,
+                totalVulnerabilities: vulnFindings.length,
+                kevCount,
+                exploitableCount,
+                avgHealthScore: agentStats?.avg_health ?? 0,
+                onlineDevices: agentStats?.online ?? 0,
+                offlineDevices: agentStats?.offline ?? 0,
+                avgConfidence,
+                commandSuccessRate: cmdSuccessRate,
+                pendingCommands: pendingCmds,
+                failedCommands: failedCmds,
             },
             charts: {
                 timeline,
                 severityDistribution,
                 topTactics,
                 osDistribution,
+                vulnBySeverity,
+                commandsByStatus,
+                topVulnPackages,
             },
             tables: {
                 alerts: enrichedAlerts,
                 commands: commands.slice(0, 100),
                 devices: agents,
                 risks: [],
+                vulnerabilities: vulnFindings.slice(0, 100),
+                auditLogs: auditLogs.slice(0, 100),
             },
         };
     }, [dateRange, reportScope, selectedAgent]);
@@ -240,9 +321,11 @@ export function ReportGenerator() {
             { id: 'trends', name: 'Trend Analysis', type: 'chart', description: '7-day alert trends' },
             { id: 'mitre', name: 'MITRE ATT&CK Tactics', type: 'chart', description: 'Tactics bar chart' },
             { id: 'os', name: 'OS Distribution', type: 'chart', description: 'Operating system breakdown' },
+            { id: 'vulns', name: 'Vulnerability Summary', type: 'chart', description: 'CVE/KEV findings overview' },
             { id: 'alerts', name: 'Alerts Table', type: 'table', description: 'Detailed alerts list' },
             { id: 'devices', name: 'Devices Table', type: 'table', description: 'Endpoint inventory' },
             { id: 'commands', name: 'Commands Table', type: 'table', description: 'Response actions' },
+            { id: 'auditLog', name: 'Audit Trail', type: 'table', description: 'Administrative activity log' },
         ];
     }, []);
 

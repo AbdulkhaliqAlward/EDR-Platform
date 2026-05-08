@@ -51,6 +51,7 @@ type Handlers struct {
 	malwareHashRepo     repository.MalwareHashRepository       // server-managed malicious hash feed
 	signatureSyncSvc    *service.SignatureSyncService          // background MalwareBazaar sync
 	commandApprovalSvc  service.CommandApprovalService         // optional: out-of-band OTP gate for manual commands
+	sessionRepo         repository.SessionRepository           // session tracking for refresh token rotation
 }
 
 // NewHandlers creates a new handlers instance.
@@ -182,6 +183,11 @@ func (h *Handlers) SetMalwareHashRepo(repo repository.MalwareHashRepository) {
 // SetSignatureSyncSvc wires the background MalwareBazaar sync service.
 func (h *Handlers) SetSignatureSyncSvc(svc *service.SignatureSyncService) {
 	h.signatureSyncSvc = svc
+}
+
+// SetSessionRepo sets the SessionRepository for refresh token rotation.
+func (h *Handlers) SetSessionRepo(repo repository.SessionRepository) {
+	h.sessionRepo = repo
 }
 
 // UserClaims represents authenticated user info.
