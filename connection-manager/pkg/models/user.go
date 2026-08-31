@@ -25,9 +25,17 @@ type User struct {
 	MFAEnabled bool    `db:"mfa_enabled" json:"mfa_enabled"`
 	MFASecret  *string `db:"mfa_secret" json:"-"` // Never expose in JSON
 
+	// SessionVersion is incremented on every login and logout.
+	// It is embedded as the sv claim in JWT access tokens.
+	// The auth middleware rejects tokens whose sv differs from the DB value,
+	// invalidating all existing tokens instantly without waiting for JWT expiry.
+	// Never exposed in API responses.
+	SessionVersion int `db:"session_version" json:"-"`
+
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
+
 
 // User role constants — must match the roles table seed.
 const (

@@ -117,9 +117,23 @@ func (h *Handlers) VerifyMFA(c echo.Context) error {
 func (h *Handlers) issueSessionTokens(c echo.Context, loginResp *service.LoginResponse, ip, ua string) error {
 	ctx := c.Request().Context()
 
-	// Generate access token (JWT)
+	// ── Increment session_version BEFORE generating the access token ──────
+	// This invalidates all previously issued tokens for this user immediately.
+	// The new token will carry the incremented version as the sv claim.
+	var sessionVersion int
+	if h.userRepo != nil {
+		newVersion, incrErr := h.userRepo.IncrementSessionVersion(ctx, loginResp.User.ID)
+		if incrErr != nil {
+			// Non-fatal: log and fall back to version 0 (disables sv enforcement for this token)
+			h.logger.WithError(incrErr).Warn("Failed to increment session_version — sv enforcement skipped for this token")
+		} else {
+			sessionVersion = newVersion
+		}
+	}
+
+	// Generate access token (JWT) with current session version embedded as sv claim
 	accessToken, accessJTI, accessExp, err := h.jwtManager.GenerateAccessTokenOnly(
-		loginResp.User.ID.String(), loginResp.User.Username, []string{loginResp.User.Role},
+		loginResp.User.ID.String(), loginResp.User.Username, []string{loginResp.User.Role}, sessionVersion,
 	)
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to generate access token")
@@ -289,17 +303,29 @@ func (h *Handlers) refreshWithSession(c echo.Context, rawRefreshToken string) er
 		roles = []string{user.Role}
 	}
 
-	newAccessToken, newAccessJTI, newAccessExp, err := h.jwtManager.GenerateAccessTokenOnly(userID, username, roles)
+	newRawRefresh, newRefreshHash, rotateErr := security.GenerateOpaqueToken()
+	if rotateErr != nil {
+		h.logger.WithError(rotateErr).Error("Failed to generate new refresh token")
+		return errorResponse(c, http.StatusInternalServerError, "TOKEN_ERROR", "Failed to rotate tokens")
+	}
+
+	// Embed the current session_version in the new access token (same version as last login —
+	// no increment on refresh, only on login/logout).
+	var newSV int
+	if h.userRepo != nil {
+		if sv, svErr := h.userRepo.GetSessionVersion(ctx, session.UserID); svErr == nil {
+			newSV = sv
+		}
+	}
+
+	newAccessToken, newAccessJTI, newAccessExp, err := h.jwtManager.GenerateAccessTokenOnly(
+		userID, username, roles, newSV,
+	)
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to generate new access token")
 		return errorResponse(c, http.StatusInternalServerError, "TOKEN_ERROR", "Failed to generate access token")
 	}
 
-	newRawRefresh, newRefreshHash, err := security.GenerateOpaqueToken()
-	if err != nil {
-		h.logger.WithError(err).Error("Failed to generate new refresh token")
-		return errorResponse(c, http.StatusInternalServerError, "TOKEN_ERROR", "Failed to generate refresh token")
-	}
 
 	// ── Blacklist old access token JTI (Redis — existing mechanism) ──────
 	if h.redis != nil && session.AccessJTI != "" {
@@ -332,34 +358,53 @@ func (h *Handlers) Logout(c echo.Context) error {
 	ip, ua := auditContext(c)
 	ctx := c.Request().Context()
 
-	// Extract token and add to blacklist
+	// ── Terminate ALL sessions for this user on logout ───────────────────
+	// Three complementary layers ensure complete invalidation across all devices:
+	//
+	//  1. IncrementSessionVersion  — any existing JWT (all browsers/devices) will
+	//     be rejected by AuthMiddleware on the very next request, without waiting
+	//     for JWT expiry. This is the primary, DB-level kill-switch.
+	//
+	//  2. RevokeAllForUser         — invalidates every refresh token in the DB, so
+	//     no device can silently obtain a new access token via /auth/refresh.
+	//
+	//  3. Redis BlacklistToken     — blacklists the caller's current access token
+	//     immediately, so even the in-flight request after logout is rejected.
+
+	currentUser := getCurrentUser(c)
+	if currentUser != nil && currentUser.UserID != "" {
+		if uid, parseErr := uuid.Parse(currentUser.UserID); parseErr == nil {
+
+			// Layer 1: increment session_version → all JWTs instantly stale
+			if h.userRepo != nil {
+				if _, incrErr := h.userRepo.IncrementSessionVersion(ctx, uid); incrErr != nil {
+					h.logger.WithError(incrErr).Warn("Failed to increment session_version on logout")
+				} else {
+					h.logger.WithField("user_id", uid).Info("session_version incremented — all tokens invalidated on logout")
+				}
+			}
+
+			// Layer 2: revoke ALL DB session records (refresh tokens) for this user
+			if h.sessionRepo != nil {
+				if revokeErr := h.sessionRepo.RevokeAllForUser(ctx, uid, "logout"); revokeErr != nil {
+					h.logger.WithError(revokeErr).Warn("Failed to revoke all sessions on logout")
+				} else {
+					h.logger.WithField("user_id", uid).Info("All sessions revoked on logout")
+				}
+			}
+		}
+	}
+
+	// Layer 3: blacklist the caller's current access token in Redis (fast path)
 	authHeader := c.Request().Header.Get("Authorization")
 	if authHeader != "" {
 		parts := strings.Split(authHeader, " ")
-		if len(parts) == 2 {
+		if len(parts) == 2 && h.redis != nil && h.jwtManager != nil {
 			token := parts[1]
-			if h.redis != nil && h.jwtManager != nil {
-				jti, err := h.jwtManager.GetTokenID(token)
-				if err != nil {
-					h.logger.WithError(err).Warn("Failed to get token ID")
-				} else {
-					// Blacklist access token in Redis (existing mechanism — kept)
-					expiresAt := time.Now().Add(24 * time.Hour)
-					if err := h.redis.BlacklistToken(ctx, jti, expiresAt, "logout"); err != nil {
-						h.logger.WithError(err).Warn("Failed to blacklist token")
-					}
-
-					// Revoke session record by access JTI
-					if h.sessionRepo != nil {
-						session, sessErr := h.sessionRepo.FindByAccessJTI(ctx, jti)
-						if sessErr != nil {
-							h.logger.WithError(sessErr).Warn("Failed to find session by JTI")
-						} else if session != nil {
-							if revokeErr := h.sessionRepo.Revoke(ctx, session.ID, "logout"); revokeErr != nil {
-								h.logger.WithError(revokeErr).Warn("Failed to revoke session")
-							}
-						}
-					}
+			if jti, err := h.jwtManager.GetTokenID(token); err == nil && jti != "" {
+				expiresAt := time.Now().Add(24 * time.Hour)
+				if err := h.redis.BlacklistToken(ctx, jti, expiresAt, "logout"); err != nil {
+					h.logger.WithError(err).Warn("Failed to blacklist token on logout")
 				}
 			}
 		}

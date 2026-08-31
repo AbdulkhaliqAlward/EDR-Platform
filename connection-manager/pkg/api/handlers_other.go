@@ -977,35 +977,54 @@ func (h *Handlers) ChangePassword(c echo.Context) error {
 	// Audit: password changed
 	h.fireAudit(c, models.AuditActionPasswordChanged, "user", targetUserID, "", false, "")
 
-	// ── Invalidate session: blacklist current JWT ────────────────────────
-	// When a user changes their OWN password, we force logout by blacklisting
-	// their current access token. This ensures:
-	//   1. If the token was stolen, the attacker loses access immediately
-	//   2. The user must re-authenticate with the new password
-	forceLogout := false
-	if isSelf {
-		authHeader := c.Request().Header.Get("Authorization")
-		if parts := splitBearer(authHeader); parts != "" {
-			if h.redis != nil && h.jwtManager != nil {
-				if jti, err := h.jwtManager.GetTokenID(parts); err == nil && jti != "" {
-					expiresAt := time.Now().Add(24 * time.Hour) // blacklist for token's max TTL
-					if err := h.redis.BlacklistToken(c.Request().Context(), jti, expiresAt, "password_changed"); err != nil {
-						h.logger.WithError(err).Warn("Failed to blacklist token after password change")
-					} else {
-						h.logger.WithField("user", currentUser.Username).Info("JWT blacklisted after password change — forced re-login")
-						forceLogout = true
-					}
+	ctx := c.Request().Context()
+
+	// ── Invalidate ALL sessions for the target user ───────────────────────
+	// 1. Increment session_version: every existing JWT for this user will
+	//    be rejected by AuthMiddleware on the next request regardless of device.
+	//    This is the primary invalidation mechanism (works without Redis).
+	if h.userRepo != nil {
+		if _, incrErr := h.userRepo.IncrementSessionVersion(ctx, targetUserID); incrErr != nil {
+			h.logger.WithError(incrErr).Warn("Failed to increment session_version after password change")
+		} else {
+			h.logger.WithField("target_user_id", targetUserID).
+				Info("session_version incremented — all existing tokens invalidated by password change")
+		}
+	}
+
+	// 2. Revoke all DB session records (refresh tokens) so no refresh-based
+	//    re-issue is possible even before the sv check fires.
+	if h.sessionRepo != nil {
+		if revokeErr := h.sessionRepo.RevokeAllForUser(ctx, targetUserID, "password_changed"); revokeErr != nil {
+			h.logger.WithError(revokeErr).Warn("Failed to revoke sessions after password change")
+		}
+	}
+
+	// 3. Blacklist the CALLER's current access token in Redis as defense-in-depth.
+	//    For self-change: their token is blacklisted immediately even before the
+	//    next request triggers the sv check.
+	//    For admin-reset: the admin's own token is NOT blacklisted (admin stays
+	//    logged in) — only the target user's sessions are invalidated above.
+	if isSelf && h.redis != nil && h.jwtManager != nil {
+		if parts := splitBearer(c.Request().Header.Get("Authorization")); parts != "" {
+			if jti, jtiErr := h.jwtManager.GetTokenID(parts); jtiErr == nil && jti != "" {
+				expiresAt := time.Now().Add(24 * time.Hour)
+				if blErr := h.redis.BlacklistToken(ctx, jti, expiresAt, "password_changed"); blErr != nil {
+					h.logger.WithError(blErr).Warn("Failed to blacklist caller token after password change")
 				}
 			}
 		}
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":      "Password changed successfully",
-		"force_logout": forceLogout,
+		"message": "Password changed successfully. All active sessions have been terminated.",
+		// force_logout is always true: the caller's token (and every other token
+		// for the target user) will be rejected by the sv check on the next request.
+		"force_logout": true,
 		"meta":         responseMeta(c),
 	})
 }
+
 
 // splitBearer extracts the token string from a "Bearer <token>" header value.
 // Returns empty string if the header is malformed.

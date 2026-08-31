@@ -800,23 +800,69 @@ func runUpdateStage2(
 	}
 	sd := strings.TrimSpace(serverDomain)
 	sp := strings.TrimSpace(serverPort)
+
+	// ── Server address: preserve the existing Registry value whenever possible ─
+	// Only overwrite if the current config has no valid address OR it can't
+	// be resolved — this preserves the custom port (e.g. 47051) that was set
+	// during the original installation, preventing the upgrade from silently
+	// reverting to the 50051 default.
 	if sd != "" && sp != "" {
-		cfg.Server.Address = fmt.Sprintf("%s:%s", sd, sp)
+		currentHost, currentPort, splitErr := func() (string, string, error) {
+			return func(s string) (string, string, error) {
+				host, port, err := net.SplitHostPort(s)
+				return host, port, err
+			}(cfg.Server.Address)
+		}()
+
+		replaceAddress := false
+		if splitErr != nil || currentHost == "" {
+			// Existing address is malformed — must replace.
+			replaceAddress = true
+		} else if currentPort == "" || currentPort == "0" {
+			// No port stored — use the provided one.
+			replaceAddress = true
+		} else if !strings.EqualFold(currentHost, sd) {
+			// Domain changed (new deployment) — replace.
+			replaceAddress = true
+		}
+		// If only the port differs (e.g. 47051 vs 50051), keep the existing
+		// port from the Registry — it was set intentionally.
+
+		if replaceAddress {
+			cfg.Server.Address = fmt.Sprintf("%s:%s", sd, sp)
+		} else {
+			// Ensure TLSServerName is still set correctly even when we keep the
+			// existing address (it may have been cleared on older installs).
+			_ = currentHost // suppress unused warning
+		}
 		// The gRPC listener uses a cert with CN/SAN for the Connection Manager
 		// service (e.g. edr-connection-manager), not the hosts-file name
-		// (edr.local). Using serverDomain here breaks TLS with
-		// "certificate is valid for ... not edr.local".
+		// (edr.local). Ensure TLSServerName is correct.
 		tls := strings.TrimSpace(cfg.Server.TLSServerName)
 		if tls == "" || strings.EqualFold(tls, sd) {
 			cfg.Server.TLSServerName = config.DefaultGRPCServerCertName
 		}
 	}
-	if strings.TrimSpace(token) != "" {
-		// BootstrapToken lives on CertConfig; the root Config only aggregates
-		// sub-structs. Writing it at the root silently compiled on older builds
-		// but modern go vet + the agent-builder image catches the typo.
+
+	// ── Bootstrap token: NEVER write to Registry when already enrolled ────────
+	// Writing the token to Registry causes re-enrollment on every upgrade,
+	// even when the existing certificate and private key are valid. This breaks
+	// the "binary-only upgrade" contract: a binary swap must not force
+	// re-registration with the server.
+	//
+	// If the existing config already has a KeyPEM (i.e. the agent was enrolled
+	// before this upgrade), we skip the token entirely. The new binary will load
+	// the existing certs from Registry and skip EnsureEnrolled.
+	//
+	// The token is still used for first-time installs (where KeyPEM is empty).
+	alreadyEnrolled := len(cfg.Certs.KeyPEM) > 0
+	if strings.TrimSpace(token) != "" && !alreadyEnrolled {
 		cfg.Certs.BootstrapToken = strings.TrimSpace(token)
 	}
+	// If already enrolled: don't touch BootstrapToken at all. The existing value
+	// in the Registry was already cleared after the first successful enrollment.
+
+
 	if strings.EqualFold(strings.TrimSpace(installSysmon), "true") {
 		cfg.Sysmon.InstallOnFirstRun = true
 	}

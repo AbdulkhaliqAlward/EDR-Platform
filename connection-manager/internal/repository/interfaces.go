@@ -253,6 +253,15 @@ type UserRepository interface {
 
 	// Count returns the number of rows matching the same filters as List (ignores Limit/Offset).
 	Count(ctx context.Context, filter UserFilter) (int64, error)
+
+	// IncrementSessionVersion atomically increments session_version for a user and
+	// returns the NEW version. Called on every login and logout so all existing
+	// access tokens carrying the old version are immediately rejected by AuthMiddleware.
+	IncrementSessionVersion(ctx context.Context, id uuid.UUID) (newVersion int, err error)
+
+	// GetSessionVersion returns the current session_version for a user.
+	// Used by AuthMiddleware to validate the sv claim in incoming JWT tokens.
+	GetSessionVersion(ctx context.Context, id uuid.UUID) (int, error)
 }
 
 // UserFilter defines filters for listing users.

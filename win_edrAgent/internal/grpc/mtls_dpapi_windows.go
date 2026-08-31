@@ -87,3 +87,36 @@ func savePrivateKeyDPAPI(keyPEM []byte, dpapiKeyPath string) error {
 	}
 	return nil
 }
+
+// readKeyPEMFromDisk reads the private key PEM bytes from disk.
+// It prefers the DPAPI-encrypted blob (dpapiKeyPath = keyPath+".dpapi") and
+// falls back to a plaintext PEM file (plaintextKeyPath) for legacy installs.
+//
+// Background: savePrivateKey() always writes private.key.dpapi (DPAPI blob),
+// never the plaintext private.key. The post-enrollment Registry migration must
+// therefore read the .dpapi blob and decrypt it to obtain the PEM bytes that
+// will be stored (encrypted at rest) inside the SYSTEM-protected Registry key.
+func readKeyPEMFromDisk(dpapiKeyPath, plaintextKeyPath string) ([]byte, error) {
+	// Primary: DPAPI-encrypted blob (written by savePrivateKey during CSR generation).
+	if blob, err := os.ReadFile(dpapiKeyPath); err == nil && len(blob) > 0 {
+		keyPEM, err := security.UnprotectPrivateKey(blob)
+		if err != nil {
+			return nil, fmt.Errorf("DPAPI unprotect private key for registry migration: %w", err)
+		}
+		return keyPEM, nil
+	}
+	// Fallback: plaintext PEM (should not exist in normal flow, kept for safety).
+	keyPEM, err := os.ReadFile(plaintextKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("private key not found at %s or %s", dpapiKeyPath, plaintextKeyPath)
+	}
+	return keyPEM, nil
+}
+
+// GetKeyPEM decrypts and returns the private key PEM bytes from the
+// DPAPI-protected blob on disk. Used by the post-enrollment migration step
+// (enroll.go) to populate cfg.Certs.KeyPEM before saving to the protected
+// Registry. The caller should zero the returned slice after use.
+func (m *CertManager) GetKeyPEM() ([]byte, error) {
+	return readKeyPEMFromDisk(m.dpapiKeyPath, m.keyPath)
+}

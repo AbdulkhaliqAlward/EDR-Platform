@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/sirupsen/logrus"
 
@@ -256,6 +257,34 @@ func (h *Handlers) AuthMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 			return errorResponse(c, http.StatusUnauthorized, "INVALID_TOKEN", "Invalid or expired token")
 		}
 
+		// ── Session Version check ─────────────────────────────────────────────
+		// If the token carries an sv claim (session_version > 0) and userRepo is
+		// available, verify it matches the current DB value. A mismatch means the
+		// user logged in (or out) from another browser/device, incrementing the DB
+		// counter, so this token is now stale and must be rejected immediately.
+		//
+		// Tokens with sv == 0 (legacy tokens or agent tokens without the claim)
+		// skip this check to preserve backward compatibility.
+		if claims.SessionVersion > 0 && h.userRepo != nil {
+			if uid, parseErr := uuid.Parse(claims.Subject); parseErr == nil {
+				dbVersion, svErr := h.userRepo.GetSessionVersion(c.Request().Context(), uid)
+				if svErr != nil {
+					// DB unavailable — fail open (log and continue) so a DB blip
+					// doesn't log everyone out.
+					h.logger.WithError(svErr).Warn("session_version DB check failed — skipping sv enforcement")
+				} else if dbVersion != claims.SessionVersion {
+					h.logger.WithFields(map[string]interface{}{
+						"user_id":    claims.Subject,
+						"token_sv":   claims.SessionVersion,
+						"db_sv":      dbVersion,
+						"path":       c.Request().URL.Path,
+					}).Warn("Session invalidated: sv mismatch (new login or logout from another device)")
+					return errorResponse(c, http.StatusUnauthorized, "SESSION_INVALIDATED",
+						"A new login has invalidated this session. Please log in again.")
+				}
+			}
+		}
+
 		// Extract user claims — Username is the human-readable login name now
 		// embedded in the token. Subject is still the user UUID.
 		user := &UserClaims{
@@ -270,6 +299,7 @@ func (h *Handlers) AuthMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		return next(c)
 	}
 }
+
 
 // RequireRole checks if user has required role.
 func (h *Handlers) RequireRole(roles ...string) echo.MiddlewareFunc {

@@ -57,7 +57,7 @@ func (r *PostgresUserRepository) GetByID(ctx context.Context, id uuid.UUID) (*mo
 	query := `
 		SELECT id, username, email, password_hash, full_name, role, status,
 			last_login, login_attempts, locked_until, mfa_enabled, mfa_secret,
-			created_at, updated_at
+			session_version, created_at, updated_at
 		FROM users
 		WHERE id = $1`
 
@@ -75,6 +75,7 @@ func (r *PostgresUserRepository) GetByID(ctx context.Context, id uuid.UUID) (*mo
 		&user.LockedUntil,
 		&user.MFAEnabled,
 		&user.MFASecret,
+		&user.SessionVersion,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -94,7 +95,7 @@ func (r *PostgresUserRepository) GetByUsername(ctx context.Context, username str
 	query := `
 		SELECT id, username, email, password_hash, full_name, role, status,
 			last_login, login_attempts, locked_until, mfa_enabled, mfa_secret,
-			created_at, updated_at
+			session_version, created_at, updated_at
 		FROM users
 		WHERE username = $1`
 
@@ -112,6 +113,7 @@ func (r *PostgresUserRepository) GetByUsername(ctx context.Context, username str
 		&user.LockedUntil,
 		&user.MFAEnabled,
 		&user.MFASecret,
+		&user.SessionVersion,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -131,7 +133,7 @@ func (r *PostgresUserRepository) GetByEmail(ctx context.Context, email string) (
 	query := `
 		SELECT id, username, email, password_hash, full_name, role, status,
 			last_login, login_attempts, locked_until, mfa_enabled, mfa_secret,
-			created_at, updated_at
+			session_version, created_at, updated_at
 		FROM users
 		WHERE email = $1`
 
@@ -149,6 +151,7 @@ func (r *PostgresUserRepository) GetByEmail(ctx context.Context, email string) (
 		&user.LockedUntil,
 		&user.MFAEnabled,
 		&user.MFASecret,
+		&user.SessionVersion,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -235,7 +238,7 @@ func (r *PostgresUserRepository) List(ctx context.Context, filter UserFilter) ([
 	query := `
 		SELECT id, username, email, password_hash, full_name, role, status,
 			last_login, login_attempts, locked_until, mfa_enabled, mfa_secret,
-			created_at, updated_at
+			session_version, created_at, updated_at
 		FROM users
 		WHERE 1=1`
 
@@ -294,6 +297,7 @@ func (r *PostgresUserRepository) List(ctx context.Context, filter UserFilter) ([
 			&user.LockedUntil,
 			&user.MFAEnabled,
 			&user.MFASecret,
+			&user.SessionVersion,
 			&user.CreatedAt,
 			&user.UpdatedAt,
 		)
@@ -342,6 +346,42 @@ func (r *PostgresUserRepository) Count(ctx context.Context, filter UserFilter) (
 		return 0, fmt.Errorf("failed to count users: %w", err)
 	}
 	return n, nil
+}
+
+// IncrementSessionVersion atomically increments session_version and returns the new value.
+// Called on login and logout so all existing JWTs with the old sv are immediately rejected.
+func (r *PostgresUserRepository) IncrementSessionVersion(ctx context.Context, id uuid.UUID) (int, error) {
+	var newVersion int
+	err := r.pool.QueryRow(ctx,
+		`UPDATE users SET session_version = session_version + 1, updated_at = NOW()
+		 WHERE id = $1
+		 RETURNING session_version`,
+		id,
+	).Scan(&newVersion)
+	if err == pgx.ErrNoRows {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("increment session_version: %w", err)
+	}
+	return newVersion, nil
+}
+
+// GetSessionVersion returns the current session_version for a user.
+// Used by AuthMiddleware to validate the sv claim in incoming JWT tokens.
+func (r *PostgresUserRepository) GetSessionVersion(ctx context.Context, id uuid.UUID) (int, error) {
+	var v int
+	err := r.pool.QueryRow(ctx,
+		`SELECT session_version FROM users WHERE id = $1`,
+		id,
+	).Scan(&v)
+	if err == pgx.ErrNoRows {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get session_version: %w", err)
+	}
+	return v, nil
 }
 
 // PostgresCSRRepository implements CSRRepository using PostgreSQL.

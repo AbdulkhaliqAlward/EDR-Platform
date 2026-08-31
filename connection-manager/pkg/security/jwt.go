@@ -31,10 +31,11 @@ type JWTManager struct {
 // Claims represents the JWT claims for agent authentication.
 type Claims struct {
 	jwt.RegisteredClaims
-	AgentID  string   `json:"agent_id"`
-	Username string   `json:"username,omitempty"` // human-readable login name
-	Roles    []string `json:"roles,omitempty"`
-	Type     string   `json:"type"` // "access" or "refresh"
+	AgentID        string   `json:"agent_id"`
+	Username       string   `json:"username,omitempty"`       // human-readable login name
+	Roles          []string `json:"roles,omitempty"`
+	Type           string   `json:"type"`                     // "access" or "refresh"
+	SessionVersion int      `json:"sv,omitempty"`             // incremented on login/logout; middleware rejects stale tokens
 }
 
 // TokenPair contains both access and refresh tokens.
@@ -269,7 +270,12 @@ func HashToken(raw string) string {
 // GenerateAccessTokenOnly creates a single access token (JWT) without a
 // refresh token. Used during session-based refresh where the refresh token
 // is an opaque value managed outside the JWT system.
-func (m *JWTManager) GenerateAccessTokenOnly(userID, username string, roles []string) (token string, jti string, exp time.Time, err error) {
+//
+// sessionVersion must be the user's current session_version from the DB.
+// It is embedded as the sv claim so AuthMiddleware can reject stale tokens
+// from previous sessions without a DB lookup per request at the middleware level
+// (the version is read once at login; the DB version is the authoritative check).
+func (m *JWTManager) GenerateAccessTokenOnly(userID, username string, roles []string, sessionVersion int) (token string, jti string, exp time.Time, err error) {
 	exp = time.Now().Add(m.accessTTL)
 	tokenJTI := uuid.New().String()
 
@@ -282,10 +288,11 @@ func (m *JWTManager) GenerateAccessTokenOnly(userID, username string, roles []st
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(exp),
 		},
-		AgentID:  userID,
-		Username: username,
-		Roles:    roles,
-		Type:     "access",
+		AgentID:        userID,
+		Username:       username,
+		Roles:          roles,
+		Type:           "access",
+		SessionVersion: sessionVersion,
 	}
 
 	signed := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)

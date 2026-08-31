@@ -260,14 +260,33 @@ func EnsureEnrolled(cfg *config.Config, logger *logging.Logger, configFilePath s
 	// ── Migrate certificate files to Registry (zero disk footprint) ──────
 	// Read cert/key/CA PEM data from disk files into config struct,
 	// then delete the files. The PEM data lives in the protected Registry.
+	//
+	// IMPORTANT: The private key is NEVER written as a plaintext file.
+	// savePrivateKey() always writes a DPAPI-encrypted blob at KeyPath+".dpapi".
+	// We must decrypt it via cm.GetKeyPEM() rather than reading KeyPath directly.
 	if certPEM, err := os.ReadFile(cfg.Certs.CertPath); err == nil {
 		cfg.Certs.CertPEM = certPEM
+	} else {
+		logger.Warnf("Could not read client cert for Registry migration: %v", err)
 	}
-	if keyPEM, err := os.ReadFile(cfg.Certs.KeyPath); err == nil {
+
+	// Read private key from DPAPI blob (private.key.dpapi), NOT from private.key.
+	if keyPEM, err := cm.GetKeyPEM(); err == nil {
 		cfg.Certs.KeyPEM = keyPEM
+		// Zero the slice after it has been copied into cfg (cfg.SaveToRegistry marshals it).
+		defer func() {
+			for i := range keyPEM {
+				keyPEM[i] = 0
+			}
+		}()
+	} else {
+		logger.Warnf("Could not read private key for Registry migration: %v", err)
 	}
+
 	if caPEM, err := os.ReadFile(cfg.Certs.CAPath); err == nil {
 		cfg.Certs.CACertPEM = caPEM
+	} else {
+		logger.Warnf("Could not read CA cert for Registry migration: %v", err)
 	}
 
 	// Save updated config (with inline PEM data) to Registry
@@ -275,9 +294,11 @@ func EnsureEnrolled(cfg *config.Config, logger *logging.Logger, configFilePath s
 		logger.Warnf("Failed to save post-enrollment config to Registry: %v", err)
 	} else {
 		logger.Info("Post-enrollment config + certificates saved to protected Registry")
-		// Delete cert files from disk — they now live in Registry
+		// Delete cert and DPAPI key files from disk — they now live in Registry.
+		// KeyPath (private.key) may not exist; KeyPath+".dpapi" always does.
 		_ = os.Remove(cfg.Certs.CertPath)
 		_ = os.Remove(cfg.Certs.KeyPath)
+		_ = os.Remove(cfg.Certs.KeyPath + ".dpapi")
 		_ = os.Remove(cfg.Certs.CAPath)
 		logger.Info("Certificate files deleted from disk (migrated to Registry)")
 	}

@@ -1,31 +1,31 @@
-# # Enforce LF for files that run inside Linux containers or are parsed by
-# # POSIX-only tools, regardless of the host OS (Windows checkouts default to
-# # CRLF via core.autocrlf=true, which breaks shebangs and bash heredocs).
-# *.sh            text eol=lf
-# Dockerfile      text eol=lf
-# *.Dockerfile    text eol=lf
-# docker-*.sh     text eol=lf
-# *.yaml          text eol=lf
-# *.yml           text eol=lf
+# Enforce LF for files that run inside Linux containers or are parsed by
+# POSIX-only tools, regardless of the host OS (Windows checkouts default to
+# CRLF via core.autocrlf=true, which breaks shebangs and bash heredocs).
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+docker-*.sh     text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
 
-# # Go toolchain is cross-platform but the compiler complains about CRLF in
-# # //go:embed'd files and test golden files; keep LF everywhere.
-# *.go            text eol=lf
+# Go toolchain is cross-platform but the compiler complains about CRLF in
+# //go:embed'd files and test golden files; keep LF everywhere.
+*.go            text eol=lf
 
-# # Protobuf generation expects LF.
-# *.proto         text eol=lf
+# Protobuf generation expects LF.
+*.proto         text eol=lf
 
-# # Treat binaries as binary so Git never rewrites their bytes.
-# *.png           binary
-# *.jpg           binary
-# *.jpeg          binary
-# *.gif           binary
-# *.ico           binary
-# *.pdf           binary
-# *.zip           binary
-# *.gz            binary
-# *.tar           binary
-# *.exe           binary
-# *.dll           binary
-# *.so            binary
-# *.dylib         binary
+# Treat binaries as binary so Git never rewrites their bytes.
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.pdf           binary
+*.zip           binary
+*.gz            binary
+*.tar           binary
+*.exe           binary
+*.dll           binary
+*.so            binary
+*.dylib         binary
