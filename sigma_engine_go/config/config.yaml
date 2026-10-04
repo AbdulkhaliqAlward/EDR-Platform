@@ -1,0 +1,202 @@
+# Sigma Detection Engine - Production Configuration
+# This file configures all aspects of the detection engine
+
+# File monitoring configuration
+file_monitoring:
+  # Directory to watch for log files (events from agents)
+  watch_directory: "data/agent_ecs-events"
+  
+  # File pattern to match (glob pattern)
+  file_pattern: "*.jsonl"
+  
+  # Poll interval in milliseconds (how often to check for new files/lines)
+  poll_interval_ms: 100
+  
+  # Maximum file size to monitor (in GB)
+  max_file_size_gb: 1
+
+  # Checkpoint file for persisting read positions across restarts
+  # Prevents duplicate alert generation when reprocessing same events
+  checkpoint_file: "data/checkpoint.json"
+  
+  # How often to save checkpoint (in seconds)
+  checkpoint_interval_seconds: 30
+
+# Event counting configuration
+event_counting:
+  # Time window for counting events (in minutes)
+  window_size_minutes: 5
+  
+  # Alert if event count >= this threshold
+  alert_threshold: 10
+  
+  # Alert if rate >= this threshold (events per minute)
+  rate_threshold_per_minute: 5.0
+
+# Escalation configuration
+escalation:
+  # Escalate if event count > this threshold
+  count_threshold: 100
+  
+  # Escalate if rate > this threshold (events per minute)
+  rate_threshold_per_minute: 10.0
+  
+  # Escalate all critical severity alerts
+  enable_critical_escalation: true
+
+# Detection engine configuration
+detection:
+  # Number of worker goroutines for parallel processing
+  # Set to 0 to use number of CPU cores
+  workers: 0
+  
+  # Batch size for processing events
+  batch_size: 100
+  
+  # Cache size for field resolution and regex
+  cache_size: 10000
+
+  # Minimum confidence required to emit a detection/alert (0.0-1.0)
+  min_confidence: 0.6
+
+  # Apply Sigma "filter*" selections as suppression even if the condition doesn't explicitly include "and not filter"
+  enable_filters: true
+
+  # Optional: reduce confidence when key context (parent/user/cmd) is missing
+  enable_context_validation: true
+
+# Global whitelisting to suppress common legitimate activity (reduces false positives)
+filtering:
+  enable: true
+
+  whitelisted_processes:
+    - 'C:\Windows\System32\svchost.exe'
+    - 'C:\Windows\System32\services.exe'
+    - 'C:\Windows\System32\lsass.exe'
+    - 'C:\Program Files\Microsoft*'
+    - 'C:\Program Files (x86)\Microsoft*'
+    - '*\vscode.exe'
+    - '*\Code.exe'
+    - '*\devenv.exe'
+
+  # NOTE: whitelisted_users removed (RC-2 fix) — "NT AUTHORITY\SYSTEM" was
+  # silently dropping the vast majority of process events before rule evaluation.
+  whitelisted_users: []
+
+  # NOTE: whitelisted_parent_processes removed (RC-2 fix) — explorer.exe and
+  # services.exe are legitimate parent processes for attacker tools.
+  whitelisted_parent_processes: []
+
+# Output configuration
+output:
+  # Output file path for alerts (JSONL format)
+  # Will be created if it doesn't exist
+  output_file: "data/alerts.jsonl"
+  
+  # Log level (debug, info, warn, error)
+  log_level: "info"
+
+# Rules configuration
+rules:
+  # Directory containing Sigma rules (use "sigma_rules/rules" if no junction, or "rules" when rules -> sigma_rules)
+  rules_directory: "sigma_rules/rules"
+  
+  # Product whitelist: only load rules for these products (empty = all products)
+  # Default: ["windows"] - only Windows rules for EDR agent
+  product_whitelist:
+    - windows
+
+  # Rule caching (dramatically speeds up startup)
+  cache_file: "cache/sigma_rules.cache"
+  cache_max_age_hours: 24
+
+  # Rule parsing concurrency (I/O bound)
+  parallel_workers: 32
+
+  # Quality filters: relax to accept all Windows process-creation rules (SigmaHQ uses experimental/test and various levels)
+  min_level: "medium"
+  allowed_status:
+    - "stable"
+    - "test"
+  skip_experimental: true
+
+# Context-Aware Risk Scoring configuration (single source of truth for all constants)
+# Defaults here match the algorithm's built-in defaults (backward compatible).
+risk_scoring:
+  base_score:
+    informational: 10
+    low: 25
+    medium: 45
+    high: 65
+    critical: 85
+    unknown: 35
+    match_correlation_bonus_per_rule: 5
+    match_correlation_bonus_cap: 15
+
+  burst:
+    window_sec: 300
+    threshold_low: 3
+    threshold_med: 10
+    threshold_high: 30
+    bonus_low: 10
+    bonus_med: 20
+    bonus_high: 30
+
+  privilege:
+    bonus_system_sid: 20
+    bonus_admin_rid_500: 15
+    bonus_integrity_system: 15
+    bonus_high_elevated: 10
+    bonus_elevated_token: 10
+    bonus_unsigned_binary: 15
+    bonus_unknown_signature: 8
+    cap: 40
+
+  false_positive:
+    discount_microsoft: 15
+    discount_microsoft_system_path: 10
+    discount_trusted_third_party: 8
+    discount_cap: 30
+    risk_microsoft_system_path: 0.70
+    risk_microsoft_other_path: 0.45
+    risk_trusted_third_party: 0.30
+    risk_unknown_or_missing_signature: 0.15
+    risk_unsigned: 0.05
+
+  ueba:
+    confidence_gate: 0.30
+    anomaly_bonus: 15
+    normal_discount: 10
+    zscore_anomaly_threshold: 3.0
+    first_seen_hour_avg_floor: 0.05
+    normal_avg_threshold: 0.5
+
+  interaction:
+    lineage_high_threshold: 20
+    privilege_high_threshold: 15
+    burst_high_threshold: 20
+    bonus_two_signals: 10
+    bonus_three_signals: 15
+    cap: 15
+
+  context_policy:
+    per_factor_clamp_min: 0.5
+    per_factor_clamp_max: 2.0
+    multiplier_clamp_min: 0.25
+    multiplier_clamp_max: 4.0
+    trusted_network_multiplier: 0.9
+    untrusted_network_multiplier: 1.1
+
+  quality:
+    score_ge_80: 1.00
+    score_ge_60: 0.97
+    score_ge_40: 0.93
+    score_gt_0: 0.90
+    score_eq_0_missing: 0.85
+
+  risk_levels:
+    low_max: 39
+    medium_max: 69
+    high_max: 89
+    critical_min: 90
+

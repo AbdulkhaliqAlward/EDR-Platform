@@ -31,10 +31,7 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Environment & secrets
-.env
-.env.local
-.env.production
+
 *.pem
 *.key
 !certs/README.md

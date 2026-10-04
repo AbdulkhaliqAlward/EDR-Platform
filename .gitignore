@@ -7,15 +7,11 @@
 # =============================================================================
 
 # ── Secrets / credentials ────────────────────────────────────────────────────
-# Real env files (committed siblings end with .example).
-.env
-.env.*
-!.env.example
-!**/.env.example
-
-# Real local configs that may carry dev passwords. Templates are tracked.
-connection-manager/config/config.yaml
-sigma_engine_go/config/config.yaml
+# Real env files and configs (un-ignored per user requirement)
+# .env
+# .env.*
+# connection-manager/config/config.yaml
+# sigma_engine_go/config/config.yaml
 
 # TLS material / private keys / PKCS bundles — never commit any of these.
 *.pem

@@ -1,0 +1,83 @@
+# Connection Manager Configuration
+# Copy this file to config.yaml and adjust values
+
+server:
+  grpc_port: 50051
+  http_port: 8090
+  tls_cert_path: "./certs/server.crt"
+  tls_key_path: "./certs/server.key"
+  ca_cert_path: "./certs/ca.crt"
+  
+  # gRPC options
+  max_concurrent_streams: 1000
+  keepalive_time: 30s
+  keepalive_timeout: 10s
+  max_connection_idle: 5m
+  read_timeout: 30s
+  write_timeout: 30s
+  shutdown_timeout: 30s
+
+database:
+  host: "localhost"
+  port: 5433
+  user: "edr"
+  # Password is provided exclusively via the DATABASE_PASSWORD env var
+  # (bound by Viper in config.go). DO NOT put the real password here.
+  password: ""
+  name: "edr"
+  ssl_mode: "disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 5m
+
+redis:
+  addr: "localhost:6379"
+  # Password is provided via the REDIS_PASSWORD env var.
+  password: ""
+  db: 0
+  pool_size: 10
+  pool_timeout: 30s
+  read_timeout: 3s
+  write_timeout: 3s
+  use_tls: false
+
+jwt:
+  private_key_path: "./certs/jwt_private.pem"
+  public_key_path: "./certs/jwt_public.pem"
+  issuer: "antigravity-server"
+  audience: "agent"
+  access_ttl: 24h
+  refresh_ttl: 2160h  # 90 days
+
+rate_limit:
+  events_per_second: 10000
+  burst_multiplier: 1.2
+  enabled: true
+
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json or text
+  output: "stdout"
+  time_format: "2006-01-02T15:04:05.000Z07:00"
+
+smtp:
+  # Outbound transactional email (MFA verification codes).
+  # Credentials are normally provided via env vars:
+  #   SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD,
+  #   SMTP_FROM, SMTP_USE_TLS, SMTP_START_TLS, SMTP_ENABLED
+  host: "smtp.hostinger.com"
+  port: 465
+  username: ""           # set via env var (do NOT commit)
+  password: ""           # set via env var (do NOT commit)
+  from: '"Protosoft" <no-reply@protosoft.cloud>'
+  use_tls: true          # implicit TLS (port 465)
+  start_tls: false       # set true with port 587 for STARTTLS
+  enabled: false         # set true (or SMTP_ENABLED=true) to actually send
+
+monitoring:
+  enabled: true
+  metrics_path: "/metrics"
+  health_path: "/healthz"
+  tracing_enabled: false
+  tracing_backend: "jaeger"  # jaeger or zipkin
