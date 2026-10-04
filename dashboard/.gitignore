@@ -22,6 +22,4 @@ dist-ssr
 *.ntvs*
 *.njsproj
 *.sln
-*.sw?
-/docs/
-*.md
+*.sw?

@@ -62,7 +62,6 @@ __pycache__/
 
 # ── Logs & local test reports ────────────────────────────────────────────────
 *.log
-*.md
 agent.log
 agent_after_update.log
 api-test-results/

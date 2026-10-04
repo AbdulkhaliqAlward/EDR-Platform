@@ -4,11 +4,10 @@
 *.dll
 *.so
 *.dylib
-sigma-engine
-sigma-engine-live
-sigma-engine-kafka
-/docs/
-*.md
+# Built binaries (root only, not cmd/ subdirs)
+/sigma-engine
+/sigma-engine-live
+/sigma-engine-kafka
 # Test binary
 *.test
 

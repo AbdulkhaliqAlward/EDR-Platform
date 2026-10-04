@@ -12,8 +12,8 @@ dist/
 # Test binary
 *.test
 
-/docs/
-*.md
+
+
 
 # Output of go coverage
 *.out
