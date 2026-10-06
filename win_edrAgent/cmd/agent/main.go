@@ -101,6 +101,7 @@ func main() {
 		doUpdateStage2          = flag.Bool("update-stage2", false, "[INTERNAL] Stage2 for -update, executed as SYSTEM")
 		doUninstall             = flag.Bool("uninstall", false, "Offline uninstall: verify a server-signed uninstall token, then remove the agent")
 		doUninstallStage2       = flag.Bool("uninstall-stage2", false, "[INTERNAL] Stage2 for -uninstall, executed as SYSTEM")
+		uninstallTokenFile      = flag.String("token-file", "", "[INTERNAL] Uninstall token file handed from -uninstall to -uninstall-stage2")
 		serverIP                = flag.String("server-ip", "", "C2 server IP address (used with -install for hosts file injection)")
 		serverDomain            = flag.String("server-domain", "", "C2 server FQDN/hostname (used with -install)")
 		serverPort              = flag.String("server-port", "50051", "C2 gRPC port (used with -install, default 50051)")
@@ -181,7 +182,7 @@ func main() {
 	// key, so it carries no removal secret an attacker could extract. The
 	// server-issued UNINSTALL_AGENT C2 command remains the primary (online) path.
 	if *doUninstallStage2 {
-		runUninstallStage2(logger)
+		runUninstallStage2(logger, *uninstallTokenFile)
 		// runUninstallStage2 calls os.Exit internally.
 	}
 	if *doUninstall {
@@ -192,7 +193,7 @@ func main() {
 				tokenVal = strings.TrimSpace(scanner.Text())
 			}
 		}
-		runUninstall(logger, tokenVal, *configPath)
+		runUninstall(logger, tokenVal)
 		// runUninstall calls os.Exit internally.
 	}
 

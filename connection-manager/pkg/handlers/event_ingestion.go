@@ -28,6 +28,7 @@ import (
 	"github.com/edr-platform/connection-manager/pkg/contextkeys"
 	"github.com/edr-platform/connection-manager/pkg/kafka"
 	"github.com/edr-platform/connection-manager/pkg/metrics"
+	"github.com/edr-platform/connection-manager/pkg/models"
 	edrv1 "github.com/edr-platform/connection-manager/proto/v1"
 )
 
@@ -136,7 +137,15 @@ func (h *EventHandler) StreamEvents(stream edrv1.EventIngestionService_StreamEve
 			return status.Errorf(codes.Unauthenticated, "invalid agent ID format")
 		}
 
-		if _, err := h.agentService.GetByID(ctx, agentUUID); err != nil {
+		agentRow, err := h.agentService.GetByID(ctx, agentUUID)
+		if err == nil && agentRow != nil && agentRow.Status == models.AgentStatusDeleted {
+			// Device was removed from the dashboard: treat exactly like an
+			// unregistered agent. Reinstalling the device re-enrolls it.
+			h.logger.WithField("agent_id", agentID).Warn("Rejected: agent was removed from the dashboard — must re-enroll")
+			return status.Errorf(codes.Unauthenticated,
+				"agent %s was removed from the dashboard — re-enrollment required", agentID)
+		}
+		if err != nil {
 			// Only a genuinely missing agent means "re-enroll". A transient DB
 			// error (e.g. Postgres restarting) must not tell the agent its
 			// identity is invalid — the agent tears down its command stream on

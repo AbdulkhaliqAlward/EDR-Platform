@@ -3,6 +3,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/edr-platform/connection-manager/internal/cache"
+	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/contextkeys"
 	edrv1 "github.com/edr-platform/connection-manager/proto/v1"
@@ -131,9 +133,15 @@ func (h *HeartbeatHandler) Heartbeat(ctx context.Context, req *edrv1.HeartbeatRe
 			// UpdateStatus writes status + last_seen + optional metrics in one call.
 			// We pass metrics here so it's a single DB round-trip.
 			if err := h.agentService.UpdateStatus(ctx, agentUUID, dbStatus, dbMetrics); err != nil {
-				// Warn but don't fail the heartbeat — the agent must always
-				// get its response. DB issues are transient; heartbeats are not.
-				logger.WithError(err).Warn("Failed to persist heartbeat to database")
+				if errors.Is(err, repository.ErrNotFound) {
+					// Unknown agent, or a device removed from the dashboard
+					// (status writes are ignored for it by design).
+					logger.Debug("Heartbeat not persisted: agent not registered or removed from dashboard")
+				} else {
+					// Warn but don't fail the heartbeat — the agent must always
+					// get its response. DB issues are transient; heartbeats are not.
+					logger.WithError(err).Warn("Failed to persist heartbeat to database")
+				}
 			} else {
 				logger.Debug("Heartbeat persisted to database")
 			}

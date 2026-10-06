@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -285,14 +286,58 @@ func (h *Handlers) PatchAgentBusinessContext(c echo.Context) error {
 }
 
 // DeleteAgent removes an agent.
+//
+// Removes the device from the dashboard (soft delete): the agent row and all
+// of its history (alerts, events, commands, findings) are kept for audit, but
+// the device disappears from the device list and counts, and any later
+// connection from that agent is rejected. Reinstalling the same machine
+// re-enrolls it and brings it back with its history.
+//
+// A device whose agent is connected right now is refused (409): uninstall it
+// first, so no running agent is left without a dashboard entry.
 func (h *Handlers) DeleteAgent(c echo.Context) error {
-	idStr := c.Param("id")
-	_, err := uuid.Parse(idStr)
+	agentID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid agent ID format")
 	}
+	if h.agentSvc == nil {
+		return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Agent service is not available")
+	}
 
-	// TODO: Delete from AgentRepository
+	ctx := c.Request().Context()
+	agent, err := h.agentSvc.GetByID(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return errorResponse(c, http.StatusNotFound, "AGENT_NOT_FOUND", "Agent not found")
+		}
+		h.logger.WithError(err).WithField("agent_id", agentID).Error("DeleteAgent: lookup failed")
+		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to look up agent")
+	}
+	if agent.Status == models.AgentStatusDeleted {
+		return c.NoContent(http.StatusNoContent) // already removed — idempotent
+	}
+
+	if h.registry != nil && h.registry.IsOnline(agentID.String()) {
+		return errorResponse(c, http.StatusConflict, "AGENT_ONLINE",
+			"This device's agent is currently connected. Uninstall the agent first, then remove the device from the dashboard.")
+	}
+
+	if err := h.agentSvc.Delete(ctx, agentID); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return errorResponse(c, http.StatusNotFound, "AGENT_NOT_FOUND", "Agent not found")
+		}
+		h.logger.WithError(err).WithField("agent_id", agentID).Error("DeleteAgent: soft delete failed")
+		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to remove agent")
+	}
+
+	h.logger.WithFields(logrus.Fields{
+		"agent_id":        agentID,
+		"hostname":        agent.Hostname,
+		"previous_status": agent.Status,
+	}).Info("Device removed from dashboard (soft delete, history retained)")
+	h.fireAudit(c, "agent.delete", "agent", agentID,
+		"Device "+agent.Hostname+" removed from dashboard (previous status="+agent.Status+"); history retained",
+		false, "")
 
 	return c.NoContent(http.StatusNoContent)
 }

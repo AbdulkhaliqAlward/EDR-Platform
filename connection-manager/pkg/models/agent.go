@@ -70,6 +70,7 @@ const (
 	AgentStatusSuspended        = "suspended"
 	AgentStatusPendingUninstall = "pending_uninstall" // Server sent UNINSTALL_AGENT; awaiting agent confirmation
 	AgentStatusUninstalled      = "uninstalled"       // Agent confirmed local cleanup — no new commands will be dispatched
+	AgentStatusDeleted          = "deleted"           // Removed from the dashboard (soft delete): hidden from lists, history kept, connections rejected
 )
 
 // IsOnline returns true if the agent is currently online.

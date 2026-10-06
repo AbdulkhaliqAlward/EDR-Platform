@@ -19,13 +19,59 @@ package uninstalltoken
 
 import (
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+// agentIDPrefix is the prefix the server puts on the agent identity in issued
+// certificates ("agent-<UUID>" as CN and DNS SAN). The server strips it to get
+// the canonical agent ID (see connection-manager extractAgentIDFromCert).
+const agentIDPrefix = "agent-"
+
+// NormalizeAgentID returns the canonical agent ID (lower-case bare UUID) for
+// either form the agent may hold: "<UUID>" or "agent-<UUID>". It returns ""
+// when the input is not a valid UUID, so callers never compare against junk.
+func NormalizeAgentID(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > len(agentIDPrefix) && strings.EqualFold(s[:len(agentIDPrefix)], agentIDPrefix) {
+		s = s[len(agentIDPrefix):]
+	}
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return ""
+	}
+	return id.String()
+}
+
+// AgentIDFromCertPEM extracts the canonical agent ID from the agent's enrolled
+// client certificate, using the same precedence as the server: a DNS SAN
+// "agent-<UUID>" first, then the Subject CN. Returns "" if none is valid.
+func AgentIDFromCertPEM(certPEM []byte) string {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return ""
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return ""
+	}
+	for _, name := range cert.DNSNames {
+		if len(name) > len(agentIDPrefix) && strings.EqualFold(name[:len(agentIDPrefix)], agentIDPrefix) {
+			if id := NormalizeAgentID(name); id != "" {
+				return id
+			}
+		}
+	}
+	return NormalizeAgentID(cert.Subject.CommonName)
+}
 
 // Version is the token schema version this agent understands. Must match the
 // server's security.UninstallTokenVersion.
@@ -130,7 +176,11 @@ func Verify(embeddedPubKey, token, localAgentID string, now time.Time) (*Claims,
 	if claims.Action != Action {
 		return nil, ErrWrongAction
 	}
-	if localAgentID == "" || !strings.EqualFold(claims.AgentID, localAgentID) {
+	// Compare canonical forms: the device may hold "agent-<UUID>" (synced from
+	// its certificate CN) while the server mints tokens with the bare UUID.
+	tokenID := NormalizeAgentID(claims.AgentID)
+	localID := NormalizeAgentID(localAgentID)
+	if tokenID == "" || localID == "" || tokenID != localID {
 		return nil, ErrWrongAgent
 	}
 	if claims.ExpiresAt > 0 && now.After(time.Unix(claims.ExpiresAt, 0).Add(clockSkew)) {

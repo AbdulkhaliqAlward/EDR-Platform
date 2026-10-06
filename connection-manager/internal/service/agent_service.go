@@ -48,6 +48,9 @@ type AgentService interface {
 	// SetIsolation updates the is_isolated flag for an agent.
 	SetIsolation(ctx context.Context, id uuid.UUID, isolated bool) error
 
+	// Delete removes an agent from the dashboard (soft delete — history is kept).
+	Delete(ctx context.Context, id uuid.UUID) error
+
 	// UpdateBusinessContext updates the agent's asset-context fields (criticality, business_unit, environment).
 	// Triggers automatic recompute of vulnerability priority_score for the agent's findings.
 	UpdateBusinessContext(ctx context.Context, id uuid.UUID, ctxFields repository.AgentBusinessContext) error
@@ -508,6 +511,18 @@ func (s *agentServiceImpl) Approve(ctx context.Context, id uuid.UUID, approvedBy
 // SetIsolation updates the is_isolated flag for an agent.
 func (s *agentServiceImpl) SetIsolation(ctx context.Context, id uuid.UUID, isolated bool) error {
 	return s.agentRepo.SetIsolation(ctx, id, isolated)
+}
+
+// Delete soft-deletes the agent (status 'deleted') and refreshes the Redis
+// status cache so no stale "online" value lingers for this device.
+func (s *agentServiceImpl) Delete(ctx context.Context, id uuid.UUID) error {
+	if err := s.agentRepo.Delete(ctx, id); err != nil {
+		return err
+	}
+	if s.redis != nil {
+		s.redis.SetAgentStatus(ctx, id.String(), models.AgentStatusDeleted, 5*time.Minute)
+	}
+	return nil
 }
 
 // UpdateBusinessContext updates asset-context fields (criticality, business_unit, environment).

@@ -6,7 +6,7 @@ import {
     Server, Network, AlertTriangle, CheckCircle2, XCircle, Settings,
     RefreshCw, ChevronLeft, ChevronRight, FileText, List, Package,
     ShieldAlert, Pencil, Check, X as XIcon, Building2, Globe,
-    Eye, Tag, Zap
+    Eye, Tag, Zap, Trash2
 } from 'lucide-react';
 import {
     agentPackagesApi,
@@ -261,6 +261,7 @@ export default function EndpointDetail() {
     const [destructiveOpen, setDestructiveOpen] = useState(false);
     const [pendingDestructive, setPendingDestructive] = useState<'restart_machine' | 'shutdown_machine' | 'uninstall_agent' | null>(null);
     const [offlineToken, setOfflineToken] = useState<{ token: string; expires_at: string } | null>(null);
+    const [removeOpen, setRemoveOpen] = useState(false);
 
     const { data: agent, isLoading: agentLoading, error: agentError } = useQuery({
         queryKey: ['agent', agentId],
@@ -342,6 +343,22 @@ export default function EndpointDetail() {
             }
         },
         onError: (e: Error) => showToast(e.message || 'Command failed', 'error'),
+    });
+
+    const removeDeviceMutation = useMutation({
+        mutationFn: () => agentsApi.delete(agentId),
+        onSuccess: () => {
+            setRemoveOpen(false);
+            showToast('Device removed from the dashboard (history kept)', 'success');
+            queryClient.invalidateQueries({ queryKey: ['agents'] });
+            queryClient.removeQueries({ queryKey: ['agent', agentId] });
+            navigate('/management/devices');
+        },
+        onError: (e: unknown) => {
+            // Surface the server's explanation (e.g. 409 "agent is currently connected").
+            const ax = e as { response?: { data?: { message?: string } }; message?: string };
+            showToast(ax?.response?.data?.message || ax?.message || 'Could not remove device', 'error');
+        },
     });
 
     const offlineTokenMutation = useMutation({
@@ -493,9 +510,57 @@ export default function EndpointDetail() {
                             >
                                 View Events
                             </Link>
+                            {authApi.canManageEndpoints() && (
+                                <button
+                                    type="button"
+                                    onClick={() => setRemoveOpen(true)}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 dark:bg-rose-900/20 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/50 hover:bg-rose-100 dark:hover:bg-rose-900/40 transition-colors"
+                                    title="Remove this device from the dashboard (its history is kept)"
+                                >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    Remove from dashboard
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>
+
+                <Modal
+                    isOpen={removeOpen}
+                    onClose={() => { if (!removeDeviceMutation.isPending) setRemoveOpen(false); }}
+                    title="Remove device from dashboard"
+                    footer={
+                        <div className="flex justify-end gap-2">
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={removeDeviceMutation.isPending}
+                                onClick={() => setRemoveOpen(false)}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                className="btn bg-rose-600 hover:bg-rose-700 text-white"
+                                disabled={removeDeviceMutation.isPending}
+                                onClick={() => removeDeviceMutation.mutate()}
+                            >
+                                {removeDeviceMutation.isPending ? 'Removing…' : 'Remove'}
+                            </button>
+                        </div>
+                    }
+                >
+                    <div className="space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                        <p>
+                            Remove <strong>{agent.hostname}</strong> from the device list?
+                        </p>
+                        <ul className="list-disc pl-5 space-y-1 text-xs text-slate-500 dark:text-slate-400">
+                            <li>Its alerts, events and command history are <strong>kept</strong> for investigations.</li>
+                            <li>This does <strong>not</strong> uninstall the agent. Uninstall it first (remotely, or with an offline uninstall token) — a device whose agent is still connected cannot be removed.</li>
+                            <li>If the agent is reinstalled on this machine later, the device returns with its history.</li>
+                        </ul>
+                    </div>
+                </Modal>
 
                 {/* Modern Tab Bar */}
                 <div className="bg-white/95 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 backdrop-blur-md rounded-2xl p-1.5 shadow-sm flex flex-wrap gap-1 overflow-x-auto">

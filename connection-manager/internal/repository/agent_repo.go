@@ -246,11 +246,15 @@ func (r *PostgresAgentRepository) Update(ctx context.Context, agent *models.Agen
 // UpdateStatus updates the agent's status and last_seen timestamp.
 // Returns ErrNotFound if the agent does not exist in the database —
 // callers MUST handle this to enforce proper enrollment.
+//
+// A device removed from the dashboard (status 'deleted') is never updated
+// here, so a heartbeat or stream from a still-running agent cannot bring it
+// back into the device list. Only re-enrollment (UpsertByHostname) restores it.
 func (r *PostgresAgentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string, lastSeen time.Time) error {
 	query := `
 		UPDATE agents SET
 			status = $2, last_seen = $3, updated_at = $4
-		WHERE id = $1`
+		WHERE id = $1 AND status <> '` + models.AgentStatusDeleted + `'`
 
 	result, err := r.pool.Exec(ctx, query, id, status, lastSeen, time.Now())
 	if err != nil {
@@ -306,7 +310,7 @@ func (r *PostgresAgentRepository) UpdateMetrics(ctx context.Context, id uuid.UUI
 			health_score = CASE WHEN $12 < 0 THEN health_score ELSE $12 END,
 			sysmon_installed = $14, sysmon_running = $15,
 			last_seen = $13, updated_at = $13
-		WHERE id = $1`
+		WHERE id = $1 AND status <> '` + models.AgentStatusDeleted + `'`
 
 	now := time.Now()
 	result, err := r.pool.Exec(ctx, query, id, cpuUsage, memoryUsedMB, memoryTotalMB, queueDepth,
@@ -325,9 +329,11 @@ func (r *PostgresAgentRepository) UpdateMetrics(ctx context.Context, id uuid.UUI
 	return nil
 }
 
-// Delete soft-deletes an agent.
+// Delete soft-deletes an agent: the row (and all its history) is kept, but the
+// device is hidden from the device list and counts, and status writes from a
+// still-running agent are ignored. Re-enrollment of the same hostname restores it.
 func (r *PostgresAgentRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	query := `UPDATE agents SET status = 'deleted', updated_at = $2 WHERE id = $1`
+	query := `UPDATE agents SET status = '` + models.AgentStatusDeleted + `', updated_at = $2 WHERE id = $1`
 
 	result, err := r.pool.Exec(ctx, query, id, time.Now())
 	if err != nil {
@@ -354,6 +360,9 @@ func (r *PostgresAgentRepository) List(ctx context.Context, filter AgentFilter) 
 		query += fmt.Sprintf(" AND status = $%d", argNum)
 		args = append(args, *filter.Status)
 		argNum++
+	} else {
+		// Devices removed from the dashboard are hidden unless explicitly requested.
+		query += " AND status <> '" + models.AgentStatusDeleted + "'"
 	}
 
 	if filter.OSType != nil {
@@ -447,6 +456,9 @@ func (r *PostgresAgentRepository) Count(ctx context.Context, filter AgentFilter)
 		query += fmt.Sprintf(" AND status = $%d", argNum)
 		args = append(args, *filter.Status)
 		argNum++
+	} else {
+		// Keep the count consistent with List: removed devices are hidden.
+		query += " AND status <> '" + models.AgentStatusDeleted + "'"
 	}
 
 	var count int64
