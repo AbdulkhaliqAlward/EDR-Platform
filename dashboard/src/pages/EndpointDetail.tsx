@@ -72,7 +72,7 @@ const RESPONSE_OPTIONS: { value: CommandType; label: string; destructive?: boole
     { value: 'block_domain', label: 'Block domain' },
     { value: 'unblock_domain', label: 'Unblock domain' },
     { value: 'run_cmd', label: 'Run CMD (whitelisted)' },
-    { value: 'custom', label: 'Custom command (whitelisted)' },
+    { value: 'custom', label: 'Custom command (admin)' },
     { value: 'collect_logs', label: 'Collect logs' },
     { value: 'collect_forensics', label: 'Collect forensics' },
     { value: 'scan_memory', label: 'Scan memory (file hash)' },
@@ -394,6 +394,7 @@ export default function EndpointDetail() {
             command_type: cmdType,
             parameters,
             timeout,
+            ...(cmdType === 'custom' ? { reason: (fields.reason || '').trim() } : {}),
         });
     };
 
@@ -2793,16 +2794,26 @@ function ResponseTab({
     onSubmit: () => void;
 }) {
     const patch = (k: string, v: string) => setFields((f) => ({ ...f, [k]: v }));
+
+    // Whether this user may run admin custom commands (master switch ON + admin).
+    const { data: cmdCaps } = useQuery({
+        queryKey: ['command-capabilities'],
+        queryFn: () => agentsApi.commandCapabilities(),
+        staleTime: 5 * 60 * 1000,
+    });
+    const customEnabled = !!cmdCaps?.custom_commands_enabled;
+
     const uniqueOptions = useMemo(() => {
         const seen = new Set<string>();
         return RESPONSE_OPTIONS.filter((o) => {
             if (seen.has(o.value)) return false;
-            // Remove custom command - run_cmd covers it
-            if (o.value === 'custom') return false;
+            // The "custom" (admin, free-text) command appears only when the
+            // server master switch is on AND the user is an admin.
+            if (o.value === 'custom' && !customEnabled) return false;
             seen.add(o.value);
             return true;
         });
-    }, []);
+    }, [customEnabled]);
 
     const [cmdPage, setCmdPage] = useState(1);
     const CMD_PAGE_SIZE = 10;
@@ -2899,6 +2910,16 @@ function ResponseTab({
         if (cmdType === 'run_cmd' && !fields.cmd?.trim()) {
             showToast('Please select a command to run.', 'error');
             return;
+        }
+        if (cmdType === 'custom') {
+            if (!fields.cmd?.trim()) {
+                showToast('Please enter the command to run.', 'error');
+                return;
+            }
+            if (!fields.reason?.trim()) {
+                showToast('A reason is required for a custom command (it is recorded in the audit log).', 'error');
+                return;
+            }
         }
         if ((cmdType === 'scan_memory' || cmdType === 'scan_file') && !fields.file_path?.trim()) {
             showToast('Please enter a file path to scan.', 'error');
@@ -3102,6 +3123,32 @@ function ResponseTab({
                                                 <option key={cmd.value} value={cmd.value}>{cmd.label}</option>
                                             ))}
                                         </select>
+                                    </div>
+                                )}
+
+                                {cmdType === 'custom' && (
+                                    <div className="mt-3 space-y-3">
+                                        <div className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/30 rounded-lg p-3">
+                                            <strong>Admin custom command.</strong> This runs an arbitrary command on the endpoint.
+                                            It is admin-only, requires a reason, is approved (OTP) when configured, and is fully audited.
+                                            Run without a shell; to use one, invoke it explicitly (e.g. <code>powershell -Command "…"</code> or <code>cmd /c …</code>).
+                                        </div>
+                                        <label className="text-[10px] text-slate-500 uppercase">Command</label>
+                                        <textarea
+                                            className="input w-full font-mono text-xs h-20"
+                                            placeholder={`powershell -Command "Get-ScheduledTask | Where-Object State -eq Running"`}
+                                            value={fields.cmd || ''}
+                                            onChange={(e) => patch('cmd', e.target.value)}
+                                            disabled={!canExec}
+                                        />
+                                        <label className="text-[10px] text-slate-500 uppercase">Reason (required — audited)</label>
+                                        <input
+                                            className="input w-full text-xs"
+                                            placeholder="e.g. Collecting running scheduled tasks for incident INC-1234"
+                                            value={fields.reason || ''}
+                                            onChange={(e) => patch('reason', e.target.value)}
+                                            disabled={!canExec}
+                                        />
                                     </div>
                                 )}
 

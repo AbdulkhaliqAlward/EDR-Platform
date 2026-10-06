@@ -223,6 +223,10 @@ type CommandRequest struct {
 	// should normally send it via the X-Approval-Token header instead;
 	// this field is just a convenience for tools that can't set headers.
 	ApprovalToken string `json:"approval_token,omitempty"`
+
+	// Reason is a mandatory human justification for a custom command
+	// (command_type "custom"). Recorded in the audit log. Ignored for other types.
+	Reason string `json:"reason,omitempty"`
 }
 
 // CommandResponse for command execution.

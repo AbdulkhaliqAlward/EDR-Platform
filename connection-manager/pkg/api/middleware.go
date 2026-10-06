@@ -59,6 +59,7 @@ type Handlers struct {
 	auditLogger         *audit.Logger                         // non-blocking security event writer
 	uninstallSigner     ed25519.PrivateKey                     // optional: Ed25519 key for offline uninstall tokens (nil when unavailable)
 	uninstallTokenTTL   time.Duration                          // validity window for minted uninstall tokens
+	allowCustomCommands bool                                   // master switch for admin custom run_cmd (default false)
 }
 
 // NewHandlers creates a new handlers instance.
@@ -402,6 +403,19 @@ func (h *Handlers) RateLimitMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 func getCurrentUser(c echo.Context) *UserClaims {
 	user, _ := c.Get(string(ContextKeyUser)).(*UserClaims)
 	return user
+}
+
+// userHasRole reports whether the user holds the given role.
+func userHasRole(user *UserClaims, role string) bool {
+	if user == nil {
+		return false
+	}
+	for _, r := range user.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 // getClientIP extracts the real client IP address considering that the backend

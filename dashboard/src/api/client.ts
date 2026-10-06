@@ -499,6 +499,8 @@ export interface CommandRequest {
     timeout?: number;
     /** Alias used by some test plans / tools; prefer `timeout` from the dashboard. */
     timeout_seconds?: number;
+    /** Mandatory justification for a custom command (command_type 'custom'); audited. */
+    reason?: string;
 }
 
 export interface AuditLog {
@@ -887,6 +889,13 @@ export const agentsApi = {
             expires_at: string;
             ttl_seconds: number;
         }>(`/api/v1/agents/${agentId}/uninstall-token`, { reason: reason ?? '' });
+        return response.data;
+    },
+    /** Which command features are enabled for the current user (e.g. custom commands). */
+    commandCapabilities: async (): Promise<{ custom_commands_enabled: boolean; custom_commands_available: boolean }> => {
+        const response = await connectionApi.get<{ custom_commands_enabled: boolean; custom_commands_available: boolean }>(
+            '/api/v1/commands/capabilities'
+        );
         return response.data;
     },
     getCommands: async (agentId: string, params?: { limit?: number; offset?: number; status?: string }) => {

@@ -555,6 +555,44 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 			"Unknown or unsupported command_type — see API documentation for allowed values")
 	}
 
+	// ── Command authorization tier (server-authoritative) ────────────────────
+	// The arbitrary "custom" tier can be granted ONLY by the server, below.
+	// Strip any client-supplied authz_tier so a caller can never self-grant it.
+	//
+	// NOTE: the legacy "from_playbook" marker (curated playbookAllowedCommands
+	// set) is intentionally left intact — it only unlocks a fixed set of safe
+	// operational commands for callers who already hold responses:execute, and
+	// the manual playbook UI relies on it. It does NOT grant the custom tier.
+	delete(req.Parameters, "authz_tier")
+
+	if req.CommandType == "custom" {
+		// Admin-authored custom command: strongest controls. OTP (when the
+		// approval service is configured) was already enforced above.
+		if !h.allowCustomCommands {
+			return errorResponse(c, http.StatusForbidden, "CUSTOM_COMMANDS_DISABLED",
+				"Custom commands are disabled on this server. An administrator must enable them (EDR_ALLOW_CUSTOM_COMMANDS=true).")
+		}
+		user := getCurrentUser(c)
+		if user == nil || !userHasRole(user, "admin") {
+			return errorResponse(c, http.StatusForbidden, "CUSTOM_REQUIRES_ADMIN",
+				"Custom commands require an administrator account.")
+		}
+		if strings.TrimSpace(req.Reason) == "" {
+			return errorResponse(c, http.StatusBadRequest, "REASON_REQUIRED",
+				"A reason is required for a custom command (recorded in the audit log).")
+		}
+		if req.Parameters == nil {
+			req.Parameters = map[string]string{}
+		}
+		if strings.TrimSpace(req.Parameters["cmd"]) == "" {
+			return errorResponse(c, http.StatusBadRequest, "CMD_REQUIRED",
+				"The 'cmd' parameter is required for a custom command.")
+		}
+		req.Parameters["authz_tier"] = "custom"
+		h.logger.Warnf("[C2] CUSTOM command authorized by admin %q on agent %s: %q (reason: %s)",
+			user.Username, agentID, req.Parameters["cmd"], req.Reason)
+	}
+
 	// Validate registry is available
 	if h.registry == nil {
 		h.logger.Warn("[C2] Registry is nil")
@@ -788,9 +826,13 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 			auditAction = models.AuditActionDeployPolicy
 		}
 
+		details := "agent=" + agentID.String() + " type=" + req.CommandType
+		if req.CommandType == "custom" {
+			details += " cmd=" + req.Parameters["cmd"] + " reason=" + req.Reason
+		}
 		auditEntry := models.NewAuditLog(userID, username, auditAction, "command", commandID).
 			WithContext(ip, ua).
-			WithDetails("agent=" + agentID.String() + " type=" + req.CommandType)
+			WithDetails(details)
 		go func(entry *models.AuditLog) {
 			auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

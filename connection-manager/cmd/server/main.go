@@ -551,6 +551,16 @@ func main() {
 		apiHandlers.SetUninstallSigner(keyStore.UninstallSigningKey(), 0)
 	}
 
+	// Master switch for admin-authored custom commands (default OFF). When off,
+	// only built-in diagnostics and server-side library/playbook commands run.
+	allowCustom := strings.EqualFold(strings.TrimSpace(os.Getenv("EDR_ALLOW_CUSTOM_COMMANDS")), "true")
+	apiHandlers.SetAllowCustomCommands(allowCustom)
+	if allowCustom {
+		logger.Warn("EDR_ALLOW_CUSTOM_COMMANDS=true — admins can run custom commands on agents (admin role + approval + reason + audit enforced)")
+	} else {
+		logger.Info("Custom commands are disabled (EDR_ALLOW_CUSTOM_COMMANDS not set to true)")
+	}
+
 	// Wire the gRPC server's AgentRegistry into REST API handlers for C2 command routing.
 	// Without this, POST /agents/:id/commands returns 503 (registry == nil).
 	apiHandlers.SetRegistry(grpcServer.GetRegistry())

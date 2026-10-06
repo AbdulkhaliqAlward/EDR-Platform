@@ -49,6 +49,12 @@ services:
       # requires a 6-digit OTP delivered to this address. Leave blank to keep
       # the legacy behaviour (no per-command approval).
       EC2_EMAIL_VERIFY: "${EC2_EMAIL_VERIFY-}"
+      # Master switch for admin-authored CUSTOM commands on agents. Default false.
+      # When "true", an admin (not just any responder) may run an arbitrary
+      # command on an endpoint — still gated by OTP approval (when EC2_EMAIL_VERIFY
+      # is set), a mandatory reason, and full audit logging. Built-in diagnostics
+      # and server-side playbook/library commands work regardless of this flag.
+      EDR_ALLOW_CUSTOM_COMMANDS: "${EDR_ALLOW_CUSTOM_COMMANDS-false}"
       # Key Encryption — derives AES-256 KEK for encrypting ca.key, server.key, jwt_private.pem at rest.
       MASTER_KEY_PASSPHRASE: "${MASTER_KEY_PASSPHRASE:?MASTER_KEY_PASSPHRASE missing in .env}"
       KAFKA_BROKERS: "kafka:9092"        # INTERNAL listener (containers)

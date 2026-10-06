@@ -17,6 +17,26 @@ import (
 // defaultUninstallTokenTTL is used when none is configured.
 const defaultUninstallTokenTTL = 30 * time.Minute
 
+// SetAllowCustomCommands sets the master switch for admin-authored custom
+// run_cmd commands. Default is false (feature off).
+func (h *Handlers) SetAllowCustomCommands(enabled bool) {
+	h.allowCustomCommands = enabled
+}
+
+// GetCommandCapabilities reports which command features are enabled, so the
+// dashboard can show or hide the custom-command UI. The actual authorization
+// is always enforced server-side in ExecuteAgentCommand regardless of this.
+func (h *Handlers) GetCommandCapabilities(c echo.Context) error {
+	user := getCurrentUser(c)
+	return c.JSON(http.StatusOK, map[string]any{
+		// Custom commands are usable only when the master switch is on AND the
+		// caller is an admin.
+		"custom_commands_enabled": h.allowCustomCommands && userHasRole(user, "admin"),
+		// Whether the feature is switched on at all (for an explanatory message).
+		"custom_commands_available": h.allowCustomCommands,
+	})
+}
+
 // SetUninstallSigner wires the Ed25519 key used to sign offline uninstall
 // tokens. ttl <= 0 selects defaultUninstallTokenTTL. When priv is nil the
 // mint endpoint reports the feature as unavailable.

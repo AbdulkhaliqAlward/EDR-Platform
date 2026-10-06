@@ -2415,12 +2415,15 @@ func ejectUSBDrivesNative(ctx context.Context, log *logging.Logger) (string, err
 //   2. Validates the executable against a hardcoded whitelist of safe diagnostics
 //   3. Invokes exec.Command directly (no cmd.exe, no shell interpolation)
 //
-// PLAYBOOK CONTEXT EXTENSION
-// When params["from_playbook"] == "true" the command is allowed against an
-// extended whitelist (playbookAllowedCommands).  Playbooks are server-authored
-// and RBAC-protected so they are treated as a trusted automation channel.
-// Additional safety gates are applied per-executable (e.g. powershell is
-// restricted to -Command inline mode; -File and -EncodedCommand are blocked).
+// AUTHORIZATION TIERS (see runCmdTier) — set only by the server:
+//   - diagnostic (default): strict allowedDiagnostics list.
+//   - library: extended playbookAllowedCommands list, for server playbooks and
+//     the server-side script library (legacy from_playbook="true" maps here).
+//     powershell is restricted to -Command; -File / -EncodedCommand are blocked.
+//   - custom: an admin-authorized custom command (admin role, master switch,
+//     approval and reason enforced server-side, fully audited) — no static list.
+//
+// All tiers execute without a shell, with a timeout and an output size cap.
 func (h *Handler) runCommand(ctx context.Context, params map[string]string) (string, error) {
 	cmdStr := strings.TrimSpace(params["cmd"])
 	if cmdStr == "" {
@@ -2449,43 +2452,40 @@ func (h *Handler) runCommand(ctx context.Context, params map[string]string) (str
 	exeName := strings.ToLower(filepath.Base(parts[0]))
 	exeName = strings.TrimSuffix(exeName, ".exe")
 
-	// Determine if this RUN_CMD came from a server-side playbook.
-	fromPlaybook := strings.EqualFold(strings.TrimSpace(params["from_playbook"]), "true")
+	// Authorization tier — set ONLY by the server (it strips any client-supplied
+	// value before dispatch), and delivered over the agent's mTLS stream.
+	tier := runCmdTier(params)
 
-	var allowed bool
-	if fromPlaybook {
-		allowed = playbookAllowedCommands[exeName]
-	} else {
-		allowed = allowedDiagnostics[exeName]
-	}
-
-	if !allowed {
+	if tier != tierCustom {
 		listSrc := allowedDiagnostics
-		if fromPlaybook {
+		if tier == tierLibrary {
 			listSrc = playbookAllowedCommands
 		}
-		allowedList := make([]string, 0, len(listSrc))
-		for k := range listSrc {
-			allowedList = append(allowedList, k)
+		if !listSrc[exeName] {
+			allowedList := make([]string, 0, len(listSrc))
+			for k := range listSrc {
+				allowedList = append(allowedList, k)
+			}
+			h.logger.Warnf("[C2] BLOCKED run_cmd (%s tier): %q is not in whitelist", tier, parts[0])
+			return "", fmt.Errorf("BLOCKED: %q is not in the allowed commands whitelist (%s tier). Allowed: %v", parts[0], tier, allowedList)
 		}
-		source := "interactive"
-		if fromPlaybook {
-			source = "playbook"
-		}
-		h.logger.Warnf("[C2] BLOCKED run_cmd (%s context): %q is not in whitelist", source, parts[0])
-		return "", fmt.Errorf("BLOCKED: %q is not in the allowed commands whitelist (%s context). Allowed: %v", parts[0], source, allowedList)
 	}
 
-	// ?? Per-executable safety gates ???????????????????????????????????????????
+	// ── Per-executable safety gates ───────────────────────────────────────────
+	// The -File / -EncodedCommand restrictions apply to the diagnostic and
+	// library tiers. A custom command was explicitly authorized by an admin
+	// (admin role + master switch + approval + reason, fully audited).
 	if exeName == "powershell" {
-		// Block -File and -EncodedCommand to prevent loading external scripts.
-		for _, arg := range parts[1:] {
-			argL := strings.ToLower(strings.TrimLeft(arg, "-/"))
-			if argL == "file" || argL == "f" {
-				return "", fmt.Errorf("BLOCKED: powershell -File is not permitted through run_cmd")
-			}
-			if argL == "encodedcommand" || argL == "ec" || argL == "en" || argL == "enc" {
-				return "", fmt.Errorf("BLOCKED: powershell -EncodedCommand is not permitted through run_cmd")
+		if tier != tierCustom {
+			// Block -File and -EncodedCommand to prevent loading external scripts.
+			for _, arg := range parts[1:] {
+				argL := strings.ToLower(strings.TrimLeft(arg, "-/"))
+				if argL == "file" || argL == "f" {
+					return "", fmt.Errorf("BLOCKED: powershell -File is not permitted through run_cmd")
+				}
+				if argL == "encodedcommand" || argL == "ec" || argL == "en" || argL == "enc" {
+					return "", fmt.Errorf("BLOCKED: powershell -EncodedCommand is not permitted through run_cmd")
+				}
 			}
 		}
 
@@ -2526,7 +2526,13 @@ func (h *Handler) runCommand(ctx context.Context, params map[string]string) (str
 	}
 
 	// Execute directly via exec.Command - NO cmd.exe, NO shell interpolation.
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Diagnostics keep the original 30s limit; library/custom response actions
+	// get a longer (still bounded) window for real remediation work.
+	execTimeout := 30 * time.Second
+	if tier != tierDiagnostic {
+		execTimeout = 120 * time.Second
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, execTimeout)
 	defer cancel()
 
 	var execCmd *exec.Cmd
@@ -2545,25 +2551,60 @@ func (h *Handler) runCommand(ctx context.Context, params map[string]string) (str
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
 	}
 
-	output, err := execCmd.CombinedOutput()
+	rawOutput, err := execCmd.CombinedOutput()
+	output := capRunCmdOutput(rawOutput)
 	if err != nil {
 		// Log the actual command output so the error is visible in the agent log.
-		h.logger.Errorf("[C2] run_cmd FAILED output: %s", strings.TrimSpace(string(output)))
+		h.logger.Errorf("[C2] run_cmd FAILED output: %s", strings.TrimSpace(output))
 		// A context-cancellation race after natural process exit is benign -
 		// the process finished cleanly but Go's cleanup raced the context cancel.
-		if timeoutCtx.Err() != nil && len(output) > 0 {
+		if timeoutCtx.Err() != nil && len(rawOutput) > 0 {
 			h.logger.Infof("[C2] run_cmd context expired after process exit (output captured): %s", cmdStr)
 		} else {
-			return string(output), fmt.Errorf("command failed: %w", err)
+			return output, fmt.Errorf("command failed: %w", err)
 		}
 	}
 
-	ctxLabel := "interactive"
-	if fromPlaybook {
-		ctxLabel = "playbook"
+	h.logger.Infof("[C2] run_cmd executed (%s tier): %s", tier, cmdStr)
+	return output, nil
+}
+
+// run_cmd authorization tiers. The server is the only party that sets the
+// tier: it strips any client-supplied value before dispatch.
+const (
+	tierDiagnostic = "diagnostic" // strict allowedDiagnostics list
+	tierLibrary    = "library"    // playbookAllowedCommands (server playbooks / script library)
+	tierCustom     = "custom"     // admin-authorized custom command (no static list)
+)
+
+// runCmdTier resolves the authorization tier of a RUN_CMD. "authz_tier" is the
+// server-set field; "from_playbook" is the legacy server marker for playbook
+// commands (kept so older servers keep working) and maps to the library tier.
+// Anything unknown falls back to the strict diagnostic tier.
+func runCmdTier(params map[string]string) string {
+	switch strings.ToLower(strings.TrimSpace(params["authz_tier"])) {
+	case tierCustom:
+		return tierCustom
+	case tierLibrary:
+		return tierLibrary
+	case tierDiagnostic:
+		return tierDiagnostic
 	}
-	h.logger.Infof("[C2] run_cmd executed (whitelisted, %s context): %s", ctxLabel, cmdStr)
-	return string(output), nil
+	if strings.EqualFold(strings.TrimSpace(params["from_playbook"]), "true") {
+		return tierLibrary
+	}
+	return tierDiagnostic
+}
+
+// maxRunCmdOutput bounds the output returned to the server so a verbose
+// command cannot produce an oversized command result.
+const maxRunCmdOutput = 512 * 1024
+
+func capRunCmdOutput(b []byte) string {
+	if len(b) <= maxRunCmdOutput {
+		return string(b)
+	}
+	return string(b[:maxRunCmdOutput]) + fmt.Sprintf("\n... [output truncated: %d of %d bytes shown]", maxRunCmdOutput, len(b))
 }
 
 // restartMachine initiates an OS-level machine reboot.

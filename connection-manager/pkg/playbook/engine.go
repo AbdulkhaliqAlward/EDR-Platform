@@ -208,6 +208,9 @@ func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
 			for k, v := range s.Params {
 				params[k] = v
 			}
+			// Server-authored playbook step: grant the extended (library) tier.
+			params["authz_tier"] = "library"
+			params["from_playbook"] = "true" // legacy marker for older agents
 
 			// Expiry = cumulative wait for prior steps + this step's own timeout + 60s grace.
 			// The 60s grace covers network latency, gRPC queuing, and agent dispatch overhead.

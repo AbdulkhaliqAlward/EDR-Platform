@@ -44,13 +44,12 @@ func (s *CommandService) ExecutePlaybookCommand(ctx context.Context, executionID
 	if params == nil {
 		params = make(map[string]interface{})
 	}
-	// Inject the playbook-context marker for ALL command types so the agent
-	// knows this was server-authored and RBAC-protected.
-	// For run_cmd this specifically unlocks the extended playbookAllowedCommands
-	// whitelist (powershell -Command, mountvol, etc.).
-	if _, exists := params["from_playbook"]; !exists {
-		params["from_playbook"] = "true"
-	}
+	// Mark this as a server-authored, RBAC-protected command. For run_cmd the
+	// "library" authorization tier unlocks the extended playbookAllowedCommands
+	// whitelist (powershell -Command, mountvol, etc.). This marker is set
+	// server-side only; the manual API path strips any client-supplied value.
+	params["authz_tier"] = "library"
+	params["from_playbook"] = "true" // legacy marker for older agents
 
 	// Convert playbook command to system command
 	command := &models.Command{
