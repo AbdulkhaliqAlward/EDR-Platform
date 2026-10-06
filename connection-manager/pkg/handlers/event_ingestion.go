@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -136,6 +137,14 @@ func (h *EventHandler) StreamEvents(stream edrv1.EventIngestionService_StreamEve
 		}
 
 		if _, err := h.agentService.GetByID(ctx, agentUUID); err != nil {
+			// Only a genuinely missing agent means "re-enroll". A transient DB
+			// error (e.g. Postgres restarting) must not tell the agent its
+			// identity is invalid — the agent tears down its command stream on
+			// Unauthenticated, so return a retryable Unavailable instead.
+			if !errors.Is(err, repository.ErrNotFound) {
+				h.logger.WithError(err).WithField("agent_id", agentID).Warn("Agent lookup failed (transient) — asking agent to retry")
+				return status.Errorf(codes.Unavailable, "agent lookup temporarily unavailable — retry later")
+			}
 			h.logger.WithField("agent_id", agentID).Warn("Rejected: agent not found in database — must re-enroll")
 			return status.Errorf(codes.Unauthenticated,
 				"agent %s is not registered — re-enrollment required", agentID)

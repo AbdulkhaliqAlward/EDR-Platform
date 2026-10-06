@@ -778,6 +778,7 @@ func (c *Client) RunStream(ctx context.Context) {
 
 	backoff := c.cfg.Server.ReconnectDelay
 	maxBackoff := c.cfg.Server.MaxReconnectDelay
+	authBackoff := time.Duration(0)
 
 	for {
 		select {
@@ -805,9 +806,15 @@ func (c *Client) RunStream(ctx context.Context) {
 		if err != nil {
 			// ── Detect server-side rejection for unknown/revoked agents ──
 			if st, ok := grpcstatus.FromError(err); ok && st.Code() == codes.Unauthenticated {
-				c.logger.Warnf("Server rejected agent: %s — triggering re-enrollment", st.Message())
-				c.reEnrollOnce.Do(func() { close(c.reEnrollCh) })
-				return // Stop reconnecting — agent must re-enroll
+				if c.canReEnroll() {
+					c.logger.Warnf("Server rejected agent: %s — triggering re-enrollment", st.Message())
+					c.reEnrollOnce.Do(func() { close(c.reEnrollCh) })
+					return // Stop reconnecting — agent must re-enroll
+				}
+				if !c.waitAfterAuthRejection(ctx, st.Message(), &authBackoff) {
+					return
+				}
+				continue
 			}
 			c.logger.Warnf("StreamEvents failed: %v", err)
 			backoff = c.nextBackoff(backoff, maxBackoff)
@@ -839,15 +846,57 @@ func (c *Client) RunStream(ctx context.Context) {
 			// ── Check if recv got Unauthenticated (server rejected unknown/revoked agent) ──
 			if recvErr != nil {
 				if st, ok := grpcstatus.FromError(recvErr); ok && st.Code() == codes.Unauthenticated {
-					c.logger.Warnf("Server rejected agent (recv): %s — triggering re-enrollment", st.Message())
-					c.reEnrollOnce.Do(func() { close(c.reEnrollCh) })
-					return // Stop reconnecting — agent must re-enroll
+					if c.canReEnroll() {
+						c.logger.Warnf("Server rejected agent (recv): %s — triggering re-enrollment", st.Message())
+						c.reEnrollOnce.Do(func() { close(c.reEnrollCh) })
+						return // Stop reconnecting — agent must re-enroll
+					}
+					if !c.waitAfterAuthRejection(ctx, st.Message(), &authBackoff) {
+						return
+					}
+					continue
 				}
 			}
+			authBackoff = 0 // stream was accepted; a later rejection starts the backoff over
 			backoff = c.nextBackoff(backoff, maxBackoff)
 			c.logger.Debugf("Stream recv ended; reconnecting in %v", backoff)
 			time.Sleep(backoff)
 		}
+	}
+}
+
+// canReEnroll reports whether automatic re-enrollment can actually succeed.
+// Re-enrollment needs the bootstrap token, which zero-embed builds keep only
+// in memory during -install and zero afterwards. Without it, the re-enroll
+// path cannot obtain a new identity, so tearing down the stream for it would
+// leave the agent unable to receive commands until the service restarts.
+func (c *Client) canReEnroll() bool {
+	return strings.TrimSpace(c.cfg.Certs.BootstrapToken) != ""
+}
+
+// waitAfterAuthRejection handles an Unauthenticated rejection when
+// re-enrollment is not possible: it keeps the current identity and waits
+// before RunStream retries, backing off from 30s up to 5 minutes so a
+// genuinely deleted agent does not hammer the server. Returns false if ctx
+// was cancelled while waiting.
+func (c *Client) waitAfterAuthRejection(ctx context.Context, reason string, delay *time.Duration) bool {
+	const (
+		minAuthBackoff = 30 * time.Second
+		maxAuthBackoff = 5 * time.Minute
+	)
+	if *delay < minAuthBackoff {
+		*delay = minAuthBackoff
+	} else {
+		*delay = c.nextBackoff(*delay, maxAuthBackoff)
+	}
+	c.logger.Warnf("Server rejected agent: %s — no enrollment token on this device, so re-enrollment is not possible; "+
+		"keeping current identity and retrying in %v (reinstall with a new token if this agent was deleted on the server)",
+		reason, *delay)
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(*delay):
+		return true
 	}
 }
 

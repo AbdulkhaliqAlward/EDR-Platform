@@ -227,7 +227,7 @@ func (i *Interceptor) AuthUnaryInterceptor(
 	agentID, err := i.validateClientCertificate(ctx)
 	if err != nil {
 		i.logger.WithError(err).Warn("Certificate validation failed")
-		return nil, status.Errorf(codes.Unauthenticated, "certificate validation failed: %v", err)
+		return nil, certValidationError(err)
 	}
 
 	ctx = context.WithValue(ctx, contextkeys.AgentIDKey, agentID)
@@ -269,6 +269,17 @@ func (i *Interceptor) AuthUnaryInterceptor(
 	return handler(ctx, req)
 }
 
+// certValidationError maps a validateClientCertificate failure to the gRPC
+// status returned to the agent. A transient Unavailable (revocation check
+// could not run) is passed through so the agent retries; every other failure
+// is a real identity problem and stays Unauthenticated.
+func certValidationError(err error) error {
+	if status.Code(err) == codes.Unavailable {
+		return err
+	}
+	return status.Errorf(codes.Unauthenticated, "certificate validation failed: %v", err)
+}
+
 // AuthStreamInterceptor validates mTLS certificates for streaming RPCs.
 func (i *Interceptor) AuthStreamInterceptor(
 	srv interface{},
@@ -282,7 +293,7 @@ func (i *Interceptor) AuthStreamInterceptor(
 	agentID, err := i.validateClientCertificate(ctx)
 	if err != nil {
 		i.logger.WithError(err).Warn("Certificate validation failed")
-		return status.Errorf(codes.Unauthenticated, "certificate validation failed: %v", err)
+		return certValidationError(err)
 	}
 
 	// Wrap stream with authenticated context
@@ -374,7 +385,9 @@ func (i *Interceptor) validateClientCertificate(ctx context.Context) (string, er
 			"cache_age":       time.Since(lastSync).Round(time.Second).String(),
 			"max_cache_age":   revocationCacheMaxAge.String(),
 		}).Warn("Cert revocation cache stale and Redis unavailable — REJECTING connection (fail-closed)")
-		return "", status.Error(codes.Unauthenticated, "certificate revocation check unavailable — try again later")
+		// Still fail-closed, but Unavailable: the certificate is not known to be
+		// bad, so the agent must retry rather than treat its identity as invalid.
+		return "", status.Error(codes.Unavailable, "certificate revocation check unavailable — try again later")
 	}
 
 	// Record last_seen_at asynchronously — never block gRPC call
