@@ -203,14 +203,17 @@ func main() {
 		}
 
 		caKeyPath := filepath.Join(filepath.Dir(cfg.Server.CACertPath), "ca.key")
+		certsDir := filepath.Dir(cfg.Server.CACertPath)
 		var ksErr error
 		keyStore, ksErr = security.NewKeyStore(masterPassphrase, security.KeyStorePaths{
-			CACertPath:     cfg.Server.CACertPath,
-			CAKeyPath:      caKeyPath,
-			ServerCertPath: cfg.Server.TLSCertPath,
-			ServerKeyPath:  cfg.Server.TLSKeyPath,
-			JWTPrivatePath: cfg.JWT.PrivateKeyPath,
-			JWTPublicPath:  cfg.JWT.PublicKeyPath,
+			CACertPath:       cfg.Server.CACertPath,
+			CAKeyPath:        caKeyPath,
+			ServerCertPath:   cfg.Server.TLSCertPath,
+			ServerKeyPath:    cfg.Server.TLSKeyPath,
+			JWTPrivatePath:   cfg.JWT.PrivateKeyPath,
+			JWTPublicPath:    cfg.JWT.PublicKeyPath,
+			UninstallKeyPath: filepath.Join(certsDir, "uninstall_sign.key"),
+			UninstallPubPath: filepath.Join(certsDir, "uninstall_sign.pub"),
 		}, logger)
 		if ksErr != nil {
 			logger.Fatalf("KeyStore creation failed: %v", ksErr)
@@ -540,6 +543,13 @@ func main() {
 	// it is nil the gate becomes a no-op so deployments without SMTP /
 	// EC2_EMAIL_VERIFY behave exactly as before.
 	apiHandlers.SetCommandApprovalService(commandApprovalSvc)
+
+	// Wire the Ed25519 signer for offline uninstall tokens. nil is fine — the
+	// mint endpoint then reports the feature as unavailable (503) and nothing
+	// else is affected.
+	if keyStore != nil {
+		apiHandlers.SetUninstallSigner(keyStore.UninstallSigningKey(), 0)
+	}
 
 	// Wire the gRPC server's AgentRegistry into REST API handlers for C2 command routing.
 	// Without this, POST /agents/:id/commands returns 503 (registry == nil).

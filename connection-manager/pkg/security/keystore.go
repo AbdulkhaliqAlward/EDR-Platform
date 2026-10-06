@@ -16,10 +16,12 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -50,6 +52,10 @@ type KeyStorePaths struct {
 	ServerKeyPath  string
 	JWTPrivatePath string
 	JWTPublicPath  string
+	// Uninstall-token Ed25519 signing key. Optional: when empty, offline
+	// uninstall tokens are simply unavailable (feature degrades, server still runs).
+	UninstallKeyPath string
+	UninstallPubPath string
 }
 
 // KeyStore holds decrypted key material in memory and manages the encrypted-
@@ -66,6 +72,11 @@ type KeyStore struct {
 
 	jwtPrivateKey *rsa.PrivateKey
 	jwtPublicKey  *rsa.PublicKey
+
+	// Ed25519 signing key for offline uninstall tokens. May be nil when the
+	// feature is not configured or key loading failed (non-fatal).
+	uninstallSignKey ed25519.PrivateKey
+	uninstallPubRaw  []byte // raw 32-byte Ed25519 public key (for build-time embedding)
 
 	// Derived key-encryption key.
 	kek []byte
@@ -169,9 +180,75 @@ func (ks *KeyStore) Initialize(passphrase string) error {
 	ks.jwtPublicKey = &rsaPriv.PublicKey
 
 	ks.logger.Info("KeyStore: JWT keys loaded")
+
+	// ── 5. Uninstall-token signing key (Ed25519) — OPTIONAL, non-fatal ───
+	// A failure here must never prevent the server from starting; it only
+	// disables minting of offline uninstall tokens.
+	if ks.paths.UninstallKeyPath != "" {
+		if err := ks.ensureUninstallSigningKey(); err != nil {
+			ks.logger.Warnf("KeyStore: uninstall-token signing key unavailable (offline uninstall disabled): %v", err)
+		} else {
+			ks.logger.Info("KeyStore: uninstall-token signing key loaded")
+		}
+	}
+
 	ks.logger.Info("KeyStore: all private keys encrypted at rest ✓")
 
 	return nil
+}
+
+// ensureUninstallSigningKey loads (or generates then encrypts) the Ed25519
+// key used to sign offline uninstall tokens. The private key is encrypted at
+// rest exactly like the JWT/CA keys. The 32-byte public key is cached for
+// build-time embedding into agent binaries.
+func (ks *KeyStore) ensureUninstallSigningKey() error {
+	privPEM, err := ks.loadPrivateKey(ks.paths.UninstallKeyPath)
+	if err != nil {
+		if _, genErr := EnsureUninstallSigningKey(ks.paths.UninstallKeyPath, ks.paths.UninstallPubPath, ks.logger); genErr != nil {
+			return fmt.Errorf("generate: %w", genErr)
+		}
+		privPEM, err = ks.migrateKeyFile(ks.paths.UninstallKeyPath)
+		if err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+
+	signer, err := parsePrivateKeyPEM(privPEM)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	edPriv, ok := signer.(ed25519.PrivateKey)
+	if !ok {
+		return fmt.Errorf("uninstall key is not Ed25519 (got %T)", signer)
+	}
+	edPub, ok := edPriv.Public().(ed25519.PublicKey)
+	if !ok {
+		return fmt.Errorf("cannot derive Ed25519 public key")
+	}
+
+	ks.uninstallSignKey = edPriv
+	ks.uninstallPubRaw = append([]byte(nil), edPub...)
+	return nil
+}
+
+// UninstallSigningKey returns the Ed25519 private key for signing offline
+// uninstall tokens, or nil when the feature is unavailable.
+func (ks *KeyStore) UninstallSigningKey() ed25519.PrivateKey {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.uninstallSignKey
+}
+
+// UninstallPublicKeyBase64 returns the standard-base64 raw 32-byte Ed25519
+// public key for embedding into agent binaries at build time, or "" when the
+// feature is unavailable.
+func (ks *KeyStore) UninstallPublicKeyBase64() string {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	if len(ks.uninstallPubRaw) == 0 {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(ks.uninstallPubRaw)
 }
 
 // ─── Getters (thread-safe) ───────────────────────────────────────────────────

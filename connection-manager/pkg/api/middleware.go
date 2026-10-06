@@ -2,6 +2,7 @@
 package api
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"net"
 	"net/http"
@@ -56,6 +57,8 @@ type Handlers struct {
 	sessionRepo         repository.SessionRepository           // session tracking for refresh token rotation
 	securityEventRepo   *audit.Repository                     // security audit event queries
 	auditLogger         *audit.Logger                         // non-blocking security event writer
+	uninstallSigner     ed25519.PrivateKey                     // optional: Ed25519 key for offline uninstall tokens (nil when unavailable)
+	uninstallTokenTTL   time.Duration                          // validity window for minted uninstall tokens
 }
 
 // NewHandlers creates a new handlers instance.

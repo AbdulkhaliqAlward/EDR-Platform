@@ -50,6 +50,10 @@ type builderRequest struct {
 	SkipConfig    bool   `json:"skip_config"`
 	CACertPEM     string `json:"ca_cert_pem"`
 	InstallSysmon bool   `json:"install_sysmon"`
+	// UninstallPubKey is the standard-base64 raw Ed25519 public key the agent
+	// embeds to verify offline uninstall tokens. Empty when the server has no
+	// uninstall signing key (feature simply unavailable in that build).
+	UninstallPubKey string `json:"uninstall_pub_key"`
 }
 
 // BuildAgentJSONResponse is the JSON body returned to the dashboard after a successful build.
@@ -245,14 +249,15 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 		builderURL, req.SkipConfig, tokenDesc, buildIDStr)
 
 	buildReq := builderRequest{
-		ServerIP:      req.ServerIP,
-		ServerDomain:  req.ServerDomain,
-		ServerPort:    req.ServerPort,
-		BuildID:       buildIDStr,
-		TokenBinding:  tokenBinding,
-		SkipConfig:    req.SkipConfig,
-		CACertPEM:     caCertPEM,
-		InstallSysmon: req.InstallSysmon,
+		ServerIP:        req.ServerIP,
+		ServerDomain:    req.ServerDomain,
+		ServerPort:      req.ServerPort,
+		BuildID:         buildIDStr,
+		TokenBinding:    tokenBinding,
+		SkipConfig:      req.SkipConfig,
+		CACertPEM:       caCertPEM,
+		InstallSysmon:   req.InstallSysmon,
+		UninstallPubKey: h.uninstallPubKeyB64(),
 	}
 
 	body, err := json.Marshal(buildReq)

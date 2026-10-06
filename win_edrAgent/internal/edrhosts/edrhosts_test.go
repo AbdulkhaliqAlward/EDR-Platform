@@ -1,8 +1,8 @@
-package command
+package edrhosts
 
 import "testing"
 
-func TestStripEDRHostsEntries(t *testing.T) {
+func TestStripEntries(t *testing.T) {
 	tests := []struct {
 		name        string
 		in          string
@@ -51,7 +51,7 @@ func TestStripEDRHostsEntries(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := stripEDRHostsEntries(tt.in)
+			got, changed := StripEntries(tt.in)
 			if changed != tt.wantChanged {
 				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
 			}

@@ -66,6 +66,13 @@ var (
 	EmbeddedBuildID   = "" // UUID baked in at build time
 	EmbeddedTokenHash = "" // HMAC-SHA256 binding verifier
 
+	// EmbeddedUninstallPubKey is the server's Ed25519 public key (standard
+	// base64, raw 32 bytes) used to verify offline uninstall tokens. It is a
+	// PUBLIC key — it carries no secret and cannot be used to forge a token.
+	// Empty on builds made before this feature; offline uninstall is then
+	// unavailable and the agent says so.
+	EmbeddedUninstallPubKey = ""
+
 	// LEGACY SPLIT-KEY (deprecated — kept for binaries built before this change):
 	EmbeddedTokenEnc  = ""
 	EmbeddedTokenKeyA = ""
@@ -92,6 +99,8 @@ func main() {
 		doInstall               = flag.Bool("install", false, "Zero-touch install: patch hosts, write config, register and start Windows Service")
 		doUpdate                = flag.Bool("update", false, "In-place upgrade: replace agent binary, optionally update config, and restart Windows Service")
 		doUpdateStage2          = flag.Bool("update-stage2", false, "[INTERNAL] Stage2 for -update, executed as SYSTEM")
+		doUninstall             = flag.Bool("uninstall", false, "Offline uninstall: verify a server-signed uninstall token, then remove the agent")
+		doUninstallStage2       = flag.Bool("uninstall-stage2", false, "[INTERNAL] Stage2 for -uninstall, executed as SYSTEM")
 		serverIP                = flag.String("server-ip", "", "C2 server IP address (used with -install for hosts file injection)")
 		serverDomain            = flag.String("server-domain", "", "C2 server FQDN/hostname (used with -install)")
 		serverPort              = flag.String("server-port", "50051", "C2 gRPC port (used with -install, default 50051)")
@@ -165,13 +174,27 @@ func main() {
 	}
 
 	// ══════════════════════════════════════════════════════════════════════════
-	// UNINSTALL PATH — intentionally not implemented as a local CLI action.
+	// UNINSTALL PATH — signed offline uninstall token.
 	// ══════════════════════════════════════════════════════════════════════════
-	// Uninstall is a privileged server-side operation. It is issued as a C2
-	// command (UNINSTALL_AGENT) over the agent's mTLS stream and authorised by
-	// the dashboard's RBAC + audit pipeline. Keeping a local "-uninstall -token"
-	// path would mean every deployed binary carries a removal secret that an
-	// attacker with filesystem access could eventually extract.
+	// Local uninstall is allowed ONLY with a server-signed, agent-bound,
+	// short-lived token. The binary embeds only the server's PUBLIC verification
+	// key, so it carries no removal secret an attacker could extract. The
+	// server-issued UNINSTALL_AGENT C2 command remains the primary (online) path.
+	if *doUninstallStage2 {
+		runUninstallStage2(logger)
+		// runUninstallStage2 calls os.Exit internally.
+	}
+	if *doUninstall {
+		tokenVal := *token
+		if *tokenStdin {
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				tokenVal = strings.TrimSpace(scanner.Text())
+			}
+		}
+		runUninstall(logger, tokenVal, *configPath)
+		// runUninstall calls os.Exit internally.
+	}
 
 	// ══════════════════════════════════════════════════════════════════════════
 	// RUNTIME PATH — detect execution mode FIRST, then load config

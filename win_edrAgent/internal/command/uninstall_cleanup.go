@@ -4,17 +4,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
-)
 
-// Markers written into the hosts file by the agent. Kept in sync with
-// installer.hostsComment (C2 mapping) and blockDomain (sinkhole blocks).
-const (
-	hostsFilePath       = `C:\Windows\System32\drivers\etc\hosts`
-	hostsC2Marker       = "# EDR C2"
-	hostsBlockBeginMark = "# EDR_BLOCK_BEGIN "
-	hostsBlockEndMark   = "# EDR_BLOCK_END "
+	"github.com/edr-platform/win-agent/internal/edrhosts"
 )
 
 // sysmonInstalledByEDRMarker is written by enableSysmon only when the agent
@@ -64,10 +56,10 @@ func (h *Handler) cleanupHostArtifacts() {
 	}
 
 	// ── 3. Hosts file: C2 mapping + domain sinkhole blocks ──────────────────
-	if data, err := os.ReadFile(hostsFilePath); err != nil {
+	if data, err := os.ReadFile(edrhosts.Path); err != nil {
 		h.logger.Warnf("[UNINSTALL] Read hosts file failed: %v", err)
-	} else if cleaned, changed := stripEDRHostsEntries(string(data)); changed {
-		if err := os.WriteFile(hostsFilePath, []byte(cleaned), 0644); err != nil {
+	} else if cleaned, changed := edrhosts.StripEntries(string(data)); changed {
+		if err := os.WriteFile(edrhosts.Path, []byte(cleaned), 0644); err != nil {
 			h.logger.Errorf("[UNINSTALL] Write hosts file failed: %v", err)
 		} else {
 			h.logger.Info("[UNINSTALL] EDR entries removed from hosts file")
@@ -90,38 +82,4 @@ func (h *Handler) cleanupHostArtifacts() {
 // name exists. netsh exits non-zero with "No rules match" when it does not.
 func firewallRuleExists(ctx context.Context, name string) bool {
 	return exec.CommandContext(ctx, "netsh", "advfirewall", "firewall", "show", "rule", "name="+name).Run() == nil
-}
-
-// stripEDRHostsEntries removes the lines the agent added to the hosts file:
-// the "# EDR C2" server mapping and every "# EDR_BLOCK_BEGIN/END <domain>"
-// sinkhole block. Inside a block only the agent's own "127.0.0.1 <domain>"
-// line is dropped, so any user content that ended up between the markers is
-// preserved. Returns the cleaned content and whether anything changed.
-func stripEDRHostsEntries(content string) (string, bool) {
-	lines := strings.Split(content, "\n")
-	out := make([]string, 0, len(lines))
-	changed := false
-	blockDomain := ""
-
-	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		switch {
-		case strings.Contains(line, hostsC2Marker):
-			changed = true
-		case strings.HasPrefix(t, hostsBlockBeginMark):
-			blockDomain = strings.TrimSpace(strings.TrimPrefix(t, hostsBlockBeginMark))
-			changed = true
-		case strings.HasPrefix(t, hostsBlockEndMark):
-			blockDomain = ""
-			changed = true
-		case blockDomain != "" && strings.EqualFold(strings.Join(strings.Fields(t), " "), "127.0.0.1 "+blockDomain):
-			changed = true
-		default:
-			out = append(out, line)
-		}
-	}
-	if !changed {
-		return content, false
-	}
-	return strings.Join(out, "\n"), true
 }

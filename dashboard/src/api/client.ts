@@ -872,6 +872,23 @@ export const agentsApi = {
         );
         return response.data;
     },
+    /**
+     * Mint a signed, agent-bound, short-lived OFFLINE uninstall token for this
+     * agent. The returned token is used on the endpoint (even while it is
+     * disconnected) as:
+     *   echo '<token>' | .\edr-agent.exe -uninstall -token-stdin
+     * The out-of-band approval modal (when enabled) is handled automatically by
+     * the connectionApi interceptor, exactly like manual commands.
+     */
+    generateUninstallToken: async (agentId: string, reason?: string) => {
+        const response = await connectionApi.post<{
+            token: string;
+            agent_id: string;
+            expires_at: string;
+            ttl_seconds: number;
+        }>(`/api/v1/agents/${agentId}/uninstall-token`, { reason: reason ?? '' });
+        return response.data;
+    },
     getCommands: async (agentId: string, params?: { limit?: number; offset?: number; status?: string }) => {
         const response = await connectionApi.get<{
             data: CommandListItem[];

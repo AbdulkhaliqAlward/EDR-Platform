@@ -57,6 +57,9 @@ type BuildRequest struct {
 	SkipConfig    bool   `json:"skip_config"`
 	CACertPEM     string `json:"ca_cert_pem"`
 	InstallSysmon bool   `json:"install_sysmon"`
+	// UninstallPubKey is the standard-base64 raw Ed25519 public key injected as
+	// EmbeddedUninstallPubKey so the agent can verify offline uninstall tokens.
+	UninstallPubKey string `json:"uninstall_pub_key"`
 }
 
 // ─── Build Cache ────────────────────────────────────────────────────────────
@@ -144,6 +147,11 @@ func computeFingerprint(req BuildRequest, agentSrcDir string) string {
 	if req.CACertPEM != "" {
 		caHash := sha256Hex(req.CACertPEM)
 		fmt.Fprintf(h, "ca_cert_hash=%s\n", caHash)
+	}
+
+	// 3b. Uninstall public key — different key must produce a different binary.
+	if req.UninstallPubKey != "" {
+		fmt.Fprintf(h, "uninstall_pub_key=%s\n", req.UninstallPubKey)
 	}
 
 	// 4. Source code fingerprint: go.sum changes when any dependency or module changes.
@@ -369,6 +377,12 @@ func main() {
 		}
 		if req.InstallSysmon {
 			ldflags = append(ldflags, "-X main.EmbeddedInstallSysmon=true")
+		}
+		// Offline uninstall: embed the server's Ed25519 public key so the agent
+		// can verify signed uninstall tokens. No secret is embedded — only the
+		// public key. Legacy/empty value simply disables the feature in this build.
+		if req.UninstallPubKey != "" {
+			ldflags = append(ldflags, fmt.Sprintf("-X main.EmbeddedUninstallPubKey=%s", req.UninstallPubKey))
 		}
 
 		// ── Create temp output ──────────────────────────────────────────

@@ -260,6 +260,7 @@ export default function EndpointDetail() {
     });
     const [destructiveOpen, setDestructiveOpen] = useState(false);
     const [pendingDestructive, setPendingDestructive] = useState<'restart_machine' | 'shutdown_machine' | 'uninstall_agent' | null>(null);
+    const [offlineToken, setOfflineToken] = useState<{ token: string; expires_at: string } | null>(null);
 
     const { data: agent, isLoading: agentLoading, error: agentError } = useQuery({
         queryKey: ['agent', agentId],
@@ -341,6 +342,15 @@ export default function EndpointDetail() {
             }
         },
         onError: (e: Error) => showToast(e.message || 'Command failed', 'error'),
+    });
+
+    const offlineTokenMutation = useMutation({
+        mutationFn: () => agentsApi.generateUninstallToken(agentId),
+        onSuccess: (data) => {
+            setOfflineToken({ token: data.token, expires_at: data.expires_at });
+            showToast('Offline uninstall token generated (shown once)', 'success');
+        },
+        onError: (e: Error) => showToast(e.message || 'Could not generate uninstall token', 'error'),
     });
 
     const qDecisionMutation = useMutation({
@@ -623,12 +633,12 @@ export default function EndpointDetail() {
 
             <Modal
                 isOpen={destructiveOpen}
-                onClose={() => { setDestructiveOpen(false); setPendingDestructive(null); }}
+                onClose={() => { setDestructiveOpen(false); setPendingDestructive(null); setOfflineToken(null); }}
                 title="Confirm destructive action"
                 footer={
                     <div className="flex justify-end gap-2">
-                        <button type="button" className="btn btn-secondary" onClick={() => { setDestructiveOpen(false); setPendingDestructive(null); }}>
-                            Cancel
+                        <button type="button" className="btn btn-secondary" onClick={() => { setDestructiveOpen(false); setPendingDestructive(null); setOfflineToken(null); }}>
+                            {offlineToken ? 'Close' : 'Cancel'}
                         </button>
                         <button type="button" className="btn bg-rose-600 hover:bg-rose-700 text-white" onClick={confirmDestructive}>
                             Confirm
@@ -640,6 +650,68 @@ export default function EndpointDetail() {
                     You are about to send <strong>{pendingDestructive}</strong> to <strong>{agent.hostname}</strong>.
                     This can disrupt the user session. Continue?
                 </p>
+
+                {pendingDestructive === 'uninstall_agent' && (
+                    <div className="mt-4 border-t border-slate-200 dark:border-slate-700 pt-4">
+                        <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                            Device offline, or won't accept the command?
+                        </p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                            Generate a signed, single-device uninstall token. Run it on the endpoint to remove
+                            the agent even while it is disconnected. The token is bound to this device and expires shortly.
+                        </p>
+                        {!offlineToken ? (
+                            <button
+                                type="button"
+                                className="btn btn-secondary mt-3"
+                                disabled={offlineTokenMutation.isPending}
+                                onClick={() => offlineTokenMutation.mutate()}
+                            >
+                                {offlineTokenMutation.isPending ? 'Generating…' : 'Generate offline uninstall token'}
+                            </button>
+                        ) : (
+                            <div className="mt-3 space-y-3">
+                                <div>
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs font-medium text-slate-600 dark:text-slate-300">Uninstall token (shown once)</span>
+                                        <button
+                                            type="button"
+                                            className="text-xs text-primary-600 hover:underline"
+                                            onClick={() => { navigator.clipboard.writeText(offlineToken.token); showToast('Token copied', 'success'); }}
+                                        >
+                                            Copy token
+                                        </button>
+                                    </div>
+                                    <textarea
+                                        readOnly
+                                        className="input w-full font-mono text-[11px] mt-1 h-20 break-all"
+                                        value={offlineToken.token}
+                                        onFocus={(e) => e.currentTarget.select()}
+                                    />
+                                    <p className="text-[11px] text-slate-500 mt-1">
+                                        Expires: {new Date(offlineToken.expires_at).toLocaleString()}
+                                    </p>
+                                </div>
+                                <div>
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs font-medium text-slate-600 dark:text-slate-300">Run on the endpoint (elevated PowerShell)</span>
+                                        <button
+                                            type="button"
+                                            className="text-xs text-primary-600 hover:underline"
+                                            onClick={() => { navigator.clipboard.writeText(`echo '${offlineToken.token}' | .\\edr-agent.exe -uninstall -token-stdin`); showToast('Command copied', 'success'); }}
+                                        >
+                                            Copy command
+                                        </button>
+                                    </div>
+                                    <pre className="input w-full font-mono text-[11px] mt-1 whitespace-pre-wrap break-all">{`echo '${offlineToken.token}' | .\\edr-agent.exe -uninstall -token-stdin`}</pre>
+                                    <p className="text-[11px] text-slate-500 mt-1">
+                                        Use the same <code>edr-agent.exe</code> you downloaded for this server. Only agents built with offline-uninstall support accept this token.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
             </Modal>
         </div>
     );
