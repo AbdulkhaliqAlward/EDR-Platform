@@ -340,6 +340,10 @@ func (s *edrService) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 			s.logger.Infof("[SCM] Server-issued uninstall received (reason=%q) — tearing down protections", reason)
 			changes <- svc.Status{State: svc.StopPending}
 
+			// Stop the integrity watchdogs first: they re-harden the registry
+			// and directory ACLs every 5s and would undo the release below.
+			cancel()
+
 			// Release self-protections so the SYSTEM cleanup task can stop the
 			// service and delete files. This is the same sequence that the
 			// legacy uninstall-file watcher performed, minus the token dance.
@@ -355,7 +359,6 @@ func (s *edrService) Execute(args []string, r <-chan svc.ChangeRequest, changes 
 				s.logger.Info("[SCM] SYSTEM cleanup task scheduled — service will exit shortly")
 			}
 
-			cancel()
 			if startupDone && s.agent != nil {
 				done := make(chan struct{})
 				go func() {
@@ -567,27 +570,100 @@ func (s *edrService) applyPostEnrollHardening(ctx context.Context) {
 	s.logger.Info("[SCM] Registry + directory integrity watchdog started (every 5s)")
 }
 
-// scheduleSystemCleanupTask registers a one-shot SYSTEM scheduled task that
-// stops the service, deletes its SCM registration, kills any stragglers, and
-// removes C:\ProgramData\EDR. It is scheduled to fire after a short delay so
-// the in-flight SendCommandResult ACK can reach the server before the gRPC
-// stream dies with the service.
+// scheduleSystemCleanupTask runs a one-shot SYSTEM scheduled task that waits
+// for this service process to exit, then removes everything the install
+// created: the SCM registration, HKLM\SOFTWARE\EDR (config, identity and
+// certificates), the EDRAgent Event Log source, and C:\ProgramData\EDR.
+// Host-level response artifacts (firewall, hosts, Sysmon) were already
+// reverted in-process by the command handler before this point.
+//
+// The script lives in the SYSTEM temp directory, not under ProgramData\EDR,
+// because cmd.exe reads batch files incrementally and the script deletes that
+// directory. It deletes itself when done. The task definition is removed right
+// after /Run so no EDR_ServerUninstall_* task remains (same as UPDATE_AGENT).
 func scheduleSystemCleanupTask(reason string) error {
-	taskName := fmt.Sprintf("EDR_ServerUninstall_%d", time.Now().UnixNano())
+	stamp := time.Now().UnixNano()
+	taskName := fmt.Sprintf("EDR_ServerUninstall_%d", stamp)
+	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("edr_uninstall_%d.cmd", stamp))
+
+	// O_EXCL: never write into a file someone else pre-created at this path,
+	// since the script runs as SYSTEM.
+	f, err := os.OpenFile(scriptPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("create cleanup script: %w", err)
+	}
+	if _, err := f.WriteString(buildUninstallCleanupScript()); err != nil {
+		_ = f.Close()
+		_ = os.Remove(scriptPath)
+		return fmt.Errorf("write cleanup script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(scriptPath)
+		return fmt.Errorf("close cleanup script: %w", err)
+	}
+
+	tr := "cmd /c " + scriptPath
+	if len(tr) > 261 {
+		_ = os.Remove(scriptPath)
+		return fmt.Errorf("schtasks /TR too long (%d > 261)", len(tr))
+	}
 	runAt := time.Now().Add(90 * time.Second).Format("15:04")
-	// Keep the command string simple: schtasks accepts a cmd /c line.
-	tr := `cmd /c sc stop EDRAgent & timeout /t 3 /nobreak & sc delete EDRAgent & taskkill /F /IM edr-agent.exe & rmdir /s /q C:\ProgramData\EDR`
 	create := exec.Command("schtasks", "/Create", "/TN", taskName, "/RU", "SYSTEM", "/SC", "ONCE", "/ST", runAt, "/F", "/TR", tr)
 	out, err := create.CombinedOutput()
 	if err != nil {
+		_ = os.Remove(scriptPath)
 		return fmt.Errorf("schtasks create: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	run := exec.Command("schtasks", "/Run", "/TN", taskName)
 	if out, err := run.CombinedOutput(); err != nil {
+		_ = exec.Command("schtasks", "/Delete", "/TN", taskName, "/F").Run()
+		_ = os.Remove(scriptPath)
 		return fmt.Errorf("schtasks run: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	_ = exec.Command("schtasks", "/Delete", "/TN", taskName, "/F").Run()
 	_ = reason // currently only logged by the caller; reserved for audit trail
 	return nil
+}
+
+// buildUninstallCleanupScript returns the batch script executed by the SYSTEM
+// cleanup task. Delays use ping rather than timeout.exe, which exits
+// immediately when the task has no interactive console input.
+func buildUninstallCleanupScript() string {
+	var b strings.Builder
+	b.WriteString("@echo off\r\n")
+	b.WriteString("setlocal EnableExtensions\r\n")
+	b.WriteString(":: Grace period: let the service finish its own shutdown\r\n")
+	b.WriteString("ping -n 6 127.0.0.1 >nul\r\n")
+	b.WriteString(":: Disable SCM recovery so the service is not restarted, then stop it\r\n")
+	b.WriteString("sc failure " + ServiceName + " reset= 0 actions= // >nul 2>&1\r\n")
+	b.WriteString("sc stop " + ServiceName + " >nul 2>&1\r\n")
+	b.WriteString(":: Wait up to ~45s for the agent process to exit, then force it\r\n")
+	b.WriteString("set /a TRIES=0\r\n")
+	b.WriteString(":WAIT_LOOP\r\n")
+	b.WriteString("tasklist /FI \"IMAGENAME eq edr-agent.exe\" 2>nul | find /i \"edr-agent.exe\" >nul\r\n")
+	b.WriteString("if errorlevel 1 goto PROC_DEAD\r\n")
+	b.WriteString("set /a TRIES+=1\r\n")
+	b.WriteString("if %TRIES% GEQ 15 (\r\n")
+	b.WriteString("    taskkill /F /IM edr-agent.exe >nul 2>&1\r\n")
+	b.WriteString("    ping -n 4 127.0.0.1 >nul\r\n")
+	b.WriteString("    goto PROC_DEAD\r\n")
+	b.WriteString(")\r\n")
+	b.WriteString("ping -n 4 127.0.0.1 >nul\r\n")
+	b.WriteString("goto WAIT_LOOP\r\n")
+	b.WriteString(":PROC_DEAD\r\n")
+	b.WriteString(":: Service registration, agent registry (config, identity, certificates), Event Log source\r\n")
+	b.WriteString("sc delete " + ServiceName + " >nul 2>&1\r\n")
+	b.WriteString("reg delete \"HKLM\\SOFTWARE\\EDR\" /f >nul 2>&1\r\n")
+	b.WriteString("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\" + ServiceName + "\" /f >nul 2>&1\r\n")
+	b.WriteString(":: Agent files: binary, logs, queue, quarantine, signatures, tools\r\n")
+	b.WriteString("rmdir /s /q \"C:\\ProgramData\\EDR\" >nul 2>&1\r\n")
+	b.WriteString("if exist \"C:\\ProgramData\\EDR\" (\r\n")
+	b.WriteString("    ping -n 6 127.0.0.1 >nul\r\n")
+	b.WriteString("    rmdir /s /q \"C:\\ProgramData\\EDR\" >nul 2>&1\r\n")
+	b.WriteString(")\r\n")
+	b.WriteString(":: Delete this script\r\n")
+	b.WriteString("(goto) 2>nul & del /f /q \"%~f0\"\r\n")
+	return b.String()
 }
 
 // ServiceExists checks if EDRAgent is registered in the SCM using minimal

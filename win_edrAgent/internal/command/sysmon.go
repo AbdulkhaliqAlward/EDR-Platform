@@ -120,6 +120,8 @@ func (h *Handler) enableSysmon(ctx context.Context, params map[string]string) (s
 	after := "already installed"
 	if !installedBefore {
 		after = "installed"
+		// Record ownership so uninstall removes only a Sysmon the agent installed.
+		_ = os.WriteFile(sysmonInstalledByEDRMarker(), []byte(time.Now().UTC().Format(time.RFC3339)), 0644)
 	}
 
 	msg := fmt.Sprintf("Sysmon %s and channel enabled (%s).", after, sysmonChannel)

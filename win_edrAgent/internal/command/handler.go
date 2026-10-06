@@ -1828,6 +1828,9 @@ func (h *Handler) uninstallAgent(_ context.Context, params map[string]string) (s
 	h.logger.Warnf("[C2] UNINSTALL_AGENT received (reason=%q) — scheduling uninstall teardown after ACK", reason)
 	go func() {
 		time.Sleep(3 * time.Second)
+		// Revert firewall/hosts/Sysmon changes while the agent still runs as
+		// SYSTEM; the service-level cleanup task handles files and registry.
+		h.cleanupHostArtifacts()
 		if err := hook(reason); err != nil {
 			h.logger.Errorf("[C2] Uninstall hook failed (post-ACK): %v", err)
 		}
