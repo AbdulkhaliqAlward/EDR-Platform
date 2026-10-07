@@ -134,9 +134,17 @@ export function ScriptLibraryPage() {
           </p>
           <p>
             {canManage
-              ? 'Only administrators can add or change scripts; every change is approved (when OTP is configured) and audited.'
+              ? 'Only administrators can add or change scripts; every change is audited.'
               : 'Only administrators can add or change scripts.'}
           </p>
+          {caps && (
+            <p className="text-xs">
+              OTP approval:{' '}
+              <span className="font-semibold">
+                {caps.command_approval_enabled ? 'On — changes and runs need an emailed code' : 'Off'}
+              </span>
+            </p>
+          )}
           {executables.length > 0 && (
             <p className="text-xs">
               Allowed programs: <span className="font-mono">{executables.join(', ')}</span>

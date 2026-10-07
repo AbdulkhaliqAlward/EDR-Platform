@@ -39,6 +39,9 @@ func (h *Handlers) GetCommandCapabilities(c echo.Context) error {
 		"script_library_available":   h.responseScriptRepo != nil,
 		"script_library_manage":      h.responseScriptRepo != nil && userHasRole(user, "admin"),
 		"script_library_executables": libraryExecutableNames(),
+		// Whether manual commands currently require an out-of-band OTP
+		// (COMMAND_APPROVAL_ENABLED + SMTP + EC2_EMAIL_VERIFY all configured).
+		"command_approval_enabled": h.approvalGateActive(),
 	})
 }
 

@@ -386,31 +386,56 @@ func main() {
 			StartTLS: cfg.SMTP.StartTLS,
 			Enabled:  cfg.SMTP.Enabled,
 		}, logger)
+		// Platform switches (both default OFF):
+		//   MFA_ENABLED              — email OTP at login for users with mfa_enabled=true.
+		//   COMMAND_APPROVAL_ENABLED — email OTP approval for dashboard-issued
+		//                              commands and script-library changes.
+		// Each also needs SMTP (and EC2_EMAIL_VERIFY for command approval).
+		mfaPolicyOn := envTrue("MFA_ENABLED")
+		approvalPolicyOn := envTrue("COMMAND_APPROVAL_ENABLED")
+		if withMFA, ok := authSvc.(service.AuthServiceWithMFA); ok {
+			withMFA.SetMFAPolicyEnabled(mfaPolicyOn)
+		}
+		if !mfaPolicyOn {
+			logger.Info("MFA_ENABLED is not true — login does not ask for a second factor")
+		}
+		if !approvalPolicyOn {
+			logger.Info("COMMAND_APPROVAL_ENABLED is not true — commands do not require OTP approval")
+		}
+
 		if emailSvc.Enabled() {
-			mfaSvc := service.NewMFAService(redisClient, emailSvc, logger)
-			if withMFA, ok := authSvc.(service.AuthServiceWithMFA); ok {
-				withMFA.SetMFAService(mfaSvc)
-				logger.WithField("from", emailSvc.From()).
-					Info("MFA (email OTP) enabled")
+			if mfaPolicyOn {
+				mfaSvc := service.NewMFAService(redisClient, emailSvc, logger)
+				if withMFA, ok := authSvc.(service.AuthServiceWithMFA); ok {
+					withMFA.SetMFAService(mfaSvc)
+					logger.WithField("from", emailSvc.From()).
+						Info("MFA (email OTP) enabled")
+				}
 			}
 
 			// ── Out-of-band manual-command approval (EC2_EMAIL_VERIFY) ───
-			// Builds the approval service iff the second-channel mailbox
-			// is configured. When unset we leave commandApprovalSvc nil
-			// and the API gate becomes a no-op (backwards compatible).
+			// Builds the approval service iff it is switched on AND the
+			// second-channel mailbox is configured. Otherwise we leave
+			// commandApprovalSvc nil and the API gate becomes a no-op.
 			verifyAddr := strings.TrimSpace(os.Getenv("EC2_EMAIL_VERIFY"))
-			if verifyAddr != "" {
+			if !approvalPolicyOn {
+				// switched off — nothing to wire
+			} else if verifyAddr != "" {
 				commandApprovalSvc = service.NewCommandApprovalService(redisClient, emailSvc, verifyAddr, logger)
 				logger.WithField("verify_to", verifyAddr).
 					Info("Manual-command approval (email OTP) enabled — every dashboard-issued command will require an out-of-band code")
 			} else {
-				logger.Warn("EC2_EMAIL_VERIFY not set — manual-command approval gate is DISABLED. " +
+				logger.Warn("COMMAND_APPROVAL_ENABLED=true but EC2_EMAIL_VERIFY is not set — manual-command approval gate is DISABLED. " +
 					"Set EC2_EMAIL_VERIFY=<approver@your-domain> to require an OTP for every dashboard-issued command.")
 			}
 		} else {
-			logger.Warn("SMTP disabled — MFA email delivery unavailable. " +
-				"Users with mfa_enabled=true will be refused login until SMTP is configured.")
-			logger.Warn("SMTP disabled — manual-command approval is DISABLED for the same reason.")
+			if mfaPolicyOn {
+				logger.Warn("MFA_ENABLED=true but SMTP is disabled — MFA email delivery unavailable. " +
+					"Users with mfa_enabled=true will be refused login until SMTP is configured.")
+			}
+			if approvalPolicyOn {
+				logger.Warn("COMMAND_APPROVAL_ENABLED=true but SMTP is disabled — manual-command approval is DISABLED.")
+			}
 		}
 
 		logger.Info("Database connected - agent registration enabled")
@@ -849,6 +874,12 @@ func checkHealth(ctx context.Context, redis *cache.RedisClient) *HealthStatus {
 // grpcInsecure returns true when GRPC_INSECURE env is set (plaintext gRPC for debugging).
 func grpcInsecure() bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("GRPC_INSECURE")))
+	return v == "1" || v == "true"
+}
+
+// envTrue reports whether an on/off environment switch is set to "true" or "1".
+func envTrue(name string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
 	return v == "1" || v == "true"
 }
 

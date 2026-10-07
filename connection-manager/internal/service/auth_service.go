@@ -78,6 +78,11 @@ type authServiceImpl struct {
 	logger     *logrus.Logger
 	mfa        MFAService // optional — nil disables MFA entirely
 
+	// mfaPolicyDisabled is the platform-wide switch (MFA_ENABLED=false).
+	// When true, login never asks for a second factor, even for users with
+	// mfa_enabled=true. Default false keeps per-user MFA (fail-safe) behavior.
+	mfaPolicyDisabled bool
+
 	maxLoginAttempts int
 	lockDuration     time.Duration
 }
@@ -112,12 +117,24 @@ func (s *authServiceImpl) SetMFAService(m MFAService) {
 	s.mfa = m
 }
 
+// SetMFAPolicyEnabled sets the platform-wide MFA switch (MFA_ENABLED).
+// enabled=false: no second factor is requested at login for anyone.
+// enabled=true: users with mfa_enabled=true must pass email OTP, and login is
+// refused if the MFA service is unavailable (fail-safe).
+func (s *authServiceImpl) SetMFAPolicyEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mfaPolicyDisabled = !enabled
+}
+
 // AuthServiceWithMFA is implemented by authServiceImpl and lets the wiring
 // code attach an MFAService without exposing the concrete struct. This
 // keeps the cmd/server/main.go dependency on the interface, not on impl.
 type AuthServiceWithMFA interface {
 	AuthService
 	SetMFAService(m MFAService)
+	SetMFAPolicyEnabled(enabled bool)
 }
 
 // Login authenticates a user.
@@ -161,7 +178,10 @@ func (s *authServiceImpl) Login(ctx context.Context, username, password string) 
 	// Fail-safe semantics: if mfa_enabled=true but MFAService is unavailable
 	// (e.g. SMTP outage) we REFUSE login rather than silently bypass MFA.
 	// This is the secure default for a security product.
-	if user.MFAEnabled {
+	//
+	// When MFA is switched off platform-wide (MFA_ENABLED=false) the gate is
+	// skipped for everyone — an explicit administrator decision.
+	if user.MFAEnabled && !s.mfaPolicyDisabled {
 		if s.mfa == nil || !s.mfa.Available() {
 			s.logger.WithField("username", username).
 				Error("MFA required but service unavailable — refusing login")

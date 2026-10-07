@@ -538,6 +538,8 @@ export interface CommandCapabilities {
     script_library_available?: boolean;
     script_library_manage?: boolean;
     script_library_executables?: string[];
+    /** Whether manual commands currently require an out-of-band OTP. */
+    command_approval_enabled?: boolean;
 }
 
 export interface AuditLog {

@@ -45,6 +45,13 @@ func (h *Handlers) commandApprovalService() service.CommandApprovalService {
 	return h.commandApprovalSvc
 }
 
+// approvalGateActive reports whether consumeApprovalIfRequired will demand an
+// OTP — the exact condition that function checks.
+func (h *Handlers) approvalGateActive() bool {
+	svc := h.commandApprovalService()
+	return svc != nil && svc.Available()
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Issue
 // ────────────────────────────────────────────────────────────────────────────

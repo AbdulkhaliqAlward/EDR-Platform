@@ -44,10 +44,16 @@ services:
       SMTP_FROM: "${SMTP_FROM-}"
       SMTP_USE_TLS: "${SMTP_USE_TLS:-true}"
       SMTP_START_TLS: "${SMTP_START_TLS:-false}"
-      # Out-of-band approval mailbox for manual endpoint commands.
-      # When set (and SMTP is enabled) every dashboard-issued response action
-      # requires a 6-digit OTP delivered to this address. Leave blank to keep
-      # the legacy behaviour (no per-command approval).
+      # Login MFA (email OTP) on/off. Default false: login never asks for a
+      # second factor. When "true", users with MFA turned on must enter an
+      # email code (requires SMTP; login is refused if email is unavailable).
+      MFA_ENABLED: "${MFA_ENABLED:-false}"
+      # Command approval (email OTP) on/off. Default false. When "true" AND
+      # SMTP is enabled AND EC2_EMAIL_VERIFY is set, every dashboard-issued
+      # response action and script-library change requires a 6-digit OTP.
+      COMMAND_APPROVAL_ENABLED: "${COMMAND_APPROVAL_ENABLED:-false}"
+      # Out-of-band approval mailbox for manual endpoint commands (used only
+      # when COMMAND_APPROVAL_ENABLED=true).
       EC2_EMAIL_VERIFY: "${EC2_EMAIL_VERIFY-}"
       # Master switch for admin-authored CUSTOM commands on agents. Default false.
       # When "true", an admin (not just any responder) may run an arbitrary
