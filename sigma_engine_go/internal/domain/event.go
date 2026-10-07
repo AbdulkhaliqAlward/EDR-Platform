@@ -14,23 +14,55 @@ import (
 // It provides efficient field access with caching and automatic category inference.
 // Thread-safe for concurrent field access.
 type LogEvent struct {
-	RawData   map[string]interface{} `json:"raw_data"`
-	EventID   *string                `json:"event_id,omitempty"`
-	Category  EventCategory          `json:"category"`
-	Product   string                 `json:"product"`
-	Service   string                 `json:"service,omitempty"`
-	Timestamp time.Time              `json:"timestamp"`
+	RawData map[string]interface{} `json:"raw_data"`
 
-	fieldCache  map[string]interface{}
-	cacheMu     sync.RWMutex
-	hash        *string
-	hashMu      sync.Mutex
-	keywordBlob string      // lazily-computed lowercase JSON blob for keyword rules
-	keywordOnce sync.Once
+	// EventID is the event's record identity (the agent assigns a UUID to
+	// "event_id"). Alerts store it in event_ids so investigations can link
+	// back to the source event. It is NOT the Windows/Sysmon event code.
+	EventID *string `json:"event_id,omitempty"`
+
+	// EventCode is the numeric provider event code (Sysmon 1, Security 4688…)
+	// when the event carries one. It is never derived from the record UUID.
+	EventCode *int `json:"event_code,omitempty"`
+
+	// Category is the primary Sigma logsource category; Categories adds the
+	// generic parent categories the event must also be evaluated against.
+	Category   EventCategory   `json:"category"`
+	Categories []EventCategory `json:"categories,omitempty"`
+	Product    string          `json:"product"`
+	Service    string          `json:"service,omitempty"`
+	Timestamp  time.Time       `json:"timestamp"`
+
+	fieldCache   map[string]interface{}
+	cacheMu      sync.RWMutex
+	hash         *string
+	hashMu       sync.Mutex
+	keywordBlob  string // lazily-computed lowercase JSON blob for keyword rules
+	keywordOnce  sync.Once
+	searchValues []string // lazily-computed lowercase string leaves for keyword search
+	searchOnce   sync.Once
+
+	// ack, when set by the transport (Kafka consumer), marks the event as
+	// fully processed so its offset may be committed. Called once via Ack.
+	ack     func()
+	ackOnce sync.Once
+}
+
+// SetAck registers the transport's completion callback.
+func (e *LogEvent) SetAck(fn func()) { e.ack = fn }
+
+// Ack signals that processing of this event has finished (successfully or
+// with a logged, non-retryable failure). Safe to call more than once.
+func (e *LogEvent) Ack() {
+	if e == nil || e.ack == nil {
+		return
+	}
+	e.ackOnce.Do(e.ack)
 }
 
 // NewLogEvent creates a new LogEvent from raw event data.
-// It automatically extracts event_id, infers category, and extracts product/timestamp.
+// It extracts the record identity and provider event code, infers the Sigma
+// category and service, and extracts product/timestamp.
 // Returns an error if rawData is nil.
 func NewLogEvent(rawData map[string]interface{}) (*LogEvent, error) {
 	if rawData == nil {
@@ -45,12 +77,86 @@ func NewLogEvent(rawData map[string]interface{}) (*LogEvent, error) {
 		fieldCache: make(map[string]interface{}),
 	}
 
-	event.EventID = event.extractEventID()
+	event.EventID = event.extractRecordID()
+	event.EventCode = event.extractEventCode()
 	event.Category = event.inferCategory()
+	event.Categories = ExpandCategories(event.Category)
+	event.Service = event.extractService()
 	event.Product = event.extractProduct()
 	event.Timestamp = event.extractTimestamp()
 
 	return event, nil
+}
+
+// SearchValues returns every string leaf of the event (recursively, numbers
+// and booleans included in their canonical text form), lowercased. It is
+// computed once per event and backs Sigma keyword (full-text) selections.
+// Unlike a JSON serialisation it preserves backslashes and quotes verbatim,
+// so keywords such as `\Windows\Temp\` match the raw value.
+func (e *LogEvent) SearchValues() []string {
+	e.searchOnce.Do(func() {
+		out := make([]string, 0, 32)
+		var walk func(v interface{})
+		walk = func(v interface{}) {
+			switch t := v.(type) {
+			case nil:
+			case string:
+				if t != "" {
+					out = append(out, strings.ToLower(t))
+				}
+			case map[string]interface{}:
+				for _, child := range t {
+					walk(child)
+				}
+			case []interface{}:
+				for _, child := range t {
+					walk(child)
+				}
+			case []string:
+				for _, child := range t {
+					walk(child)
+				}
+			default:
+				if s := ValueToString(t); s != "" {
+					out = append(out, strings.ToLower(s))
+				}
+			}
+		}
+		walk(e.RawData)
+		e.searchValues = out
+	})
+	return e.searchValues
+}
+
+// ValueToString renders a scalar event value in its canonical text form:
+// integral floats without a fractional part or exponent (4688, not 4.688e+03).
+func ValueToString(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(t), 'f', -1, 32)
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case int32:
+		return strconv.FormatInt(int64(t), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(t), 10)
+	case uint64:
+		return strconv.FormatUint(t, 10)
+	case json.Number:
+		return t.String()
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 // GetField retrieves a field value by path with caching.
@@ -217,8 +323,13 @@ func (e *LogEvent) ComputeHash() string {
 		return *e.hash
 	}
 
+	code := ""
+	if e.EventCode != nil {
+		code = strconv.Itoa(*e.EventCode)
+	}
 	keyFields := []string{
 		e.getEventIDString(),
+		code,
 		e.GetStringField("process.name"),
 		e.GetStringField("process.command_line"),
 		e.GetStringField("CommandLine"),
@@ -254,37 +365,141 @@ func (e *LogEvent) GetProduct() string {
 	return e.Product
 }
 
-func (e *LogEvent) extractEventID() *string {
-	paths := []string{
-		"event.code",
-		"EventID",
-		"event_id",
-		"winlog.event_id",
-		"System.EventID",
-		"Event.System.EventID",
+// extractRecordID returns the event's record identity: the agent's top-level
+// "event_id" (a UUID) or a standard record-id field. It deliberately reads the
+// top level only — data.event_id carries a provider event code, not identity.
+func (e *LogEvent) extractRecordID() *string {
+	if v, ok := e.RawData["event_id"]; ok && v != nil {
+		if s := strings.TrimSpace(ValueToString(v)); s != "" {
+			return &s
+		}
 	}
-
-	for _, path := range paths {
-		if val, ok := e.GetField(path); ok && val != nil {
-			str := fmt.Sprintf("%v", val)
-			return &str
+	for _, path := range []string{"event.id", "EventRecordID", "winlog.record_id"} {
+		if v := e.lookup(path); v != nil {
+			if s := strings.TrimSpace(ValueToString(v)); s != "" {
+				return &s
+			}
 		}
 	}
 	return nil
 }
 
+// extractEventCode returns the numeric provider event code (Sysmon/Windows
+// Event Log), or nil when the event has none. Only numeric values are
+// accepted, so a record UUID can never be mistaken for an event code.
+func (e *LogEvent) extractEventCode() *int {
+	candidates := []interface{}{
+		e.lookup("event.code"),
+		e.lookup("EventID"),
+		e.lookup("winlog.event_id"),
+		e.lookup("System.EventID"),
+		e.lookup("Event.System.EventID"),
+	}
+	if data, ok := e.RawData["data"].(map[string]interface{}); ok {
+		for _, k := range []string{"EventID", "event_id", "EventCode", "event_code", "winlog_event_id"} {
+			candidates = append(candidates, data[k])
+		}
+	}
+	for _, v := range candidates {
+		if code, ok := ParseEventCode(v); ok {
+			return &code
+		}
+	}
+	return nil
+}
+
+// lookup returns a top-level value by exact key (including flattened dotted
+// keys such as "event.code") or, failing that, by nested dot-path traversal.
+// Unlike GetField it never falls back into the agent's data.* sub-map.
+func (e *LogEvent) lookup(path string) interface{} {
+	if v, ok := e.RawData[path]; ok && v != nil {
+		return v
+	}
+	if strings.Contains(path, ".") {
+		return e.getNested(path)
+	}
+	return nil
+}
+
+// ParseEventCode converts a provider event code to int. It accepts integer
+// types, integral floats and decimal strings; anything else (e.g. a UUID)
+// is rejected.
+func ParseEventCode(v interface{}) (int, bool) {
+	switch t := v.(type) {
+	case int:
+		return t, t >= 0
+	case int32:
+		return int(t), t >= 0
+	case int64:
+		return int(t), t >= 0 && t <= 1<<31-1
+	case uint32:
+		return int(t), true
+	case float64:
+		if t >= 0 && t <= 1<<31-1 && t == float64(int64(t)) {
+			return int(t), true
+		}
+	case json.Number:
+		if n, err := strconv.Atoi(t.String()); err == nil && n >= 0 {
+			return n, true
+		}
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" || len(s) > 10 {
+			return 0, false
+		}
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// actionOf returns the lowercased agent "action" (top-level or data.action).
+func (e *LogEvent) actionOf() string {
+	if v, ok := e.GetField("action"); ok && v != nil {
+		return strings.ToLower(strings.TrimSpace(ValueToString(v)))
+	}
+	return ""
+}
+
 func (e *LogEvent) inferCategory() EventCategory {
-	// Check agent's event_type field first (our EDR agent sends this on every event)
+	// Check agent's event_type field first (our EDR agent sends this on every
+	// event) and refine it with the agent's action so each event reaches the
+	// specific Sigma category its rules are written for.
 	if et, ok := e.GetField("event_type"); ok && et != nil {
 		switch strings.ToLower(fmt.Sprintf("%v", et)) {
 		case "process":
+			if e.actionOf() == "process_termination" {
+				return EventCategoryProcessTermination
+			}
 			return EventCategoryProcessCreation
 		case "network":
 			return EventCategoryNetworkConnection
 		case "file":
-			return EventCategoryFileEvent
+			switch e.actionOf() {
+			case "deleted", "delete":
+				return EventCategoryFileDelete
+			case "renamed", "rename":
+				return EventCategoryFileRename
+			default: // created / modified / unspecified
+				return EventCategoryFileEvent
+			}
 		case "registry":
-			return EventCategoryRegistryEvent
+			switch e.actionOf() {
+			case "value_set":
+				return EventCategoryRegistrySet
+			case "key_created":
+				return EventCategoryRegistryAdd
+			case "value_delete", "key_deleted":
+				return EventCategoryRegistryDelete
+			case "key_renamed", "renamed":
+				return EventCategoryRegistryRename
+			default:
+				return EventCategoryRegistryEvent
+			}
+		case "vulnerability_finding", "software_inventory":
+			// Inventory telemetry, not detection telemetry: no Sigma category.
+			return EventCategoryUnknown
 		case "dns":
 			return EventCategoryDNSQuery
 		case "auth":
@@ -307,15 +522,15 @@ func (e *LogEvent) inferCategory() EventCategory {
 		case "wmi":
 			return EventCategoryWMIEvent
 		case "clipboard":
-			return EventCategoryFileEvent
+			// Clipboard telemetry is not file activity; evaluating it against
+			// file_event rules would produce spurious matches.
+			return EventCategoryClipboard
 		}
 	}
 
-	if e.EventID != nil {
-		if eventID, err := strconv.Atoi(*e.EventID); err == nil {
-			if cat := InferCategoryFromEventID(eventID); cat != EventCategoryUnknown {
-				return cat
-			}
+	if e.EventCode != nil {
+		if cat := InferCategoryFromEventID(*e.EventCode); cat != EventCategoryUnknown {
+			return cat
 		}
 	}
 
@@ -409,15 +624,61 @@ func (e *LogEvent) extractProduct() string {
 		}
 	}
 
-	if e.EventID != nil {
-		if eventID, err := strconv.Atoi(*e.EventID); err == nil {
-			if _, ok := EventIDToCategory[eventID]; ok {
-				return "windows"
-			}
+	return "windows"
+}
+
+// sigmaServiceByChannel maps Windows Event Log channels to Sigma logsource
+// service names (SigmaHQ taxonomy).
+var sigmaServiceByChannel = map[string]string{
+	"security":    "security",
+	"system":      "system",
+	"application": "application",
+	"microsoft-windows-sysmon/operational":                     "sysmon",
+	"microsoft-windows-powershell/operational":                 "powershell",
+	"windows powershell":                                       "powershell-classic",
+	"microsoft-windows-taskscheduler/operational":              "taskscheduler",
+	"microsoft-windows-windows defender/operational":           "windefend",
+	"microsoft-windows-wmi-activity/operational":               "wmi",
+	"microsoft-windows-bits-client/operational":                "bits-client",
+	"microsoft-windows-dns-client/operational":                 "dns-client",
+	"microsoft-windows-codeintegrity/operational":              "codeintegrity-operational",
+	"microsoft-windows-ntlm/operational":                       "ntlm",
+	"microsoft-windows-driverframeworks-usermode/operational":  "driver-framework",
+	"microsoft-windows-windows firewall with advanced security/firewall": "firewall-as",
+	"microsoft-windows-printservice/admin":                     "printservice-admin",
+	"microsoft-windows-printservice/operational":               "printservice-operational",
+	"microsoft-windows-smbclient/security":                     "smbclient-security",
+	"microsoft-windows-terminalservices-localsessionmanager/operational": "terminalservices-localsessionmanager",
+	"microsoft-windows-appxdeploymentserver/operational":       "appxdeployment-server",
+	"microsoft-windows-shell-core/operational":                 "shell-core",
+	"microsoft-windows-openssh/operational":                    "openssh",
+	"microsoft-windows-ldap-client/debug":                      "ldap",
+}
+
+// extractService derives the Sigma logsource service from the event's
+// Windows Event Log channel, when present. Agent ETW telemetry carries no
+// channel and therefore no service (it is routed by category instead).
+func (e *LogEvent) extractService() string {
+	candidates := []interface{}{
+		e.lookup("winlog.channel"),
+		e.lookup("Channel"),
+		e.lookup("channel"),
+		e.lookup("System.Channel"),
+		e.lookup("Event.System.Channel"),
+	}
+	if data, ok := e.RawData["data"].(map[string]interface{}); ok {
+		candidates = append(candidates, data["channel"], data["Channel"], data["log_name"])
+	}
+	for _, v := range candidates {
+		ch := strings.ToLower(strings.TrimSpace(ValueToString(v)))
+		if ch == "" {
+			continue
+		}
+		if svc, ok := sigmaServiceByChannel[ch]; ok {
+			return svc
 		}
 	}
-
-	return "windows"
+	return ""
 }
 
 func (e *LogEvent) extractTimestamp() time.Time {

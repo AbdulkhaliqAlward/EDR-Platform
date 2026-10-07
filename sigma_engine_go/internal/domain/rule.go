@@ -80,11 +80,16 @@ type Selection struct {
 	Fields             []SelectionField `yaml:"fields,omitempty" json:"fields,omitempty"`
 	IsKeywordSelection bool             `yaml:"is_keyword_selection,omitempty" json:"is_keyword_selection,omitempty"`
 	Keywords           []string         `yaml:"keywords,omitempty" json:"keywords,omitempty"`
+
+	// Alternatives holds the Sigma "list of maps" form: the selection matches
+	// when ANY alternative matches, and each alternative matches when ALL of
+	// its fields match. When set, Fields and Keywords are empty.
+	Alternatives []Selection `yaml:"alternatives,omitempty" json:"alternatives,omitempty"`
 }
 
 // IsEmpty checks if the selection has no conditions.
 func (s *Selection) IsEmpty() bool {
-	return len(s.Fields) == 0 && len(s.Keywords) == 0
+	return len(s.Fields) == 0 && len(s.Keywords) == 0 && len(s.Alternatives) == 0
 }
 
 // Detection contains all selections and the condition expression that combines them.
@@ -264,18 +269,11 @@ func (d *Detection) Validate() error {
 		return fmt.Errorf("at least one selection is required")
 	}
 
-	// Check that all selections referenced in condition exist
-	referenced := extractSelectionNames(d.Condition)
-	for _, name := range referenced {
-		if _, ok := d.Selections[name]; !ok {
-			// Allow wildcard patterns
-			if !strings.Contains(name, "*") {
-				return fmt.Errorf("condition references unknown selection: %s", name)
-			}
-		}
-	}
-
-	return nil
+	// Selection references are validated by the real condition parser when
+	// the detection engine compiles the rule. The former word-splitting check
+	// lowercased identifiers and treated the count in "1 of selection_*" as a
+	// selection name, wrongly rejecting ~28% of SigmaHQ Windows rules.
+	return d.ValidateCondition()
 }
 
 // ValidateCondition validates the condition syntax.
@@ -303,23 +301,6 @@ func (d *Detection) ValidateCondition() error {
 	}
 
 	return nil
-}
-
-// extractSelectionNames extracts selection names from a condition string.
-func extractSelectionNames(condition string) []string {
-	// Simple extraction - in production, use proper parsing
-	var names []string
-	words := strings.Fields(condition)
-	for _, word := range words {
-		word = strings.Trim(word, "()")
-		word = strings.ToLower(word)
-		if word != "and" && word != "or" && word != "not" && word != "of" && word != "all" && word != "them" {
-			if !strings.Contains(word, "*") && word != "" {
-				names = append(names, word)
-			}
-		}
-	}
-	return names
 }
 
 // IsEnabled checks if the rule is enabled (not deprecated or unsupported).

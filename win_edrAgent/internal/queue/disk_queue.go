@@ -177,30 +177,60 @@ func (q *DiskQueue) PeekOldest() (*pb.EventBatch, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("read queue dir: %w", err)
 	}
-	if len(names) == 0 {
-		return nil, "", nil
-	}
-
-	oldest := names[0]
-	path := filepath.Join(q.dir, oldest)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, "", fmt.Errorf("read queue file %s: %w", oldest, err)
-	}
-
-	// Decrypt data-at-rest if encryptor is available.
-	if q.encryptor != nil {
-		data, err = q.encryptor.Decrypt(data)
+	// A file that cannot be decrypted or decoded can never be sent; it is
+	// moved to the dead-letter folder so it no longer blocks the head of the
+	// queue (previously the processor retried the same file forever).
+	var lastErr error
+	for _, oldest := range names {
+		path := filepath.Join(q.dir, oldest)
+		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, "", fmt.Errorf("decrypt queue file %s: %w", oldest, err)
+			return nil, "", fmt.Errorf("read queue file %s: %w", oldest, err)
 		}
-	}
 
-	batch := &pb.EventBatch{}
-	if err := proto.Unmarshal(data, batch); err != nil {
-		return nil, "", fmt.Errorf("unmarshal batch %s: %w", oldest, err)
+		// Decrypt data-at-rest if encryptor is available.
+		if q.encryptor != nil {
+			data, err = q.encryptor.Decrypt(data)
+			if err != nil {
+				lastErr = fmt.Errorf("decrypt queue file %s: %w", oldest, err)
+				_ = q.deadLetterLocked(oldest)
+				continue
+			}
+		}
+
+		batch := &pb.EventBatch{}
+		if err := proto.Unmarshal(data, batch); err != nil {
+			lastErr = fmt.Errorf("unmarshal batch %s: %w", oldest, err)
+			_ = q.deadLetterLocked(oldest)
+			continue
+		}
+		return batch, oldest, nil
 	}
-	return batch, oldest, nil
+	return nil, "", lastErr
+}
+
+// deadLetterDir is the queue subfolder for batches that cannot be delivered.
+// They are retained (not deleted) for forensic recovery and excluded from
+// the queue and its quota.
+const deadLetterDir = "deadletter"
+
+// DeadLetter moves a queued batch out of the delivery queue into the
+// dead-letter folder (kept on disk, no longer retried).
+func (q *DiskQueue) DeadLetter(filename string) error {
+	if filename == "" || strings.ContainsAny(filename, `\/`) || filepath.Clean(filename) != filename {
+		return fmt.Errorf("invalid filename for dead-letter")
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.deadLetterLocked(filename)
+}
+
+func (q *DiskQueue) deadLetterLocked(filename string) error {
+	dir := filepath.Join(q.dir, deadLetterDir)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.Rename(filepath.Join(q.dir, filename), filepath.Join(dir, filename))
 }
 
 // Remove deletes the queue file by filename (base name only). The filename must not contain path separators.

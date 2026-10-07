@@ -107,9 +107,33 @@ func TestConditionParser_EmptyCondition(t *testing.T) {
 	selectionNames := []string{}
 	ast, err := parser.Parse("", selectionNames)
 
-	// Empty condition should return a true node (always matches)
+	// Sigma requires a condition. An empty one used to yield a node that
+	// looked up a non-existent "true" selection (so it never matched); it is
+	// now rejected at load time so the broken rule is visible.
+	require.Error(t, err)
+	require.Nil(t, ast)
+}
+
+func TestConditionParser_UnknownSelectionRejected(t *testing.T) {
+	parser := NewConditionParser()
+	_, err := parser.Parse("selection and not filter", []string{"selection"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown selection")
+}
+
+func TestConditionParser_PatternsResolvedAtParseTime(t *testing.T) {
+	parser := NewConditionParser()
+	names := []string{"selection_a", "selection_b", "filter_x", "_helper"}
+
+	ast, err := parser.Parse("1 of selection_* and not 1 of filter_*", names)
 	require.NoError(t, err)
-	require.NotNil(t, ast)
+	assert.True(t, ast.Evaluate(map[string]bool{"selection_b": true}))
+	assert.False(t, ast.Evaluate(map[string]bool{"selection_b": true, "filter_x": true}))
+
+	// "them" excludes identifiers starting with "_".
+	ast, err = parser.Parse("all of them", names)
+	require.NoError(t, err)
+	assert.True(t, ast.Evaluate(map[string]bool{"selection_a": true, "selection_b": true, "filter_x": true}))
 }
 
 func TestNode_String(t *testing.T) {

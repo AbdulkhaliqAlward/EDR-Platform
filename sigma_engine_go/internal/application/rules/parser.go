@@ -479,11 +479,26 @@ func parseDetection(detectionData map[string]interface{}) (*domain.Detection, er
 		Selections: make(map[string]*domain.Selection),
 	}
 
-	// Extract condition
-	if cond, ok := detectionData["condition"].(string); ok {
+	// Extract condition. Sigma allows a list of conditions, which are
+	// alternatives (logical OR).
+	switch cond := detectionData["condition"].(type) {
+	case string:
 		detection.Condition = cond
-	} else {
-		return nil, fmt.Errorf("detection.condition must be a string")
+	case []interface{}:
+		parts := make([]string, 0, len(cond))
+		for _, c := range cond {
+			s, ok := c.(string)
+			if !ok || strings.TrimSpace(s) == "" {
+				return nil, fmt.Errorf("detection.condition list must contain non-empty strings")
+			}
+			parts = append(parts, "("+s+")")
+		}
+		if len(parts) == 0 {
+			return nil, fmt.Errorf("detection.condition list is empty")
+		}
+		detection.Condition = strings.Join(parts, " or ")
+	default:
+		return nil, fmt.Errorf("detection.condition must be a string or a list of strings")
 	}
 
 	// Extract timeframe
@@ -515,13 +530,39 @@ func parseSelection(name string, data interface{}) (*domain.Selection, error) {
 		Fields: make([]domain.SelectionField, 0),
 	}
 
-	// Handle keyword-based selection (list of strings)
-	if keywords, ok := data.([]interface{}); ok {
+	// A list is either keywords (list of scalars → full-text search) or
+	// alternatives (list of maps → OR of field selections). Mixing the two
+	// is not valid Sigma and is rejected instead of silently dropping items.
+	if items, ok := data.([]interface{}); ok {
+		if len(items) == 0 {
+			return nil, fmt.Errorf("selection list is empty")
+		}
+		if _, isMap := items[0].(map[string]interface{}); isMap {
+			selection.Alternatives = make([]domain.Selection, 0, len(items))
+			for i, item := range items {
+				m, ok := item.(map[string]interface{})
+				if !ok {
+					return nil, fmt.Errorf("selection list item %d is %T; a list of maps cannot mix other values", i, item)
+				}
+				alt, err := parseSelection(fmt.Sprintf("%s[%d]", name, i), m)
+				if err != nil {
+					return nil, err
+				}
+				selection.Alternatives = append(selection.Alternatives, *alt)
+			}
+			return selection, nil
+		}
+
 		selection.IsKeywordSelection = true
-		selection.Keywords = make([]string, 0, len(keywords))
-		for _, kw := range keywords {
-			if kwStr, ok := kw.(string); ok {
-				selection.Keywords = append(selection.Keywords, kwStr)
+		selection.Keywords = make([]string, 0, len(items))
+		for i, kw := range items {
+			switch v := kw.(type) {
+			case string:
+				selection.Keywords = append(selection.Keywords, v)
+			case int, int64, float64, bool:
+				selection.Keywords = append(selection.Keywords, domain.ValueToString(v))
+			default:
+				return nil, fmt.Errorf("keyword list item %d is %T; keywords must be scalar values", i, kw)
 			}
 		}
 		return selection, nil

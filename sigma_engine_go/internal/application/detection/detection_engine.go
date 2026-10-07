@@ -61,25 +61,28 @@ type RuleQualityConfig struct {
 // SigmaDetectionEngine is the core detection engine that matches events against Sigma rules.
 // Thread-safe and optimized for high-throughput event processing.
 type SigmaDetectionEngine struct {
-	rules           []*domain.SigmaRule
-	ruleIndex       *rules.RuleIndexer
-	selectionEval   *SelectionEvaluator
-	conditionParser *rules.ConditionParser
-	modifierEngine  *ModifierRegistry
-	fieldMapper     *mapping.FieldMapper
-	stats           *DetectionStats
-	quality         QualityConfig
-	mu              sync.RWMutex
+	rules          []*domain.SigmaRule
+	compiled       map[*domain.SigmaRule]*compiledRule
+	ruleIndex      *rules.RuleIndexer
+	modifierEngine *ModifierRegistry
+	fieldMapper    *mapping.FieldMapper
+	stats          *DetectionStats
+	quality        QualityConfig
+	mu             sync.RWMutex
 }
 
 // NewSigmaDetectionEngine creates a new detection engine.
+//
+// fieldCache is accepted for API compatibility but no longer used: field
+// resolution is memoised per event (see eventContext), which is faster and
+// cannot leak values between events.
 func NewSigmaDetectionEngine(
 	fieldMapper *mapping.FieldMapper,
 	modifierEngine *ModifierRegistry,
 	fieldCache *cache.FieldResolutionCache,
 	quality QualityConfig,
 ) *SigmaDetectionEngine {
-	conditionParser := rules.NewConditionParser()
+	_ = fieldCache
 
 	// Normalize defaults defensively
 	if quality.MinConfidence <= 0 {
@@ -87,53 +90,63 @@ func NewSigmaDetectionEngine(
 	}
 
 	return &SigmaDetectionEngine{
-		selectionEval:   NewSelectionEvaluator(fieldMapper, modifierEngine, fieldCache),
-		conditionParser: conditionParser,
-		modifierEngine:  modifierEngine,
-		fieldMapper:     fieldMapper,
-		stats:           NewDetectionStats(),
-		ruleIndex:       rules.NewRuleIndexer(),
-		quality:         quality,
+		compiled:       make(map[*domain.SigmaRule]*compiledRule),
+		modifierEngine: modifierEngine,
+		fieldMapper:    fieldMapper,
+		stats:          NewDetectionStats(),
+		ruleIndex:      rules.NewRuleIndexer(),
+		quality:        quality,
 	}
 }
 
-// LoadRules loads rules into the detection engine and builds the index.
-// Quality filtering (status, level, experimental) is performed by the
-// RuleLoader; this method only applies minimal structural sanity checks.
-func (e *SigmaDetectionEngine) LoadRules(rules []*domain.SigmaRule) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+// maxRejectWarnings bounds per-rule warning logs during a load; the rest are
+// summarised so a large rule set cannot flood the log.
+const maxRejectWarnings = 25
 
-	// Minimal structural sanity checks — quality filtering was already done by the loader
-	filtered := make([]*domain.SigmaRule, 0, len(rules))
-	for _, rule := range rules {
+// compileRules compiles rules, returning the usable ones and logging every
+// rejection reason (first maxRejectWarnings individually, then a summary).
+func compileRules(in []*domain.SigmaRule) ([]*domain.SigmaRule, map[*domain.SigmaRule]*compiledRule, int) {
+	ok := make([]*domain.SigmaRule, 0, len(in))
+	compiled := make(map[*domain.SigmaRule]*compiledRule, len(in))
+	rejected := 0
+	for _, rule := range in {
 		if rule == nil {
 			continue
 		}
-		// Must have detection selections to be evaluable
-		if len(rule.Detection.Selections) == 0 {
+		cr, err := compileRule(rule)
+		if err != nil {
+			rejected++
+			if rejected <= maxRejectWarnings {
+				logger.Warnf("Rule rejected (not loaded) %s %q: %v", rule.ID, rule.Title, err)
+			} else {
+				logger.Debugf("Rule rejected (not loaded) %s %q: %v", rule.ID, rule.Title, err)
+			}
 			continue
 		}
-		filtered = append(filtered, rule)
+		ok = append(ok, rule)
+		compiled[rule] = cr
 	}
+	return ok, compiled, rejected
+}
 
-	// Store rules
-	e.rules = filtered
+// LoadRules compiles rules, replaces the active rule set and rebuilds the
+// index. Quality filtering (status, level, experimental) is performed by the
+// RuleLoader; rules with unsupported or invalid constructs are rejected here.
+func (e *SigmaDetectionEngine) LoadRules(rules []*domain.SigmaRule) error {
+	usable, compiled, rejected := compileRules(rules)
 
-	// Build rule index
-	e.ruleIndex.BuildIndex(filtered)
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	// Pre-parse all conditions for performance
-	for _, rule := range filtered {
-		selectionNames := rule.GetSelectionNames()
-		_, err := e.conditionParser.Parse(rule.Detection.Condition, selectionNames)
-		if err != nil {
-			logger.Warnf("Failed to parse condition for rule %s: %v", rule.ID, err)
-			// Continue loading other rules
-		}
+	e.rules = usable
+	e.compiled = compiled
+	e.ruleIndex.BuildIndex(usable)
+
+	if rejected > 0 {
+		logger.Warnf("Loaded %d rules into detection engine; %d rejected as invalid/unsupported (see warnings above)", len(usable), rejected)
+	} else {
+		logger.Infof("Loaded %d rules into detection engine", len(usable))
 	}
-
-	logger.Infof("Loaded %d rules into detection engine", len(filtered))
 	return nil
 }
 
@@ -167,10 +180,11 @@ func (e *SigmaDetectionEngine) Detect(event *domain.LogEvent) []*domain.Detectio
 	// Step 1: Get candidate rules by logsource (O(1) lookup)
 	candidates := e.getCandidateRules(event)
 	e.stats.RecordCandidateCount(len(candidates))
+	ec := newEventContext(event, e.fieldMapper)
 
 	// Step 2: Evaluate each candidate rule
 	for _, rule := range candidates {
-		result := e.evaluateRule(rule, event)
+		result := e.evaluateRule(rule, event, ec)
 		if result != nil {
 			results = append(results, result)
 			e.stats.RecordDetection(true)
@@ -252,11 +266,12 @@ func (e *SigmaDetectionEngine) DetectAggregated(event *domain.LogEvent) *domain.
 	// Step 1: Get ALL candidate rules by logsource (O(1) lookup)
 	candidates := e.getCandidateRules(event)
 	e.stats.RecordCandidateCount(len(candidates))
+	ec := newEventContext(event, e.fieldMapper)
 
 	// Step 2: Evaluate EVERY candidate rule and collect ALL matches
 	matchCount := 0
 	for _, rule := range candidates {
-		match := e.evaluateRuleForAggregation(rule, event)
+		match := e.evaluateRuleForAggregation(rule, event, ec)
 		if match != nil {
 			result.AddMatch(match.Rule, match.Confidence, match.MatchedFields, match.MatchedSelections)
 			e.stats.RecordDetection(true)
@@ -286,113 +301,35 @@ func (e *SigmaDetectionEngine) DetectAggregated(event *domain.LogEvent) *domain.
 }
 
 // evaluateRuleForAggregation evaluates a single rule and returns a RuleMatch if matched.
-// Similar to evaluateRule but returns RuleMatch instead of DetectionResult.
 func (e *SigmaDetectionEngine) evaluateRuleForAggregation(
 	rule *domain.SigmaRule,
 	event *domain.LogEvent,
+	ec *eventContext,
 ) *domain.RuleMatch {
-	// Sampled tracing: log first candidate of every 5000th event
-	evtCount := e.stats.TotalEvents()
-	traceThis := (evtCount%5000 == 1)
-
-	// Step 1: Evaluate all selections
-	selectionResults := make(map[string]bool)
-	matchedFields := make(map[string]interface{})
-
-	for selectionName, selection := range rule.Detection.Selections {
-		trackFields := !isFilterSelection(selectionName)
-		matches := e.evaluateSelection(selection, event, matchedFields, trackFields)
-		selectionResults[selectionName] = matches
-	}
-
-	if traceThis {
-		// Log selection results for first candidate per sampled event
-		logger.Infof("🔬 TRACE [rule=%s] selections=%v", rule.ID, selectionResults)
-		// Log first few fields from event for context
-		img, _ := e.getStringField(event, "Image")
-		cmd, _ := e.getStringField(event, "CommandLine")
-		logger.Infof("🔬 TRACE [rule=%s] Image=%q CommandLine=%q", rule.ID, img, truncate(cmd, 80))
-		for selName, sel := range rule.Detection.Selections {
-			for _, f := range sel.Fields {
-				val, _, _ := e.fieldMapper.ResolveField(event.RawData, f.FieldName)
-				logger.Infof("🔬 TRACE [rule=%s][%s] field=%s val=%q expected=%v mods=%v",
-					rule.ID, selName, f.FieldName, truncate(fmt.Sprintf("%v", val), 80), f.Values, f.Modifiers)
-			}
-		}
-	}
-
-	// Step 2: Evaluate condition against selection results
-	selectionNames := rule.GetSelectionNames()
-	conditionAST, err := e.conditionParser.Parse(rule.Detection.Condition, selectionNames)
-	if err != nil {
-		if traceThis {
-			logger.Infof("🔬 TRACE [rule=%s] DROPPED at condition parse: %v", rule.ID, err)
-		}
+	m := e.matchRule(rule, event, ec)
+	if m == nil {
 		return nil
 	}
-
-	conditionResult := conditionAST.Evaluate(selectionResults)
-	if !conditionResult {
-		if traceThis {
-			logger.Infof("🔬 TRACE [rule=%s] DROPPED at condition eval (false)", rule.ID)
-		}
-		return nil // Rule did not match
-	}
-
-	if traceThis {
-		logger.Infof("🔬 TRACE [rule=%s] ✅ CONDITION MATCHED! Checking filters...", rule.ID)
-	}
-
-	// Step 3: Evaluate filters (suppression for false positive prevention)
-	if e.quality.EnableFilters {
-		for selectionName, selection := range rule.Detection.Selections {
-			if isFilterSelection(selectionName) {
-				filterMatches := e.selectionEval.Evaluate(selection, event)
-				if filterMatches {
-					if traceThis {
-						logger.Infof("🔬 TRACE [rule=%s] DROPPED by filter: %s", rule.ID, selectionName)
-					}
-					return nil
-				}
-			}
-		}
-	}
-
-	// Step 4: Calculate confidence
-	confidence := e.calculateConfidence(rule, event, matchedFields)
-	if confidence < e.quality.MinConfidence {
-		if traceThis {
-			logger.Infof("🔬 TRACE [rule=%s] DROPPED by confidence gate: %.3f < %.3f", rule.ID, confidence, e.quality.MinConfidence)
-		}
-		return nil // Below confidence threshold
-	}
-
-	if traceThis {
-		logger.Infof("🔬 TRACE [rule=%s] ✅ ALERT EMITTED confidence=%.3f", rule.ID, confidence)
-	}
-
-	// Step 5: Return RuleMatch
-	matchedSelections := getMatchedSelectionNames(selectionResults)
-
-	// Enrich output with decoded payloads (e.g., PowerShell -EncodedCommand).
-	enrichMatchedFieldsWithDecodedPayload(event, matchedFields)
-
 	return &domain.RuleMatch{
 		Rule:              rule,
-		Confidence:        confidence,
-		MatchedFields:     matchedFields,
-		MatchedSelections: matchedSelections,
+		Confidence:        m.confidence,
+		MatchedFields:     m.matchedFields,
+		MatchedSelections: m.matchedSelections,
 	}
 }
 
-// getCandidateRules returns rules matching the event's logsource.
-// Uses O(1) index lookup for performance.
+// getCandidateRules returns every rule whose logsource fits the event: its
+// primary and parent categories plus its service (memoised in the index).
 func (e *SigmaDetectionEngine) getCandidateRules(event *domain.LogEvent) []*domain.SigmaRule {
-	return e.ruleIndex.GetRulesStrict(
-		event.Product,
-		string(event.Category),
-		event.Service,
-	)
+	cats := event.Categories
+	if len(cats) == 0 {
+		cats = domain.ExpandCategories(event.Category)
+	}
+	names := make([]string, len(cats))
+	for i, c := range cats {
+		names[i] = string(c)
+	}
+	return e.ruleIndex.GetCandidateRules(event.Product, names, event.Service)
 }
 
 // evaluateRule evaluates a single rule against an event.
@@ -400,216 +337,86 @@ func (e *SigmaDetectionEngine) getCandidateRules(event *domain.LogEvent) []*doma
 func (e *SigmaDetectionEngine) evaluateRule(
 	rule *domain.SigmaRule,
 	event *domain.LogEvent,
+	ec *eventContext,
 ) *domain.DetectionResult {
-	// Step 1: Evaluate all selections
-	selectionResults := make(map[string]bool)
-	matchedFields := make(map[string]interface{})
-
-	for selectionName, selection := range rule.Detection.Selections {
-		// Never let filter selections inflate matched fields (confidence) or matched_fields output.
-		trackFields := true
-		if isFilterSelection(selectionName) {
-			trackFields = false
-		}
-		matches := e.evaluateSelection(selection, event, matchedFields, trackFields)
-		selectionResults[selectionName] = matches
-	}
-
-	// Step 2: Evaluate condition against selection results
-	selectionNames := rule.GetSelectionNames()
-	conditionAST, err := e.conditionParser.Parse(rule.Detection.Condition, selectionNames)
-	if err != nil {
-		// Condition parse errors are common for invalid rules - don't log
+	m := e.matchRule(rule, event, ec)
+	if m == nil {
 		return nil
 	}
-
-	conditionResult := conditionAST.Evaluate(selectionResults)
-	if !conditionResult {
-		return nil // Rule did not match
-	}
-
-	// Step 3: Evaluate filters (negations) - optional suppression for false positive prevention.
-	// This is enabled by config to suppress known benign patterns even if the Sigma condition
-	// doesn't explicitly include "and not filter".
-	if e.quality.EnableFilters {
-		for selectionName, selection := range rule.Detection.Selections {
-			if isFilterSelection(selectionName) {
-				filterMatches := e.selectionEval.Evaluate(selection, event)
-				if filterMatches {
-					// Filter suppression is expected behavior - don't log
-					return nil
-				}
-			}
-		}
-	}
-
-	// Step 4: Build result
-	confidence := e.calculateConfidence(rule, event, matchedFields)
-	if confidence < e.quality.MinConfidence {
-		logger.Debugf("Confidence gate DROP: rule=%s confidence=%.3f < min=%.3f matchedFields=%d",
-			rule.ID, confidence, e.quality.MinConfidence, len(matchedFields))
-		return nil
-	}
-	matchedSelections := getMatchedSelectionNames(selectionResults)
-
-	// Enrich output with decoded payloads (e.g., PowerShell -EncodedCommand) so the
-	// SOC sees the real script/command even when only base64 is logged.
-	enrichMatchedFieldsWithDecodedPayload(event, matchedFields)
-
 	return &domain.DetectionResult{
 		Rule:              rule,
 		Event:             event,
 		Matched:           true,
-		Confidence:        confidence,
-		MatchedSelections: matchedSelections,
-		MatchedFields:     matchedFields,
+		Confidence:        m.confidence,
+		MatchedSelections: m.matchedSelections,
+		MatchedFields:     m.matchedFields,
 		Timestamp:         time.Now(),
 	}
 }
 
-// evaluateSelection evaluates a selection against an event.
-// Returns true if all fields in selection match (AND logic).
-func (e *SigmaDetectionEngine) evaluateSelection(
-	selection *domain.Selection,
-	event *domain.LogEvent,
-	matchedFields map[string]interface{},
-	trackFields bool,
-) bool {
-	// Use SelectionEvaluator
-	matches := e.selectionEval.Evaluate(selection, event)
-
-	if matches && trackFields {
-		// Track matched fields for result
-		for _, field := range selection.Fields {
-			value, _, err := e.fieldMapper.ResolveField(event.RawData, field.FieldName)
-			if err == nil && value != nil {
-				matchedFields[field.FieldName] = value
-			}
-		}
-	}
-
-	return matches
+// ruleMatch is the engine-level result of a successful rule evaluation.
+type ruleMatch struct {
+	confidence        float64
+	matchedFields     map[string]interface{}
+	matchedSelections []string
 }
 
-// calculateConfidence calculates detection confidence based on rule level and matched fields.
-func (e *SigmaDetectionEngine) calculateConfidence(
-	rule *domain.SigmaRule,
-	event *domain.LogEvent,
-	matchedFields map[string]interface{},
-) float64 {
-	// Base confidence from rule level
-	baseConf := getLevelConfidence(rule.Level)
-
-	// Field match factor: more fields = higher confidence.
-	// FIX ISSUE-07: Only count fields from selections that actually MATCHED.
-	// For OR-based conditions (selection_A or selection_B or ...), only one
-	// selection needs to match. Previously, totalFields counted fields across
-	// ALL non-filter selections, which severely deflated fieldFactor when a
-	// rule had many OR'd selections with different field names. For example,
-	// a rule with 5 OR'd selections (3 unique fields total) where one selection
-	// with 1 field matched → fieldFactor was 1/3 = 0.33, dropping confidence
-	// below the 0.6 gate and silently suppressing the alert.
-	//
-	// The fix: compute totalFields from only the selections whose fields appear
-	// in matchedFields (i.e., selections that the evaluator marked as matched).
-	fieldCount := len(matchedFields)
-	relevantFields := make(map[string]bool)
-	for selName, selection := range rule.Detection.Selections {
-		if isFilterSelection(selName) {
-			continue
-		}
-		// Check if this selection contributed any field to matchedFields
-		contributed := false
-		for _, f := range selection.Fields {
-			if _, ok := matchedFields[f.FieldName]; ok {
-				contributed = true
-				break
-			}
-		}
-		if contributed {
-			for _, f := range selection.Fields {
-				relevantFields[f.FieldName] = true
-			}
-		}
+// matchRule is the single evaluation path shared by Detect and
+// DetectAggregated:
+//  1. evaluate the compiled selections and the pre-parsed condition
+//     (the condition is authoritative for every selection it references);
+//  2. apply filter* selections the condition does not reference, when
+//     EnableFilters is on;
+//  3. score context quality and gate on it (MinConfidence);
+//  4. report confidence = rule-level prior × context quality.
+func (e *SigmaDetectionEngine) matchRule(rule *domain.SigmaRule, event *domain.LogEvent, ec *eventContext) *ruleMatch {
+	cr := e.compiled[rule]
+	if cr == nil {
+		return nil // not compiled (rejected at load) — never evaluated
 	}
-	totalFields := len(relevantFields)
-	if totalFields == 0 {
-		// No matched selection contributed fields — use fieldCount to avoid
-		// division by zero (keyword selections may not populate matchedFields).
-		totalFields = max(fieldCount, 1)
+	out := cr.evaluate(ec, e.quality.EnableFilters)
+	if out == nil {
+		return nil
 	}
 
-	fieldFactor := 1.0
-	if totalFields > 0 {
-		fieldFactor = float64(fieldCount) / float64(totalFields)
-	}
-
-	// Context score (optional)
-	contextScore := 1.0
+	quality := 1.0
 	if e.quality.EnableContextValidation {
-		contextScore = e.validateContext(rule, event)
+		quality = e.validateContext(cr, ec)
 	}
-
-	// Calculate final confidence
-	confidence := baseConf * fieldFactor * contextScore
-
-	// Clamp to [0.0, 1.0]
-	confidence = math.Min(confidence, 1.0)
-	if confidence < 0.0 {
-		confidence = 0.0
+	if quality < e.quality.MinConfidence {
+		logger.Debugf("Context-quality gate DROP: rule=%s quality=%.3f < min=%.3f", rule.ID, quality, e.quality.MinConfidence)
+		return nil
 	}
+	confidence := math.Min(getLevelConfidence(rule.Level)*quality, 1.0)
 
-	return confidence
+	// Enrich output with decoded payloads (e.g., PowerShell -EncodedCommand) so the
+	// SOC sees the real script/command even when only base64 is logged.
+	enrichMatchedFieldsWithDecodedPayload(event, out.matchedFields)
+
+	return &ruleMatch{
+		confidence:        confidence,
+		matchedFields:     out.matchedFields,
+		matchedSelections: out.matchedSelections,
+	}
 }
 
-// validateContext scores whether this event has sufficient context for this rule.
-// This is intentionally conservative: it reduces confidence for missing key context
-// but should not outright block detections (confidence gate handles final decision).
-func (e *SigmaDetectionEngine) validateContext(rule *domain.SigmaRule, event *domain.LogEvent) float64 {
+// validateContext scores (0,1] how complete the event context is for this
+// rule: it is reduced when the rule tests parent / command-line / user
+// fields that the event does not carry (they were only in branches that did
+// not decide the match). It never blocks a match by itself; the
+// MinConfidence gate decides.
+func (e *SigmaDetectionEngine) validateContext(cr *compiledRule, ec *eventContext) float64 {
 	score := 1.0
-
-	// If the rule references parent process fields but the event lacks them, reduce confidence.
-	needsParent := ruleReferencesField(rule, "ParentImage") || ruleReferencesField(rule, "ParentCommandLine")
-	if needsParent {
-		if _, ok := e.getStringField(event, "ParentImage"); !ok {
-			score *= 0.8
-		}
+	if cr.needsParent && !ec.resolve("ParentImage").present {
+		score *= 0.8
 	}
-
-	// If the rule references command line but event lacks it, reduce confidence.
-	needsCmd := ruleReferencesField(rule, "CommandLine")
-	if needsCmd {
-		if _, ok := e.getStringField(event, "CommandLine"); !ok {
-			score *= 0.85
-		}
+	if cr.needsCmd && !ec.resolve("CommandLine").present {
+		score *= 0.85
 	}
-
-	// If user context is missing, reduce a bit (many benign Windows events are SYSTEM).
-	needsUser := ruleReferencesField(rule, "User")
-	if needsUser {
-		if _, ok := e.getStringField(event, "User"); !ok {
-			score *= 0.9
-		}
+	if cr.needsUser && !ec.resolve("User").present {
+		score *= 0.9
 	}
-
 	return score
-}
-
-func ruleReferencesField(rule *domain.SigmaRule, fieldName string) bool {
-	if rule == nil {
-		return false
-	}
-	for _, sel := range rule.Detection.Selections {
-		if sel == nil {
-			continue
-		}
-		for _, f := range sel.Fields {
-			if strings.EqualFold(f.FieldName, fieldName) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (e *SigmaDetectionEngine) getStringField(event *domain.LogEvent, fieldName string) (string, bool) {
@@ -917,28 +724,42 @@ func (e *SigmaDetectionEngine) MatchBatch(ctx context.Context, events []ports.Ev
 // AddRules implements ports.DetectionEngine.AddRules
 // Adds rules without replacing existing ones.
 func (e *SigmaDetectionEngine) AddRules(ctx context.Context, newRules []ports.Rule) error {
+	candidates := make([]*domain.SigmaRule, 0, len(newRules))
+	for _, r := range newRules {
+		if domainRule, ok := r.(*domain.SigmaRule); ok {
+			candidates = append(candidates, domainRule)
+		}
+	}
+	usable, compiled, rejected := compileRules(candidates)
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Convert ports.Rule to domain.SigmaRule and add
-	for _, r := range newRules {
-		domainRule, ok := r.(*domain.SigmaRule)
-		if !ok {
-			continue // Skip incompatible rule types
-		}
-
-		// Check for duplicate
+	added := 0
+	for _, rule := range usable {
+		duplicate := false
 		for _, existing := range e.rules {
-			if existing.ID == domainRule.ID {
-				return nil // Already exists, skip
+			if existing.ID == rule.ID {
+				duplicate = true
+				break
 			}
 		}
-
-		e.rules = append(e.rules, domainRule)
-		e.ruleIndex.AddRule(domainRule)
+		if duplicate {
+			continue // already loaded; skip without aborting the batch
+		}
+		if err := e.ruleIndex.AddRule(rule); err != nil {
+			logger.Warnf("Rule %s not added to index: %v", rule.ID, err)
+			continue
+		}
+		e.rules = append(e.rules, rule)
+		e.compiled[rule] = compiled[rule]
+		added++
 	}
 
-	logger.Infof("Added %d rules, total now: %d", len(newRules), len(e.rules))
+	logger.Infof("Added %d rules (%d rejected as invalid), total now: %d", added, rejected, len(e.rules))
+	if rejected > 0 {
+		return fmt.Errorf("%d rule(s) rejected as invalid or unsupported", rejected)
+	}
 	return nil
 }
 
@@ -953,6 +774,7 @@ func (e *SigmaDetectionEngine) RemoveRule(ctx context.Context, ruleID string) er
 	for _, rule := range e.rules {
 		if rule.ID == ruleID {
 			found = true
+			delete(e.compiled, rule)
 			continue
 		}
 		newRules = append(newRules, rule)

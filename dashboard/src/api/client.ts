@@ -1766,13 +1766,20 @@ export function createAlertStream(
         };
 
         ws.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                if (message.type === 'alert') {
-                    onMessage(message.data);
+            // The engine sends one JSON document per frame; older engines
+            // newline-joined bursts into one frame. JSON never contains a raw
+            // newline, so splitting is safe and handles both.
+            const frames = String(event.data).split('\n');
+            for (const frame of frames) {
+                if (!frame.trim()) continue;
+                try {
+                    const message = JSON.parse(frame);
+                    if (message.type === 'alert') {
+                        onMessage(message.data);
+                    }
+                } catch (e) {
+                    console.error('Failed to parse WebSocket message:', e);
                 }
-            } catch (e) {
-                console.error('Failed to parse WebSocket message:', e);
             }
         };
 

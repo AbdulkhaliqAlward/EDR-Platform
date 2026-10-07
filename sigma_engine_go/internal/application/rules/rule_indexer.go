@@ -18,6 +18,16 @@ type RuleIndexer struct {
 	categoryIndex map[string][]*domain.SigmaRule // "product:category" -> rules
 	productIndex  map[string][]*domain.SigmaRule  // "product" -> rules
 
+	// serviceIndex holds rules that select by service only (no category):
+	// "product:service" -> rules.
+	serviceIndex map[string][]*domain.SigmaRule
+
+	// candidateCache memoises GetCandidateRules results per
+	// (product, categories, service) key; reset whenever the index changes.
+	// Guarded by cacheMu so lookups only need mu.RLock.
+	candidateCache map[string][]*domain.SigmaRule
+	cacheMu        sync.Mutex
+
 	// All rules (fallback)
 	allRules []*domain.SigmaRule
 
@@ -43,7 +53,9 @@ func NewRuleIndexer() *RuleIndexer {
 		index:         make(map[string][]*domain.SigmaRule),
 		categoryIndex: make(map[string][]*domain.SigmaRule),
 		productIndex:  make(map[string][]*domain.SigmaRule),
+		serviceIndex:  make(map[string][]*domain.SigmaRule),
 		allRules:      make([]*domain.SigmaRule, 0),
+		candidateCache: make(map[string][]*domain.SigmaRule),
 		stats: IndexStats{
 			RulesPerProduct:  make(map[string]int),
 			RulesPerCategory: make(map[string]int),
@@ -62,25 +74,13 @@ func (ri *RuleIndexer) BuildIndex(rules []*domain.SigmaRule) {
 	ri.index = make(map[string][]*domain.SigmaRule)
 	ri.categoryIndex = make(map[string][]*domain.SigmaRule)
 	ri.productIndex = make(map[string][]*domain.SigmaRule)
+	ri.serviceIndex = make(map[string][]*domain.SigmaRule)
 	ri.allRules = rules
+	ri.resetCandidateCache()
 
 	// Build indexes
 	for _, rule := range rules {
-		// Build exact match index
-		key := ri.buildKey(rule.LogSource)
-		ri.index[key] = append(ri.index[key], rule)
-
-		// Build category index
-		if rule.LogSource.Product != nil && rule.LogSource.Category != nil {
-			catKey := fmt.Sprintf("%s:%s", *rule.LogSource.Product, *rule.LogSource.Category)
-			ri.categoryIndex[catKey] = append(ri.categoryIndex[catKey], rule)
-		}
-
-		// Build product index
-		if rule.LogSource.Product != nil {
-			product := *rule.LogSource.Product
-			ri.productIndex[product] = append(ri.productIndex[product], rule)
-		}
+		ri.indexRule(rule)
 	}
 
 	// Update statistics
@@ -211,21 +211,11 @@ func (ri *RuleIndexer) AddRule(rule *domain.SigmaRule) error {
 	// Add to all rules
 	ri.allRules = append(ri.allRules, rule)
 	ri.stats.TotalRules++
-
-	// Update indexes
-	key := ri.buildKey(rule.LogSource)
-	ri.index[key] = append(ri.index[key], rule)
-
-	if rule.LogSource.Product != nil && rule.LogSource.Category != nil {
-		catKey := fmt.Sprintf("%s:%s", *rule.LogSource.Product, *rule.LogSource.Category)
-		ri.categoryIndex[catKey] = append(ri.categoryIndex[catKey], rule)
-	}
-
+	ri.indexRule(rule)
 	if rule.LogSource.Product != nil {
-		product := *rule.LogSource.Product
-		ri.productIndex[product] = append(ri.productIndex[product], rule)
-		ri.stats.RulesPerProduct[product]++
+		ri.stats.RulesPerProduct[*rule.LogSource.Product]++
 	}
+	ri.resetCandidateCache()
 
 	return nil
 }
@@ -250,45 +240,126 @@ func (ri *RuleIndexer) RemoveRule(ruleID string) error {
 		return fmt.Errorf("rule not found: %s", ruleID)
 	}
 
-	// Remove from all rules
-	ri.allRules = append(ri.allRules[:idx], ri.allRules[idx+1:]...)
+	// Remove from all rules. Copy-on-write: never mutate a slice a
+	// concurrent reader may hold.
+	remaining := make([]*domain.SigmaRule, 0, len(ri.allRules)-1)
+	remaining = append(remaining, ri.allRules[:idx]...)
+	remaining = append(remaining, ri.allRules[idx+1:]...)
+	ri.allRules = remaining
 	ri.stats.TotalRules--
 
 	// Remove from indexes
-	key := ri.buildKey(rule.LogSource)
-	ri.removeFromSlice(ri.index[key], ruleID)
-	if len(ri.index[key]) == 0 {
-		delete(ri.index, key)
-	}
-
+	removeFrom(ri.index, ri.buildKey(rule.LogSource), ruleID)
 	if rule.LogSource.Product != nil && rule.LogSource.Category != nil {
-		catKey := fmt.Sprintf("%s:%s", *rule.LogSource.Product, *rule.LogSource.Category)
-		ri.removeFromSlice(ri.categoryIndex[catKey], ruleID)
-		if len(ri.categoryIndex[catKey]) == 0 {
-			delete(ri.categoryIndex, catKey)
-		}
+		removeFrom(ri.categoryIndex, fmt.Sprintf("%s:%s", *rule.LogSource.Product, *rule.LogSource.Category), ruleID)
 	}
-
+	if rule.LogSource.Product != nil && rule.LogSource.Category == nil && rule.LogSource.Service != nil {
+		removeFrom(ri.serviceIndex, fmt.Sprintf("%s:%s", *rule.LogSource.Product, *rule.LogSource.Service), ruleID)
+	}
 	if rule.LogSource.Product != nil {
 		product := *rule.LogSource.Product
-		ri.removeFromSlice(ri.productIndex[product], ruleID)
-		if len(ri.productIndex[product]) == 0 {
-			delete(ri.productIndex, product)
-		}
+		removeFrom(ri.productIndex, product, ruleID)
 		ri.stats.RulesPerProduct[product]--
 	}
+	ri.resetCandidateCache()
 
 	return nil
 }
 
-// removeFromSlice removes a rule from a slice by ID.
-func (ri *RuleIndexer) removeFromSlice(rules []*domain.SigmaRule, ruleID string) {
-	for i, r := range rules {
-		if r.ID == ruleID {
-			rules = append(rules[:i], rules[i+1:]...)
-			break
+// removeFrom removes ruleID from idx[key] without mutating the existing
+// backing array (readers may hold it) and deletes the key when empty.
+// The previous implementation re-sliced a local copy, so the map entry kept
+// its old length and the last rule appeared twice after a removal.
+func removeFrom(idx map[string][]*domain.SigmaRule, key, ruleID string) {
+	cur := idx[key]
+	next := make([]*domain.SigmaRule, 0, len(cur))
+	for _, r := range cur {
+		if r.ID != ruleID {
+			next = append(next, r)
 		}
 	}
+	if len(next) == 0 {
+		delete(idx, key)
+		return
+	}
+	idx[key] = next
+}
+
+// indexRule adds a rule to every index it belongs to. Caller holds ri.mu.
+func (ri *RuleIndexer) indexRule(rule *domain.SigmaRule) {
+	key := ri.buildKey(rule.LogSource)
+	ri.index[key] = append(ri.index[key], rule)
+
+	if rule.LogSource.Product != nil && rule.LogSource.Category != nil {
+		catKey := fmt.Sprintf("%s:%s", *rule.LogSource.Product, *rule.LogSource.Category)
+		ri.categoryIndex[catKey] = append(ri.categoryIndex[catKey], rule)
+	}
+	if rule.LogSource.Product != nil && rule.LogSource.Category == nil && rule.LogSource.Service != nil {
+		svcKey := fmt.Sprintf("%s:%s", *rule.LogSource.Product, *rule.LogSource.Service)
+		ri.serviceIndex[svcKey] = append(ri.serviceIndex[svcKey], rule)
+	}
+	if rule.LogSource.Product != nil {
+		product := *rule.LogSource.Product
+		ri.productIndex[product] = append(ri.productIndex[product], rule)
+	}
+}
+
+func (ri *RuleIndexer) resetCandidateCache() {
+	ri.cacheMu.Lock()
+	ri.candidateCache = make(map[string][]*domain.SigmaRule)
+	ri.cacheMu.Unlock()
+}
+
+// GetCandidateRules returns every rule whose logsource is compatible with an
+// event of the given product, categories (primary first, then generic
+// parents such as registry_event) and service:
+//   - category rules for each of the event's categories; a rule that also
+//     names a service only applies when the event has that service;
+//   - service-only rules (no category) for the event's service.
+//
+// The union is de-duplicated and memoised per (product, categories, service).
+// Callers must not mutate the returned slice.
+func (ri *RuleIndexer) GetCandidateRules(product string, categories []string, service string) []*domain.SigmaRule {
+	key := product + "|" + strings.Join(categories, ",") + "|" + service
+
+	ri.mu.RLock()
+	defer ri.mu.RUnlock()
+
+	ri.cacheMu.Lock()
+	cached, ok := ri.candidateCache[key]
+	ri.cacheMu.Unlock()
+	if ok {
+		return cached
+	}
+
+	seen := make(map[*domain.SigmaRule]struct{})
+	out := make([]*domain.SigmaRule, 0, 64)
+	add := func(rules []*domain.SigmaRule, requireService bool) {
+		for _, r := range rules {
+			if _, dup := seen[r]; dup {
+				continue
+			}
+			if requireService && r.LogSource.Service != nil && !strings.EqualFold(*r.LogSource.Service, service) {
+				continue
+			}
+			seen[r] = struct{}{}
+			out = append(out, r)
+		}
+	}
+	for _, c := range categories {
+		if c == "" || c == string(domain.EventCategoryUnknown) {
+			continue
+		}
+		add(ri.categoryIndex[product+":"+c], true)
+	}
+	if service != "" {
+		add(ri.serviceIndex[product+":"+service], false)
+	}
+
+	ri.cacheMu.Lock()
+	ri.candidateCache[key] = out
+	ri.cacheMu.Unlock()
+	return out
 }
 
 // buildKey builds an index key from a logsource.

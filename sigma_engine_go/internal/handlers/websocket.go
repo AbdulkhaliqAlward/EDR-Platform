@@ -278,21 +278,20 @@ func (c *WebSocketClient) writePump() {
 				return
 			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
+			// One JSON document per WebSocket frame. Coalescing several
+			// messages into one frame (newline-joined) made the dashboard's
+			// single JSON.parse fail, dropping every alert in a burst.
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
-			w.Write(message)
 
-			// Flush queued messages
+			// Drain what is already queued without waiting, still one frame each.
 			n := len(c.send)
 			for i := 0; i < n; i++ {
-				w.Write([]byte("\n"))
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
+				c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := c.conn.WriteMessage(websocket.TextMessage, <-c.send); err != nil {
+					return
+				}
 			}
 
 		case <-ticker.C:

@@ -624,8 +624,10 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 			logger.WithError(err).Warn("Duplicate check failed")
 			// Continue on Redis error
 		} else if duplicate {
-			logger.Debug("Duplicate batch ignored")
-			return nil, nil // Silently ignore duplicates (idempotent)
+			// Acknowledge so an agent re-sending a batch whose ACK was lost
+			// stops retrying it (idempotent).
+			logger.Debug("Duplicate batch acknowledged")
+			return batchAck(batch), nil
 		}
 	}
 
@@ -646,8 +648,7 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 		decompressed, err := snappy.Decode(nil, batch.Payload)
 		if err != nil {
 			logger.WithError(err).Error("Snappy decompression failed — routing raw batch to DB fallback")
-			h.storeToFallback(ctx, batch, batch.Payload)
-			return nil, nil // Do not crash pipeline; data preserved in fallback
+			return h.acceptRaw(ctx, batch)
 		}
 		payload = decompressed
 
@@ -656,16 +657,14 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 		gzReader, err := gzip.NewReader(bytes.NewReader(batch.Payload))
 		if err != nil {
 			logger.WithError(err).Error("Gzip reader creation failed — routing raw batch to DB fallback")
-			h.storeToFallback(ctx, batch, batch.Payload)
-			return nil, nil
+			return h.acceptRaw(ctx, batch)
 		}
 		const maxDecompressedSize = 32 * 1024 * 1024 // 32MB limit
 		decompressed, err := io.ReadAll(io.LimitReader(gzReader, maxDecompressedSize))
 		gzReader.Close()
 		if err != nil {
 			logger.WithError(err).Error("Gzip decompression failed — routing raw batch to DB fallback")
-			h.storeToFallback(ctx, batch, batch.Payload)
-			return nil, nil
+			return h.acceptRaw(ctx, batch)
 		}
 		payload = decompressed
 
@@ -679,13 +678,11 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 	var events []map[string]interface{}
 	if err := json.Unmarshal(payload, &events); err != nil {
 		logger.WithError(err).Error("Failed to unmarshal decompressed payload as JSON array — routing raw batch to DB fallback")
-		h.storeToFallback(ctx, batch, batch.Payload)
-		return nil, nil // Ack batch so pipeline does not crash or retry indefinitely
+		return h.acceptRaw(ctx, batch)
 	}
 	if len(events) == 0 {
-		logger.Warn("Decompressed payload is empty array — skipping Kafka publish, storing raw batch to fallback")
-		h.storeToFallback(ctx, batch, batch.Payload)
-		return nil, nil
+		logger.Warn("Decompressed payload is empty array — nothing to publish")
+		return batchAck(batch), nil
 	}
 
 	// 5b. STRICT JSON SCHEMA VALIDATION (#3)
@@ -747,65 +744,35 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 		validEvents = append(validEvents, ev)
 	}
 	if len(validEvents) == 0 {
+		// Retrying cannot fix invalid events: acknowledge so the agent moves on.
 		logger.WithField("batch_id", batch.BatchId).Warn("All events in batch failed schema validation")
-		return nil, nil
+		return batchAck(batch), nil
 	}
 	events = validEvents
 
 	h.noteAutonomousResponseEvents(logger, agentID, batch, events)
+
+	// 6. Durable acceptance first: publish to Kafka (detection depends on
+	//    it), falling back to the DB table for whatever Kafka did not take.
+	//    The batch is acknowledged only after this succeeds; otherwise the
+	//    agent keeps it and retries.
+	if err := h.publishEvents(ctx, logger, batch, events); err != nil {
+		return nil, err
+	}
+
+	// 7. Secondary persistence (search UI, quarantine inventory,
+	//    vulnerabilities). The events are already durable, so failures here
+	//    are logged and do not fail the batch.
 	h.persistQuarantineFromEvents(ctx, agentID, events)
 	if h.vulnRepo != nil {
 		if err := h.ingestVulnerabilityEvents(ctx, agentID, events); err != nil {
 			logger.WithError(err).Warn("Failed to ingest vulnerability telemetry events")
 		}
 	}
-
-	// 6b. Persist searchable events to PostgreSQL for REST /events/search.
-	// This is independent from Kafka: even when Kafka is enabled, we still
-	// store a searchable subset so the dashboard can investigate without
-	// needing a separate event warehouse.
 	if h.eventRepo != nil {
 		if err := h.persistEventsToDB(ctx, agentID, batch, events); err != nil {
 			logger.WithError(err).Warn("Failed to persist events to DB (search UI may show empty results)")
 		}
-	}
-
-	// 7. Publish each event individually to Kafka (agent_id as partition key). Respect context cancellation.
-	if h.kafkaProducer != nil {
-		for i, ev := range events {
-			select {
-			case <-ctx.Done():
-				logger.WithError(ctx.Err()).Warn("Context cancelled during event publish — routing batch to DB fallback")
-				h.storeToFallback(ctx, batch, payload)
-				code := codes.Canceled
-				if ctx.Err() == context.DeadlineExceeded {
-					code = codes.DeadlineExceeded
-				}
-				return nil, status.Error(code, ctx.Err().Error())
-			default:
-			}
-			eventJSON, err := json.Marshal(ev)
-			if err != nil {
-				logger.WithError(err).WithField("event_index", i).Error("Failed to marshal event — routing batch to DB fallback")
-				h.storeToFallback(ctx, batch, payload)
-				return nil, nil
-			}
-			headers := map[string]string{
-				"batch_id":    batch.BatchId,
-				"agent_id":    batch.AgentId,
-				"event_index": fmt.Sprintf("%d", i),
-				"event_count": fmt.Sprintf("%d", len(events)),
-			}
-			if err := h.kafkaProducer.SendEventBatch(ctx, batch.AgentId, eventJSON, headers); err != nil {
-				logger.WithError(err).WithField("event_index", i).Warn("Kafka write failed — routing batch to DB fallback")
-				h.storeToFallback(ctx, batch, payload)
-				return nil, nil // Do not crash pipeline; data preserved in fallback
-			}
-		}
-		logger.WithField("events", len(events)).Debug("Events sent to Kafka individually")
-	} else {
-		logger.Debug("Kafka disabled — storing batch via DB fallback")
-		h.storeToFallback(ctx, batch, payload)
 	}
 
 	// 8. Record metrics
@@ -820,13 +787,86 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 		}
 	}
 
-	// 10. Prepare response
+	// 10. Acknowledge
+	return batchAck(batch), nil
+}
+
+// batchAck builds the response acknowledging durable acceptance of a batch.
+func batchAck(batch *edrv1.EventBatch) *edrv1.CommandBatch {
 	return &edrv1.CommandBatch{
 		BatchId:      uuid.New().String(),
 		Timestamp:    timestamppb.Now(),
 		ServerStatus: edrv1.ServerStatus_SERVER_STATUS_OK,
 		AckBatchId:   batch.BatchId,
-	}, nil
+	}
+}
+
+// acceptRaw stores an undecodable batch verbatim (for forensic recovery)
+// and acknowledges it; retrying cannot make it decodable. If it cannot be
+// stored, the batch is NOT acknowledged so the agent retries.
+func (h *EventHandler) acceptRaw(ctx context.Context, batch *edrv1.EventBatch) (*edrv1.CommandBatch, error) {
+	if err := h.storeToFallback(ctx, batch, batch.Payload); err != nil {
+		return nil, status.Error(codes.Unavailable, "event storage unavailable, retry later")
+	}
+	return batchAck(batch), nil
+}
+
+// publishEvents publishes a batch's events to Kafka in one call and durably
+// stores the events Kafka did not accept (only those, so replay cannot
+// duplicate published events). The stored events are the normalised maps,
+// so replay publishes exactly what the primary path would have.
+func (h *EventHandler) publishEvents(ctx context.Context, logger *logrus.Entry, batch *edrv1.EventBatch, events []map[string]interface{}) error {
+	if h.kafkaProducer == nil {
+		logger.Debug("Kafka disabled — storing batch via DB fallback")
+		return h.fallbackEvents(ctx, batch, events)
+	}
+
+	msgs := make([]kafka.EventMessage, 0, len(events))
+	sent := make([]map[string]interface{}, 0, len(events))
+	for i, ev := range events {
+		eventJSON, err := json.Marshal(ev)
+		if err != nil {
+			// Not representable as JSON: cannot be stored anywhere either.
+			logger.WithError(err).WithField("event_index", i).Error("Failed to marshal event — dropped")
+			continue
+		}
+		msgs = append(msgs, kafka.EventMessage{Value: eventJSON, Headers: map[string]string{
+			"batch_id":    batch.BatchId,
+			"agent_id":    batch.AgentId,
+			"event_index": fmt.Sprintf("%d", i),
+			"event_count": fmt.Sprintf("%d", len(events)),
+		}})
+		sent = append(sent, ev)
+	}
+
+	failed, err := h.kafkaProducer.SendEvents(ctx, batch.AgentId, msgs)
+	if err == nil {
+		logger.WithField("events", len(msgs)).Debug("Events published to Kafka")
+		return nil
+	}
+	unsent := make([]map[string]interface{}, 0, len(failed))
+	for _, idx := range failed {
+		if idx >= 0 && idx < len(sent) {
+			unsent = append(unsent, sent[idx])
+		}
+	}
+	logger.WithError(err).WithField("unsent", len(unsent)).Warn("Kafka publish incomplete — storing unsent events in DB fallback")
+	return h.fallbackEvents(ctx, batch, unsent)
+}
+
+// fallbackEvents durably stores events as a JSON array in the fallback table.
+func (h *EventHandler) fallbackEvents(ctx context.Context, batch *edrv1.EventBatch, events []map[string]interface{}) error {
+	if len(events) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(events)
+	if err != nil {
+		return status.Error(codes.Internal, "failed to encode events for fallback storage")
+	}
+	if err := h.storeToFallback(ctx, batch, payload); err != nil {
+		return status.Error(codes.Unavailable, "event storage unavailable, retry later")
+	}
+	return nil
 }
 
 func (h *EventHandler) ingestVulnerabilityEvents(ctx context.Context, agentID string, events []map[string]interface{}) error {
@@ -965,8 +1005,17 @@ func (h *EventHandler) persistEventsToDB(ctx context.Context, agentID string, ba
 			summary = fmt.Sprintf("%s event", etype)
 		}
 
+		// Keep the agent's event UUID as the row ID so alert event_ids and
+		// investigation links resolve, and a re-sent batch (retry after a lost
+		// ACK) is idempotent via ON CONFLICT (id) DO NOTHING.
+		rowID := uuid.New()
+		if s, ok := ev["event_id"].(string); ok {
+			if parsed, perr := uuid.Parse(s); perr == nil {
+				rowID = parsed
+			}
+		}
 		rows = append(rows, repository.EventInsert{
-			ID:        uuid.New(),
+			ID:        rowID,
 			AgentID:   agentUUID,
 			BatchID:   batchUUID,
 			EventType: etype,
@@ -1240,17 +1289,17 @@ func isStrictContextMode() bool {
 // storeToFallback enqueues an event batch for asynchronous PostgreSQL storage.
 // This is NON-BLOCKING: the fallback store uses a bounded channel internally.
 // If the channel is full, the batch is dropped (logged as error).
-func (h *EventHandler) storeToFallback(_ context.Context, batch *edrv1.EventBatch, payload []byte) {
+func (h *EventHandler) storeToFallback(_ context.Context, batch *edrv1.EventBatch, payload []byte) error {
 	if h.fallbackStore == nil {
 		h.logger.WithFields(logrus.Fields{
 			"batch_id": batch.BatchId,
 			"agent_id": batch.AgentId,
 			"size":     len(payload),
-		}).Error("EVENT DATA LOST: Kafka unavailable and no DB fallback configured")
+		}).Error("Kafka unavailable and no DB fallback configured — batch not acknowledged (agent will retry)")
 		if h.metrics != nil {
-			h.metrics.RecordError("event_data_lost")
+			h.metrics.RecordError("event_fallback_unavailable")
 		}
-		return
+		return fmt.Errorf("no fallback store configured")
 	}
 
 	metadata := map[string]string{
@@ -1263,14 +1312,20 @@ func (h *EventHandler) storeToFallback(_ context.Context, batch *edrv1.EventBatc
 		}
 	}
 
-	// Async enqueue — returns immediately, never blocks the gRPC stream.
-	if err := h.fallbackStore.Store(nil, batch.BatchId, batch.AgentId, payload, metadata); err != nil {
+	// Synchronous, bounded write: the caller acknowledges the batch only
+	// after this returns nil, so "accepted" always means "committed".
+	// A fresh context keeps a cancelled stream from aborting the write.
+	storeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.fallbackStore.StoreSync(storeCtx, batch.BatchId, batch.AgentId, payload, metadata); err != nil {
 		h.logger.WithError(err).WithFields(logrus.Fields{
 			"batch_id": batch.BatchId,
 			"agent_id": batch.AgentId,
-		}).Error("Async fallback enqueue failed — event data may be lost")
+		}).Error("Fallback store write failed — batch not acknowledged (agent will retry)")
 		if h.metrics != nil {
-			h.metrics.RecordError("fallback_enqueue_failed")
+			h.metrics.RecordError("fallback_store_failed")
 		}
+		return err
 	}
+	return nil
 }

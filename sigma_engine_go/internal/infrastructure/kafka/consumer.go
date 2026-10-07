@@ -86,6 +86,13 @@ type EventConsumer struct {
 	running   atomic.Bool
 	wg        sync.WaitGroup
 	closeOnce sync.Once // S1 FIX: protect channel close from multiple goroutines
+
+	// tracker commits an offset only after every earlier message of its
+	// partition has been processed (at-least-once delivery).
+	tracker      *offsetTracker
+	readerClosed atomic.Bool
+	stopOnce     sync.Once
+	commitErrors atomic.Uint64
 }
 
 // NewEventConsumer creates a new Kafka event consumer.
@@ -113,6 +120,7 @@ func NewEventConsumer(config ConsumerConfig, eventBuffer int) (*EventConsumer, e
 		eventChan: make(chan *domain.LogEvent, eventBuffer),
 		errorChan: make(chan error, 100),
 		doneChan:  make(chan struct{}),
+		tracker:   newOffsetTracker(),
 	}, nil
 }
 
@@ -164,9 +172,11 @@ func (c *EventConsumer) consumeLoop(ctx context.Context, readerID int) {
 			logger.Info("Consumer stop requested, shutting down...")
 			return
 		default:
-			// Read message with timeout
+			// FetchMessage does NOT commit: offsets are committed by ack()
+			// once the event has been processed. (ReadMessage auto-committed
+			// on read, so a crash or a drop lost events silently.)
 			readCtx, cancel := context.WithTimeout(ctx, c.config.MaxWait)
-			msg, err := c.reader.ReadMessage(readCtx)
+			msg, err := c.reader.FetchMessage(readCtx)
 			cancel()
 
 			if err != nil {
@@ -178,7 +188,7 @@ func (c *EventConsumer) consumeLoop(ctx context.Context, readerID int) {
 				if err == context.DeadlineExceeded || strings.Contains(err.Error(), "context deadline exceeded") {
 					continue // No messages, retry
 				}
-				logger.Warnf("Error reading Kafka message: %v", err)
+				logger.Warnf("Error fetching Kafka message: %v", err)
 				select {
 				case c.errorChan <- err:
 				default:
@@ -190,29 +200,52 @@ func (c *EventConsumer) consumeLoop(ctx context.Context, readerID int) {
 			c.metrics.mu.Lock()
 			c.metrics.LastMessageTime = time.Now()
 			c.metrics.mu.Unlock()
+			c.tracker.add(msg)
 
-			// Convert to LogEvent
+			// Convert to LogEvent. An unparseable message can never succeed,
+			// so it is logged and acknowledged (it must not block its
+			// partition's commits forever).
 			event, err := c.parseMessage(msg)
 			if err != nil {
 				atomic.AddUint64(&c.metrics.DeserializeErrors, 1)
-				logger.Debugf("Failed to parse Kafka message: %v", err)
+				metricsPkg.DefaultMetrics.RecordError("consumer_deserialize_failed")
+				logger.Warnf("Discarding unparseable Kafka message partition=%d offset=%d: %v", msg.Partition, msg.Offset, err)
+				c.ack(msg)
 				continue
 			}
+			m := msg
+			event.SetAck(func() { c.ack(m) })
 
-			// Send to channel (with short timeout to prevent blocking)
-			// S8 FIX: Reduced from 5s to 500ms. Under backlog, 5s stalls per
-			// dropped event cascaded into unrecoverable consumer lag.
+			// Backpressure instead of dropping: when the detection workers
+			// are saturated the consumer simply stops fetching; Kafka keeps
+			// the data and consumer lag grows visibly. Events are never
+			// discarded for being slow.
 			select {
 			case c.eventChan <- event:
 				atomic.AddUint64(&c.metrics.MessagesProcessed, 1)
-			case <-time.After(500 * time.Millisecond):
-				logger.Warn("Event channel full, dropping message (500ms timeout)")
-				atomic.AddUint64(&c.metrics.ProcessingErrors, 1)
-				metricsPkg.DefaultMetrics.RecordError("consumer_event_channel_full_drop")
+			case <-c.doneChan:
+				return // not acked → re-delivered after restart
 			case <-ctx.Done():
 				return
 			}
 		}
+	}
+}
+
+// ack marks a message processed and commits the partition's contiguous
+// processed prefix. With CommitInterval > 0 kafka-go batches the commits.
+func (c *EventConsumer) ack(msg kafka.Message) {
+	commitMsg, ok := c.tracker.done(msg)
+	if !ok || c.readerClosed.Load() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.reader.CommitMessages(ctx, commitMsg); err != nil {
+		// Typically a rebalance moved the partition; the new owner resumes
+		// from the last committed offset (duplicates, never loss).
+		c.commitErrors.Add(1)
+		logger.Warnf("Kafka offset commit failed partition=%d offset=%d: %v", commitMsg.Partition, commitMsg.Offset, err)
 	}
 }
 
@@ -250,24 +283,43 @@ func (c *EventConsumer) Metrics() ConsumerMetrics {
 	return c.metrics.Snapshot()
 }
 
-// Stop gracefully stops the consumer.
-func (c *EventConsumer) Stop() error {
+// StopFetching stops reading new messages and closes the event channel once
+// every fetch loop has exited. Already-delivered events are still processed
+// and acknowledged by the caller; call Close afterwards to commit them.
+func (c *EventConsumer) StopFetching() {
 	if !c.running.Load() {
+		return
+	}
+	c.stopOnce.Do(func() {
+		logger.Info("Stopping Kafka consumer fetch loops...")
+		close(c.doneChan)
+	})
+	c.wg.Wait()
+}
+
+// Close flushes pending offset commits and closes the reader. Call it after
+// the workers have drained and acknowledged their events.
+func (c *EventConsumer) Close() error {
+	if !c.running.Swap(false) {
 		return nil
 	}
-	c.running.Store(false)
-
-	logger.Info("Stopping Kafka consumer...")
-	close(c.doneChan)
-	c.wg.Wait()
-
-	if err := c.reader.Close(); err != nil {
+	if n := c.tracker.inFlight(); n > 0 {
+		logger.Warnf("Kafka consumer closing with %d unprocessed message(s); they will be re-delivered", n)
+	}
+	c.readerClosed.Store(true)
+	if err := c.reader.Close(); err != nil { // Close flushes queued commits
 		logger.Errorf("Error closing Kafka reader: %v", err)
 		return err
 	}
-
 	logger.Info("Kafka consumer stopped")
 	return nil
+}
+
+// Stop stops fetching and closes the reader (no draining). Prefer
+// StopFetching + Close when events are being processed concurrently.
+func (c *EventConsumer) Stop() error {
+	c.StopFetching()
+	return c.Close()
 }
 
 // IsRunning returns whether the consumer is running.

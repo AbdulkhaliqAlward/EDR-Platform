@@ -2,7 +2,7 @@ package rules
 
 import (
 	"fmt"
-	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -238,11 +238,19 @@ type PatternNode struct {
 	Pattern  string
 	Operator string // "1 of", "all of", "any of"
 	Count    int
+
+	// Names is the pattern resolved against the rule's selection names at
+	// parse time (nil when the node was built without resolution).
+	Names    []string
+	resolved bool
 }
 
 func (n *PatternNode) Evaluate(selections map[string]bool) bool {
-	// Expand pattern to matching selection names
-	matchingKeys := n.expandPattern(selections)
+	// Expand pattern to matching selection names (pre-resolved when parsed).
+	matchingKeys := n.Names
+	if !n.resolved {
+		matchingKeys = n.expandPattern(selections)
+	}
 
 	if len(matchingKeys) == 0 {
 		return false
@@ -272,23 +280,76 @@ func (n *PatternNode) String() string {
 }
 
 // expandPattern expands a wildcard pattern to matching selection names.
+// Used only for nodes that were not resolved at parse time.
 func (n *PatternNode) expandPattern(selections map[string]bool) []string {
-	// Convert glob pattern to regex
-	regexPattern := strings.ReplaceAll(n.Pattern, "*", ".*")
-	regexPattern = "^" + regexPattern + "$"
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return nil
-	}
-
-	var matches []string
+	names := make([]string, 0, len(selections))
 	for key := range selections {
-		if re.MatchString(key) {
-			matches = append(matches, key)
+		names = append(names, key)
+	}
+	return resolveSelectionPattern(n.Pattern, names)
+}
+
+// resolveSelectionPattern returns the selection names matched by a condition
+// pattern. "*" (used for "them") matches every selection except those whose
+// name starts with "_" (Sigma convention for helper identifiers); otherwise
+// "*" is the only wildcard and all other characters match literally.
+func resolveSelectionPattern(pattern string, names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if pattern == "*" {
+			if !strings.HasPrefix(name, "_") {
+				out = append(out, name)
+			}
+			continue
+		}
+		if wildcardMatch(pattern, name) {
+			out = append(out, name)
 		}
 	}
+	sort.Strings(out)
+	return out
+}
 
-	return matches
+// wildcardMatch matches s against a pattern where '*' matches any run of
+// characters and every other character matches literally.
+func wildcardMatch(pattern, s string) bool {
+	p, i := 0, 0
+	star, mark := -1, 0
+	for i < len(s) {
+		if p < len(pattern) && pattern[p] == '*' {
+			star, mark = p, i
+			p++
+		} else if p < len(pattern) && pattern[p] == s[i] {
+			p++
+			i++
+		} else if star >= 0 {
+			p = star + 1
+			mark++
+			i = mark
+		} else {
+			return false
+		}
+	}
+	for p < len(pattern) && pattern[p] == '*' {
+		p++
+	}
+	return p == len(pattern)
+}
+
+// resolvedPattern builds a PatternNode whose selection names are resolved
+// against the rule's selections at parse time.
+func (ps *parserState) resolvedPattern(pattern, operator string, count int) *PatternNode {
+	names := make([]string, 0, len(ps.selectionNames))
+	for name := range ps.selectionNames {
+		names = append(names, name)
+	}
+	return &PatternNode{
+		Pattern:  pattern,
+		Operator: operator,
+		Count:    count,
+		Names:    resolveSelectionPattern(pattern, names),
+		resolved: true,
+	}
 }
 
 // ConditionParser parses condition expressions into AST.
@@ -315,9 +376,8 @@ type parserState struct {
 // Parse parses a condition string into an AST.
 // Thread-safe: All parsing state is stored in local variables.
 func (p *ConditionParser) Parse(condition string, selectionNames []string) (Node, error) {
-	if condition == "" {
-		// Empty condition means always true
-		return &SelectionNode{Name: "true"}, nil
+	if strings.TrimSpace(condition) == "" {
+		return nil, fmt.Errorf("condition is empty")
 	}
 
 	// All parsing state is local to this method (thread-safe)
@@ -445,6 +505,9 @@ func (p *ConditionParser) parseFactor(state *parserState) (Node, error) {
 
 	case TokenIdentifier:
 		name := token.Literal
+		if !state.selectionNames[name] {
+			return nil, fmt.Errorf("condition references unknown selection %q", name)
+		}
 		return &SelectionNode{Name: name}, nil
 
 	default:
@@ -471,20 +534,11 @@ func (p *ConditionParser) parseAggregation(state *parserState, countToken Token)
 
 	if targetToken.Type == TokenThem {
 		// "N of them" - match all selections
-		return &PatternNode{
-			Pattern:  "*",
-			Operator: "1 of",
-			Count:    count,
-		}, nil
+		return state.resolvedPattern("*", "1 of", count), nil
 	}
 
 	if targetToken.Type == TokenIdentifier {
-		pattern := targetToken.Literal
-		return &PatternNode{
-			Pattern:  pattern,
-			Operator: "1 of",
-			Count:    count,
-		}, nil
+		return state.resolvedPattern(targetToken.Literal, "1 of", count), nil
 	}
 
 	return nil, fmt.Errorf("expected selection pattern or 'them' after 'of', got %v", targetToken)
@@ -504,20 +558,11 @@ func (p *ConditionParser) parseAllOf(state *parserState) (Node, error) {
 
 	if targetToken.Type == TokenThem {
 		// "all of them" - all selections must match
-		return &PatternNode{
-			Pattern:  "*",
-			Operator: "all of",
-			Count:    0,
-		}, nil
+		return state.resolvedPattern("*", "all of", 0), nil
 	}
 
 	if targetToken.Type == TokenIdentifier {
-		pattern := targetToken.Literal
-		return &PatternNode{
-			Pattern:  pattern,
-			Operator: "all of",
-			Count:    0,
-		}, nil
+		return state.resolvedPattern(targetToken.Literal, "all of", 0), nil
 	}
 
 	return nil, fmt.Errorf("expected selection pattern or 'them' after 'all of', got %v", targetToken)
@@ -537,20 +582,11 @@ func (p *ConditionParser) parseAnyOf(state *parserState) (Node, error) {
 
 	if targetToken.Type == TokenThem {
 		// "any of them" - at least one selection must match
-		return &PatternNode{
-			Pattern:  "*",
-			Operator: "any of",
-			Count:    1,
-		}, nil
+		return state.resolvedPattern("*", "any of", 1), nil
 	}
 
 	if targetToken.Type == TokenIdentifier {
-		pattern := targetToken.Literal
-		return &PatternNode{
-			Pattern:  pattern,
-			Operator: "any of",
-			Count:    1,
-		}, nil
+		return state.resolvedPattern(targetToken.Literal, "any of", 1), nil
 	}
 
 	return nil, fmt.Errorf("expected selection pattern or 'them' after 'any of', got %v", targetToken)
@@ -568,15 +604,10 @@ func parseInt(s string) (int, error) {
 	return result, nil
 }
 
-// matchesPattern checks if a string matches a glob pattern.
+// matchesPattern checks if a string matches a glob pattern ('*' wildcard only;
+// all other characters, including regex metacharacters, match literally).
 func matchesPattern(s, pattern string) bool {
-	regexPattern := strings.ReplaceAll(pattern, "*", ".*")
-	regexPattern = "^" + regexPattern + "$"
-	re, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return false
-	}
-	return re.MatchString(s)
+	return wildcardMatch(pattern, s)
 }
 
 // ConditionEvaluator evaluates a parsed condition AST.

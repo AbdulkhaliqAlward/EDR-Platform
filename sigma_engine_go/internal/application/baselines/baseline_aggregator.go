@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/logger"
 )
 
@@ -169,30 +170,36 @@ func ShouldRecord(eventData map[string]interface{}) bool {
 		return nil
 	}
 
-	// Sysmon Event ID 1 = ProcessCreate
-	if eid := resolveVal("event_id"); eid != nil {
-		switch v := eid.(type) {
-		case int:
-			return v == 1 || v == 4688
-		case int64:
-			return v == 1 || v == 4688
-		case float64:
-			return v == 1 || v == 4688
-		case string:
-			return v == "1" || v == "4688"
+	// Agent telemetry: event_type "process" plus the collector's action.
+	// Only real process starts count as executions; terminations and the
+	// start-up inventory snapshot would otherwise distort per-hour counts.
+	// (An empty action is accepted for agents that predate the field.)
+	if et, ok := eventData["event_type"].(string); ok && et != "" {
+		if !strings.EqualFold(et, "process") {
+			return false
 		}
-	}
-
-	// event_type == "process" is a reliable signal from the EDR agent.
-	if et, ok := eventData["event_type"]; ok && et != nil {
-		if s, ok := et.(string); ok && strings.EqualFold(s, "process") {
+		action, _ := resolveVal("action").(string)
+		switch strings.ToLower(strings.TrimSpace(action)) {
+		case "", "process_creation":
 			return true
+		default:
+			return false
 		}
 	}
 
-	// Fallback: if a "name" field is present, assume it's a process event.
-	if name := resolveVal("name"); name != nil && name != "" {
-		return true
+	// Event Log / Sysmon telemetry: numeric provider event code only.
+	// The agent's top-level "event_id" is a record UUID, never a code, so it
+	// is deliberately not consulted here (it previously made this function
+	// return false for every agent event, so UEBA never trained).
+	for _, v := range []interface{}{eventData["EventID"], eventData["event.code"], resolveVal("EventID"), resolveVal("event_code")} {
+		if code, ok := domain.ParseEventCode(v); ok {
+			return code == 1 || code == 4688
+		}
+	}
+	if data, ok := eventData["data"].(map[string]interface{}); ok {
+		if code, ok := domain.ParseEventCode(data["event_id"]); ok {
+			return code == 1 || code == 4688
+		}
 	}
 
 	return false

@@ -363,6 +363,10 @@ func (a *Agent) Stop() error {
 		a.logger.Warn("Shutdown timed out, some components may not have stopped cleanly")
 	}
 
+	// Batches still awaiting the server's acknowledgement go to the disk
+	// queue so they are re-sent after restart instead of being lost.
+	a.grpcClient.FlushUnconfirmed()
+
 	uptime := time.Since(a.startTime)
 	a.logger.Infof("Agent uptime: %s", uptime)
 	a.logger.Infof("Events processed: %d", a.eventsTotal.Load())
@@ -689,7 +693,10 @@ func (a *Agent) processBatch(batch *event.Batch) {
 	// (long-lived stream → short-lived stream). We only fall to disk when
 	// the actual send fails, NOT based on conn state checks — because gRPC
 	// transitions to Idle between RPCs, making IsConnected() unreliable.
-	if err := a.grpcClient.SendBatchSync(a.ctx, pbBatch); err == nil {
+	// Delivery is confirmed asynchronously: if the server does not
+	// acknowledge the batch (durably accepted) within the ACK timeout, or the
+	// stream breaks first, spillUnconfirmed moves it to the disk queue.
+	if err := a.grpcClient.SendBatchTracked(a.ctx, pbBatch, a.spillUnconfirmed); err == nil {
 		a.eventsSent.Add(uint64(pbBatch.GetEventCount()))
 		return
 	}
@@ -701,6 +708,21 @@ func (a *Agent) processBatch(batch *event.Batch) {
 	}
 	a.logger.Debugf("Batch enqueued to disk: id=%s events=%d", batch.ID, len(batch.Events))
 }
+
+// spillUnconfirmed persists a batch the server never acknowledged so the
+// queue processor re-sends it (the server de-duplicates by batch ID).
+func (a *Agent) spillUnconfirmed(b *pb.EventBatch) {
+	if err := a.diskQueue.Enqueue(b); err != nil {
+		a.logger.Errorf("Unacknowledged batch %s could not be queued for retry (events may be lost): %v", b.GetBatchId(), err)
+		return
+	}
+	a.logger.Debugf("Unacknowledged batch %s queued for retry", b.GetBatchId())
+}
+
+// maxUnackedAttempts is how many times the queue processor re-sends a batch
+// that the server receives but never acknowledges before moving it to the
+// dead-letter folder, so one poison batch cannot block the queue forever.
+const maxUnackedAttempts = 20
 
 // runQueueProcessor drains the disk queue by sending batches to the server.
 //
@@ -725,6 +747,7 @@ func (a *Agent) runQueueProcessor() {
 	backoff := 1 * time.Second
 	maxBackoff := 30 * time.Second
 	emptyPoll := 500 * time.Millisecond
+	unacked := make(map[string]int) // filename → unacknowledged send attempts
 
 	for {
 		select {
@@ -746,8 +769,23 @@ func (a *Agent) runQueueProcessor() {
 			continue
 		}
 
+		// SendBatchSync returns nil only once the server acknowledged the
+		// batch, so the file is deleted only after durable acceptance.
 		err = a.grpcClient.SendBatchSync(a.ctx, pbBatch)
 		if err != nil {
+			if grpcclient.IsNotAcknowledged(err) {
+				unacked[filename]++
+				if unacked[filename] >= maxUnackedAttempts {
+					if dlErr := a.diskQueue.DeadLetter(filename); dlErr != nil {
+						a.logger.Warnf("Dead-letter queue file %s: %v", filename, dlErr)
+					} else {
+						a.logger.Errorf("Batch %s was never acknowledged after %d attempts — moved to the queue's deadletter folder",
+							pbBatch.GetBatchId(), maxUnackedAttempts)
+					}
+					delete(unacked, filename)
+					continue
+				}
+			}
 			a.logger.Debugf("Send batch sync failed (will retry): %v", err)
 			time.Sleep(backoff)
 			backoff *= 2
@@ -757,6 +795,7 @@ func (a *Agent) runQueueProcessor() {
 			continue
 		}
 
+		delete(unacked, filename)
 		if err := a.diskQueue.Remove(filename); err != nil {
 			a.logger.Warnf("Remove queue file %s: %v", filename, err)
 		}

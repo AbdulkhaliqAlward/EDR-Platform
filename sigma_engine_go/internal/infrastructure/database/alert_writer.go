@@ -3,13 +3,17 @@ package database
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/logger"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // AlertWriterConfig configures the alert writer.
@@ -106,7 +110,9 @@ func (w *AlertWriter) Start(ctx context.Context) error {
 	return nil
 }
 
-// writeLoop processes alerts in the background.
+// writeLoop processes alerts queued through Write (the asynchronous
+// fallback path). Each alert is persisted with the same retry policy as
+// Persist.
 func (w *AlertWriter) writeLoop(ctx context.Context) {
 	defer w.wg.Done()
 
@@ -115,74 +121,156 @@ func (w *AlertWriter) writeLoop(ctx context.Context) {
 
 	batch := make([]*domain.Alert, 0, w.config.BatchSize)
 
-	flush := func() {
+	flush := func(fctx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-
 		for _, alert := range batch {
-			start := time.Now()
-			if err := w.writeWithDedup(ctx, alert); err != nil {
-				atomic.AddUint64(&w.metrics.WriteErrors, 1)
-				logger.Errorf("❌ Failed to write alert to database: %v", err)
-			} else {
-				atomic.AddUint64(&w.metrics.AlertsWritten, 1)
-			}
-
-			latency := float64(time.Since(start).Milliseconds())
-			w.metrics.mu.Lock()
-			w.metrics.AvgWriteLatencyMs = w.metrics.AvgWriteLatencyMs*0.9 + latency*0.1
-			w.metrics.mu.Unlock()
+			// Errors are logged (with the full alert) inside Persist.
+			_, _, _ = w.Persist(fctx, alert)
 		}
-
 		atomic.AddUint64(&w.metrics.BatchesWritten, 1)
 		batch = batch[:0]
+	}
+	// finalFlush drains on shutdown with its own bounded context: the
+	// caller's ctx is already cancelled, which used to make every queued
+	// alert fail to write.
+	finalFlush := func() {
+		for {
+			select {
+			case alert, ok := <-w.alertChan:
+				if !ok {
+					goto done
+				}
+				batch = append(batch, alert)
+			default:
+				goto done
+			}
+		}
+	done:
+		fctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		flush(fctx)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
+			finalFlush()
 			return
 		case <-w.doneChan:
-			flush()
+			finalFlush()
 			return
 		case alert, ok := <-w.alertChan:
 			if !ok {
-				flush()
+				finalFlush()
 				return
 			}
 			batch = append(batch, alert)
 			if len(batch) >= w.config.BatchSize {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		}
 	}
 }
 
-// writeWithDedup writes an alert with deduplication using an atomic upsert.
-// The old SELECT + conditional INSERT pattern had a read-modify-write race
-// under concurrent workers. UpsertWithDedup uses FOR UPDATE SKIP LOCKED inside
-// a transaction to prevent duplicate inserts while collapsing round trips.
-func (w *AlertWriter) writeWithDedup(ctx context.Context, domainAlert *domain.Alert) error {
-	dbAlert := w.convertToDBAlert(domainAlert)
+// Persist retry policy: transient failures (connection loss, timeouts,
+// serialisation/lock conflicts) are retried with exponential backoff; data
+// and integrity errors fail fast because retrying cannot succeed.
+const (
+	persistMaxAttempts = 5
+	persistBaseBackoff = 100 * time.Millisecond
+	persistMaxBackoff  = 2 * time.Second
+)
 
-	result, isNew, err := w.repo.UpsertWithDedup(ctx, dbAlert, w.config.DeduplicationWindow)
-	if err != nil {
-		return err
+func isRetryablePersistError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch {
+		case strings.HasPrefix(pgErr.Code, "22"), // data exception
+			strings.HasPrefix(pgErr.Code, "23"), // integrity constraint violation
+			strings.HasPrefix(pgErr.Code, "42"): // syntax error / undefined object
+			return false
+		}
+	}
+	return true
+}
+
+// Persist writes an alert synchronously (with deduplication and retries)
+// and returns its canonical ID: the alert's own ID when a new row was
+// inserted, or the ID of the existing alert it was merged into. The domain
+// alert's ID is updated to the canonical ID so every downstream sink (Kafka,
+// correlation, playbooks, WebSocket) uses the same identity as the database.
+func (w *AlertWriter) Persist(ctx context.Context, domainAlert *domain.Alert) (string, bool, error) {
+	start := time.Now()
+	var lastErr error
+	backoff := persistBaseBackoff
+	for attempt := 1; attempt <= persistMaxAttempts; attempt++ {
+		dbAlert := w.convertToDBAlert(domainAlert)
+		result, isNew, err := w.repo.UpsertWithDedup(ctx, dbAlert, w.config.DeduplicationWindow)
+		if err == nil {
+			canonical := dbAlert.ID
+			if result != nil && result.ID != "" {
+				canonical = result.ID
+			}
+			domainAlert.ID = canonical
+
+			latency := float64(time.Since(start).Milliseconds())
+			w.metrics.mu.Lock()
+			w.metrics.AvgWriteLatencyMs = w.metrics.AvgWriteLatencyMs*0.9 + latency*0.1
+			w.metrics.mu.Unlock()
+
+			if isNew {
+				atomic.AddUint64(&w.metrics.AlertsWritten, 1)
+				if w.onAlertPersisted != nil && result != nil {
+					w.onAlertPersisted(result)
+				}
+			} else {
+				atomic.AddUint64(&w.metrics.AlertsDeduplicated, 1)
+			}
+			return canonical, isNew, nil
+		}
+
+		lastErr = err
+		atomic.AddUint64(&w.metrics.WriteErrors, 1)
+		if !isRetryablePersistError(err) || attempt == persistMaxAttempts {
+			break
+		}
+		logger.Warnf("Alert persist attempt %d/%d failed (rule=%s): %v — retrying in %v",
+			attempt, persistMaxAttempts, domainAlert.RuleID, err, backoff)
+		select {
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+			attempt = persistMaxAttempts
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > persistMaxBackoff {
+			backoff = persistMaxBackoff
+		}
 	}
 
-	if !isNew {
-		atomic.AddUint64(&w.metrics.AlertsDeduplicated, 1)
+	atomic.AddUint64(&w.metrics.AlertsDropped, 1)
+	// Last resort: the full alert is logged as JSON so it can be recovered.
+	payload, _ := json.Marshal(domainAlert)
+	logger.Errorf("ALERT NOT PERSISTED after retries (rule=%s): %v | alert=%s", domainAlert.RuleID, lastErr, payload)
+	return "", false, fmt.Errorf("persist alert: %w", lastErr)
+}
+
+// UpdateCorrelationSummary merges correlation information into a stored
+// alert's context_snapshot (used after correlation runs on the canonical ID).
+func (w *AlertWriter) UpdateCorrelationSummary(ctx context.Context, alertID string, summary map[string]any) error {
+	updater, ok := w.repo.(interface {
+		MergeContextSnapshot(ctx context.Context, id string, patch map[string]any) error
+	})
+	if !ok || alertID == "" || len(summary) == 0 {
 		return nil
 	}
-
-	if w.onAlertPersisted != nil && result != nil {
-		w.onAlertPersisted(result)
-	}
-	return nil
+	return updater.MergeContextSnapshot(ctx, alertID, summary)
 }
 
 // SetOnAlertPersisted registers an optional callback invoked for newly created
@@ -223,6 +311,7 @@ func (w *AlertWriter) convertToDBAlert(da *domain.Alert) *Alert {
 	}
 
 	return &Alert{
+		ID:                 da.ID, // canonical identity; the repository validates it
 		Timestamp:          da.Timestamp,
 		AgentID:            agentID,
 		RuleID:             da.RuleID,

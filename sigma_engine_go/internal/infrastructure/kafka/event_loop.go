@@ -4,7 +4,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -197,7 +197,8 @@ type EventLoop struct {
 	doneChan  chan struct{}
 
 	running atomic.Bool
-	wg      sync.WaitGroup
+	wg       sync.WaitGroup
+	workerWG sync.WaitGroup // detection workers only (shutdown ordering)
 }
 
 const (
@@ -297,9 +298,10 @@ func (el *EventLoop) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Start detection workers
+	// Start detection workers (tracked separately so shutdown can wait for
+	// them before closing the alert channel they send on).
 	for i := 0; i < el.config.Workers; i++ {
-		el.wg.Add(1)
+		el.workerWG.Add(1)
 		go el.detectionWorker(ctx, i)
 	}
 
@@ -331,7 +333,7 @@ func (el *EventLoop) Start(ctx context.Context) error {
 // detectionWorker processes events from consumer and generates alerts.
 // Drains eventChan until it is closed (by the consumer), then exits.
 func (el *EventLoop) detectionWorker(ctx context.Context, workerID int) {
-	defer el.wg.Done()
+	defer el.workerWG.Done()
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Errorf("Panic recovered in detectionWorker %d: %v", workerID, r)
@@ -342,7 +344,9 @@ func (el *EventLoop) detectionWorker(ctx context.Context, workerID int) {
 	eventChan := el.consumer.Events()
 
 	for event := range eventChan {
-		el.processOneEvent(event)
+		el.processOneEvent(event) // recovers its own panics
+		// Commit the Kafka offset only now that the event is fully handled.
+		event.Ack()
 	}
 
 	logger.Debugf("Detection worker %d stopped (event channel closed)", workerID)
@@ -434,17 +438,13 @@ func (el *EventLoop) processOneEvent(event *domain.LogEvent) {
 			}
 			// ─────────────────────────────────────────────────────────────────────
 
-			if el.alertCorrelator != nil {
-				if rels := el.alertCorrelator.CorrelateAlert(baseAlert); len(rels) > 0 {
-					logger.Debugf("Correlations for alert %s: %d edge(s)", baseAlert.ID, len(rels))
-				}
-			}
+			// Correlation runs in the alert publisher, after persistence, so
+			// edges reference the canonical (database) alert ID.
 
-			// S5 FIX: Include content hash in suppression key so distinct attacks
-			// on the same agent from the same rule are NOT suppressed.
-			processName := extractString(event.RawData, "name")
-			pidVal := extractInt64(event.RawData, "pid")
-			suppressKey := fmt.Sprintf("%s|%s|%s|%d", baseAlert.RuleID, agentStr, processName, pidVal)
+			// Suppression identity: rule + agent + the category-specific
+			// subject of the event, so distinct activity (another DNS name,
+			// destination, file or key) from one process is not merged.
+			suppressKey := baseAlert.RuleID + "|" + agentStr + "|" + suppressionSubject(event)
 
 			if el.suppression.shouldSuppress(suppressKey) {
 				atomic.AddUint64(&el.metrics.AlertsSuppressed, 1)
@@ -457,15 +457,17 @@ func (el *EventLoop) processOneEvent(event *domain.LogEvent) {
 					// Backpressure fallback path:
 					// Try direct best-effort publish/write so alerts are not lost when the
 					// alert channel is saturated.
+					// The database assigns the canonical identity, so when a
+					// writer exists the alert goes to its retrying queue; Kafka
+					// is used directly only when there is no writer.
 					fallbackOK := false
-					if err := el.producer.Publish(baseAlert); err == nil {
-						atomic.AddUint64(&el.metrics.AlertsPublished, 1)
-						fallbackOK = true
-					}
 					if el.alertWriter != nil {
 						if err := el.alertWriter.Write(baseAlert); err == nil {
 							fallbackOK = true
 						}
+					} else if err := el.producer.Publish(baseAlert); err == nil {
+						atomic.AddUint64(&el.metrics.AlertsPublished, 1)
+						fallbackOK = true
 					}
 					if !fallbackOK {
 						atomic.AddUint64(&el.metrics.ProcessingErrors, 1)
@@ -503,7 +505,40 @@ func (el *EventLoop) alertPublisher(ctx context.Context) {
 	logger.Debug("Alert publisher started")
 
 	for alert := range el.alertChan {
-		// Publish to Kafka
+		// 1. Persist first (dedup + retries). The writer sets alert.ID to the
+		//    canonical database ID — the new row's or the merged alert's.
+		//    A dedicated context lets alerts drained at shutdown still persist.
+		isNew := true
+		if el.alertWriter != nil {
+			pctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_, created, err := el.alertWriter.Persist(pctx, alert)
+			cancel()
+			if err != nil {
+				atomic.AddUint64(&el.metrics.AlertDBQueueFailures, 1)
+				metricsPkg.DefaultMetrics.RecordError("alert_db_persist_failed")
+			} else {
+				isNew = created
+			}
+		}
+
+		// 2. Correlate new alerts under their canonical ID and store the
+		//    resulting summary on the alert row.
+		if isNew && el.alertCorrelator != nil {
+			if rels := el.alertCorrelator.CorrelateAlert(alert); len(rels) > 0 {
+				logger.Debugf("Correlations for alert %s: %d edge(s)", alert.ID, len(rels))
+				if el.alertWriter != nil {
+					if summary, ok := alert.ContextSnapshot["correlation"]; ok {
+						cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						if err := el.alertWriter.UpdateCorrelationSummary(cctx, alert.ID, map[string]any{"correlation": summary}); err != nil {
+							logger.Warnf("Failed to store correlation summary for alert %s: %v", alert.ID, err)
+						}
+						cancel()
+					}
+				}
+			}
+		}
+
+		// 3. Publish to Kafka (same canonical ID as the database row)
 		if err := el.producer.Publish(alert); err != nil {
 			logger.Warnf("Failed to publish alert to Kafka: %v", err)
 			atomic.AddUint64(&el.metrics.ProcessingErrors, 1)
@@ -513,19 +548,12 @@ func (el *EventLoop) alertPublisher(ctx context.Context) {
 			atomic.AddUint64(&el.metrics.AlertsPublished, 1)
 		}
 
-		// Write to PostgreSQL (if AlertWriter is configured)
-		if el.alertWriter != nil {
-			if err := el.alertWriter.Write(alert); err != nil {
-				logger.Warnf("Failed to queue alert for DB write: %v", err)
-				atomic.AddUint64(&el.metrics.AlertDBQueueFailures, 1)
-				metricsPkg.DefaultMetrics.RecordError("alert_db_queue_failed")
-			}
-		}
-
 		if el.escalations != nil {
 			el.escalations.TrackAlert(alert)
 		}
-		if el.playbooks != nil {
+		// Response playbooks run once per incident: a deduplicated repeat of
+		// an open alert must not re-trigger automated actions.
+		if el.playbooks != nil && isNew {
 			el.playbooks.ExecuteForAlert(ctx, alert)
 		}
 	}
@@ -637,30 +665,40 @@ func (el *EventLoop) Stop() error {
 
 	logger.Info("Stopping event loop (draining buffers)...")
 
-	// Step 1: Stop consumer — this closes eventChan, which causes workers to drain and exit
-	if err := el.consumer.Stop(); err != nil {
-		logger.Errorf("Error stopping consumer: %v", err)
-	}
+	// Step 1: stop fetching. The consumer closes eventChan once its fetch
+	// loops exit; workers drain what was already delivered.
+	el.consumer.StopFetching()
 
-	// Step 2: Wait for detection workers to finish draining eventChan
-	// (they range over eventChan and exit when it's closed)
-	// Workers are tracked by el.wg, but so are alertPublisher and statsReporter.
-	// We use a separate WaitGroup for workers via a timeout guard.
+	// Step 2: wait for the detection workers to drain and acknowledge.
 	workersDone := make(chan struct{})
 	go func() {
-		// Workers + publisher + stats all share el.wg.
-		// After workers finish they stop sending to alertChan.
-		// We wait briefly for all workers, then close alertChan for the publisher.
-		// Using a timeout to prevent hanging if a worker is stuck.
-		time.Sleep(2 * time.Second) // Grace period for workers to drain
-		close(el.alertChan)         // Step 3: signal publisher to drain and exit
-		close(el.doneChan)          // Step 4: signal statsReporter to exit
+		el.workerWG.Wait()
 		close(workersDone)
 	}()
+	select {
+	case <-workersDone:
+	case <-time.After(el.config.ShutdownTimeout):
+		logger.Warn("Shutdown timeout waiting for detection workers; unacknowledged events will be re-delivered")
+	}
 
-	<-workersDone
+	// Step 3: commit acknowledged offsets and close the reader.
+	if err := el.consumer.Close(); err != nil {
+		logger.Errorf("Error closing consumer: %v", err)
+	}
 
-	// Step 5: Wait for all goroutines (workers + publisher + stats) with timeout
+	// Step 4: no worker can send any more (or they timed out). Closing the
+	// alert channel lets the publisher drain and exit. (Previously this
+	// happened after a fixed 2s sleep, racing workers still sending → panic
+	// "send on closed channel" and lost alerts.)
+	select {
+	case <-workersDone:
+		close(el.alertChan)
+	default:
+		logger.Warn("Detection workers still running; alert channel left open to avoid a send-on-closed panic")
+	}
+	close(el.doneChan) // stats reporter and other helpers exit
+
+	// Step 5: wait for the publisher and helpers with timeout.
 	allDone := make(chan struct{})
 	go func() {
 		el.wg.Wait()
@@ -871,6 +909,48 @@ func (el *EventLoop) lineageWriteWorker(ctx context.Context, workerID int) {
 // =============================================================================
 
 // extractString retrieves a string from a flat or nested data map.
+// suppressionSubject returns the category-specific subject of an event used
+// in the alert suppression key: the process (name + pid) plus what it acted
+// on — DNS name, network destination, file, registry key, pipe or target
+// process. Two different subjects from the same process are distinct
+// activity and must not suppress each other.
+func suppressionSubject(event *domain.LogEvent) string {
+	raw := event.RawData
+	// File/registry events carry the acting process in process_name ("name"
+	// is the file's name there); process events use name.
+	name := extractString(raw, "process_name")
+	if name == "" {
+		name = extractString(raw, "name")
+	}
+	pid := extractInt64(raw, "pid")
+	var object string
+	switch event.Category {
+	case domain.EventCategoryDNSQuery:
+		object = extractString(raw, "query_name")
+	case domain.EventCategoryNetworkConnection:
+		object = extractString(raw, "destination_ip") + ":" + strconv.FormatInt(extractInt64(raw, "destination_port"), 10)
+	case domain.EventCategoryFileEvent, domain.EventCategoryFileDelete, domain.EventCategoryFileRename:
+		object = extractString(raw, "path")
+		if object == "" {
+			object = extractString(raw, "target_filename")
+		}
+	case domain.EventCategoryRegistrySet, domain.EventCategoryRegistryAdd, domain.EventCategoryRegistryDelete,
+		domain.EventCategoryRegistryRename, domain.EventCategoryRegistryEvent:
+		object = extractString(raw, "TargetObject")
+		if object == "" {
+			object = extractString(raw, "key_path")
+		}
+	case domain.EventCategoryPipeCreated, domain.EventCategoryPipeConnected:
+		object = extractString(raw, "pipe_name")
+	case domain.EventCategoryProcessAccess:
+		object = strconv.FormatInt(extractInt64(raw, "target_pid"), 10)
+	default:
+		// Process events: the command line distinguishes re-use of a PID.
+		object = extractString(raw, "command_line")
+	}
+	return name + "|" + strconv.FormatInt(pid, 10) + "|" + strings.ToLower(object)
+}
+
 func extractString(data map[string]interface{}, key string) string {
 	if data == nil {
 		return ""

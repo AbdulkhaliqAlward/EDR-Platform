@@ -116,7 +116,10 @@ func (fm *FieldMapper) initializeMappings() {
 		{"Details", "registry.value", []string{"registry.data.strings"}, FieldTypeString, false},
 
 		// Event metadata
-		{"EventID", "event.code", []string{"event_id", "EventCode", "winlog.event_id"}, FieldTypeInt, false},
+		// NOTE: the agent's top-level "event_id" is the event's record UUID,
+		// not a provider event code, so it must never be an EventID
+		// alternative. Agent-side codes live under data.* (see fallbacks).
+		{"EventID", "event.code", []string{"EventCode", "winlog.event_id"}, FieldTypeInt, false},
 		{"Provider_Name", "event.provider", []string{"winlog.provider_name"}, FieldTypeString, false},
 		{"EventType", "event.action", []string{"event.type"}, FieldTypeString, false},
 		{"Category", "event.category", []string{}, FieldTypeString, false},

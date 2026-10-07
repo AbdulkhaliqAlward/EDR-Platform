@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -112,6 +113,15 @@ type Client struct {
 	stream   EventIngestionService_StreamEventsClient
 	streamMu sync.Mutex
 
+	// sendMu serialises Send on the shared stream: gRPC forbids concurrent
+	// SendMsg calls on one stream, and the batcher, the disk-queue processor
+	// and RunSender all send.
+	sendMu sync.Mutex
+
+	// acks tracks sent batches until the server acknowledges durable
+	// acceptance (ack_batch_id). Unconfirmed batches are retried from disk.
+	acks *ackTracker
+
 	// State
 	connected    atomic.Bool
 	reconnecting atomic.Bool
@@ -150,6 +160,7 @@ func NewClient(cfg *config.Config, logger *logging.Logger) *Client {
 		commandChan: make(chan *Command, 50),
 		doneChan:    make(chan struct{}),
 		reEnrollCh:  make(chan struct{}),
+		acks:        newAckTracker(maxPendingAcks),
 	}
 }
 
@@ -481,32 +492,90 @@ func (c *Client) SendBatch(batch *EventBatch) error {
 	}
 }
 
-// SendBatchSync sends a proto EventBatch on the active stream synchronously.
-// If the long-lived bidirectional stream is not established, it falls back to
-// opening a short-lived stream — ensuring the disk queue processor can always
-// drain files as long as the gRPC connection itself is up (even if RunStream
-// has not yet re-established the persistent stream).
-//
-// This is the critical fix for the "queue files never deleted" bug: Heartbeat
-// uses unary RPC (independent of the stream), so it keeps working while
-// SendBatchSync was returning "stream not established" and never draining.
-func (c *Client) SendBatchSync(ctx context.Context, batch *EventBatch) error {
-	// Try the long-lived stream first (fast path).
-	c.streamMu.Lock()
-	stream := c.stream
-	c.streamMu.Unlock()
+// ackTimeout bounds how long a sent batch may wait for the server's
+// acknowledgement before it is treated as undelivered and retried from disk.
+const ackTimeout = 30 * time.Second
 
-	if stream != nil {
-		if err := stream.Send(batch); err != nil {
+// maxPendingAcks bounds the in-flight confirmation window (memory held for
+// batches awaiting acknowledgement). When full, new batches go to disk.
+const maxPendingAcks = 256
+
+// IsNotAcknowledged reports whether err means the server was reached but did
+// not confirm the batch (as opposed to a connectivity failure).
+func IsNotAcknowledged(err error) bool {
+	return errors.Is(err, errNotAcknowledged)
+}
+
+// currentStream returns the long-lived stream, or nil.
+func (c *Client) currentStream() EventIngestionService_StreamEventsClient {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	return c.stream
+}
+
+// sendOnStream serialises Send on the shared long-lived stream.
+func (c *Client) sendOnStream(stream EventIngestionService_StreamEventsClient, batch *EventBatch) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	return stream.Send(batch)
+}
+
+// SendBatchTracked sends a batch and returns as soon as it is written to the
+// stream; delivery is confirmed asynchronously. If the server does not
+// acknowledge it within ackTimeout, or the stream breaks first,
+// onUnconfirmed receives the batch so the caller can persist it for retry.
+// An error means the batch was not sent (caller persists it immediately).
+func (c *Client) SendBatchTracked(ctx context.Context, batch *EventBatch, onUnconfirmed func(*EventBatch)) error {
+	if stream := c.currentStream(); stream != nil {
+		id := batch.GetBatchId()
+		if err := c.acks.register(id, &pendingAck{batch: batch, deadline: time.Now().Add(ackTimeout), onUnconfirmed: onUnconfirmed}); err != nil {
+			return err
+		}
+		if err := c.sendOnStream(stream, batch); err != nil {
+			c.acks.cancel(id)
 			c.clearStream()
 			return fmt.Errorf("stream send failed: %w", err)
 		}
 		return nil
 	}
+	return c.sendShortLivedConfirmed(ctx, batch)
+}
 
-	// Fallback: open a short-lived stream for this single batch.
-	// This path is hit when RunStream hasn't re-established the persistent
-	// stream yet, but the underlying gRPC connection is healthy.
+// SendBatchSync sends a batch and waits until the server acknowledges it.
+// It returns nil only when the batch is confirmed durably accepted, so the
+// disk-queue processor deletes a file only after confirmation.
+func (c *Client) SendBatchSync(ctx context.Context, batch *EventBatch) error {
+	if stream := c.currentStream(); stream != nil {
+		id := batch.GetBatchId()
+		done := make(chan error, 1)
+		if err := c.acks.register(id, &pendingAck{batch: batch, deadline: time.Now().Add(ackTimeout), done: done}); err != nil {
+			return err
+		}
+		if err := c.sendOnStream(stream, batch); err != nil {
+			c.acks.cancel(id)
+			c.clearStream()
+			return fmt.Errorf("stream send failed: %w", err)
+		}
+		timer := time.NewTimer(ackTimeout + 5*time.Second) // backstop if the sweeper is not running
+		defer timer.Stop()
+		select {
+		case err := <-done:
+			return err // nil = acknowledged
+		case <-timer.C:
+			c.acks.cancel(id)
+			return errNotAcknowledged
+		case <-ctx.Done():
+			c.acks.cancel(id)
+			return ctx.Err()
+		}
+	}
+	return c.sendShortLivedConfirmed(ctx, batch)
+}
+
+// sendShortLivedConfirmed sends one batch on a short-lived stream (used while
+// RunStream has not yet established the long-lived one) and succeeds only
+// if the server's response acknowledges this batch.
+func (c *Client) sendShortLivedConfirmed(ctx context.Context, batch *EventBatch) error {
 	c.mu.RLock()
 	sc := c.serviceClient
 	c.mu.RUnlock()
@@ -514,10 +583,8 @@ func (c *Client) SendBatchSync(ctx context.Context, batch *EventBatch) error {
 		return fmt.Errorf("not connected")
 	}
 
-	// Use a bounded timeout so the batcher goroutine is never blocked
-	// indefinitely — a hung StreamEvents call would stall the entire
-	// event pipeline and fill eventChan to 5000 (→ Degraded).
-	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// Bounded so the caller is never blocked indefinitely by a hung call.
+	sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	shortStream, err := sc.StreamEvents(sendCtx)
@@ -530,9 +597,66 @@ func (c *Client) SendBatchSync(ctx context.Context, batch *EventBatch) error {
 	if err := shortStream.CloseSend(); err != nil {
 		return fmt.Errorf("short-lived stream close failed: %w", err)
 	}
-	// Drain any server response (commands, ACK) — best-effort.
-	shortStream.Recv() //nolint:errcheck
+	acked := false
+	for {
+		resp, err := shortStream.Recv()
+		if err != nil {
+			break // io.EOF after the server's response, or a stream error
+		}
+		if resp == nil {
+			continue
+		}
+		if resp.GetAckBatchId() == batch.GetBatchId() {
+			acked = true
+		}
+		c.forwardCommands(resp)
+	}
+	if !acked {
+		return errNotAcknowledged
+	}
 	return nil
+}
+
+// forwardCommands delivers the commands in a server response to commandChan.
+func (c *Client) forwardCommands(resp *CommandBatch) {
+	for _, cmd := range resp.Commands {
+		if cmd == nil {
+			continue
+		}
+		select {
+		case c.commandChan <- &Command{
+			ID:         cmd.GetCommandId(),
+			Type:       stringifyCommandType(cmd.GetType()),
+			Parameters: cmd.GetParameters(),
+			Priority:   int(cmd.GetPriority()),
+			ExpiresAt:  commandExpiresAt(cmd),
+		}:
+		default:
+			c.logger.Warn("Command channel full, dropping command")
+		}
+	}
+}
+
+// FlushUnconfirmed hands every batch still awaiting acknowledgement to its
+// unconfirmed handler (the disk queue). Call on shutdown so in-flight
+// batches survive a restart.
+func (c *Client) FlushUnconfirmed() {
+	c.acks.failAll()
+}
+
+// runAckSweeper periodically fails batches whose acknowledgement deadline
+// passed, so they are retried from the disk queue.
+func (c *Client) runAckSweeper(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			c.acks.expire(now)
+		}
+	}
 }
 
 // SendCommandResult sends the command execution result to the server (C2 feedback).
@@ -693,7 +817,7 @@ func (c *Client) sendBatchInternal(ctx context.Context, batch *EventBatch) error
 	c.streamMu.Unlock()
 
 	if stream != nil {
-		if err := stream.Send(batch); err != nil {
+		if err := c.sendOnStream(stream, batch); err != nil {
 			c.clearStream()
 			return fmt.Errorf("failed to send batch: %w", err)
 		}
@@ -775,6 +899,7 @@ func (c *Client) BuildEventBatchProto(batch *event.Batch) *EventBatch {
 // RunStream returns when ctx is cancelled.
 func (c *Client) RunStream(ctx context.Context) {
 	c.logger.Debug("gRPC RunStream started")
+	go c.runAckSweeper(ctx)
 
 	backoff := c.cfg.Server.ReconnectDelay
 	maxBackoff := c.cfg.Server.MaxReconnectDelay
@@ -918,23 +1043,10 @@ func (c *Client) recvLoop(ctx context.Context, stream EventIngestionService_Stre
 		if resp == nil {
 			continue
 		}
-
-		for _, cmd := range resp.Commands {
-			if cmd == nil {
-				continue
-			}
-			select {
-			case c.commandChan <- &Command{
-				ID:         cmd.GetCommandId(),
-				Type:       stringifyCommandType(cmd.GetType()),
-				Parameters: cmd.GetParameters(),
-				Priority:   int(cmd.GetPriority()),
-				ExpiresAt:  commandExpiresAt(cmd),
-			}:
-			default:
-				c.logger.Warn("Command channel full, dropping command")
-			}
+		if id := resp.GetAckBatchId(); id != "" {
+			c.acks.ack(id)
 		}
+		c.forwardCommands(resp)
 	}
 }
 
@@ -955,6 +1067,11 @@ func (c *Client) clearStream() {
 	c.streamMu.Lock()
 	c.stream = nil
 	c.streamMu.Unlock()
+	// Batches sent on the lost stream can never be acknowledged now: hand
+	// them back for retry instead of waiting for their deadline.
+	if c.acks != nil {
+		c.acks.failAll()
+	}
 }
 
 // nextBackoff returns the next backoff duration (exponential, capped by max).

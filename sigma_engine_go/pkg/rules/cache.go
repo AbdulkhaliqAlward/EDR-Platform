@@ -21,7 +21,11 @@ type RuleCache struct {
 	Fingerprint string
 }
 
-const cacheVersion = "1.0"
+// cacheVersion must change whenever parsing semantics or the serialized rule
+// shape change, so caches built by older engines are rejected and rules are
+// re-parsed from disk. 2.0: list-of-maps selections (Selection.Alternatives),
+// list conditions, strict keyword lists.
+const cacheVersion = "2.0"
 
 // SaveRulesToCache writes parsed rules to a cache file using gob encoding.
 // The fingerprint should capture relevant config that changes which rules are loaded.

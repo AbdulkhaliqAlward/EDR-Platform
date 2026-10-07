@@ -221,9 +221,11 @@ func (ag *AlertGenerator) techniqueToTactic(techniqueID string) string {
 	return ""
 }
 
-// generateAlertID generates a unique alert ID using UUID v4.
+// generateAlertID generates a unique alert ID (plain UUID v4). It is the
+// alert's canonical identity: it becomes the sigma_alerts primary key, so
+// Kafka, correlation edges, playbooks and the dashboard all share one ID.
 func (ag *AlertGenerator) generateAlertID() string {
-	return "alert-" + uuid.New().String()
+	return uuid.New().String()
 }
 
 // initializeMitreMappings initializes MITRE ATT&CK Enterprise v14 technique → tactic mappings.

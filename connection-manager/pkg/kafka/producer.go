@@ -3,6 +3,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -172,6 +173,71 @@ func (p *EventProducer) SendEventBatch(ctx context.Context, key string, payload 
 	}).Debug("Event batch sent to Kafka")
 
 	return nil
+}
+
+// EventMessage is one event to publish with SendEvents.
+type EventMessage struct {
+	Value   []byte
+	Headers map[string]string
+}
+
+// SendEvents publishes several events (same partition key) in a single
+// WriteMessages call — one round trip instead of one per event. It returns
+// the indexes of the messages that were NOT written (nil when all were), so
+// the caller can persist exactly those elsewhere without duplicating the
+// ones Kafka already accepted. Failed events are not sent to the DLQ here;
+// the caller owns their durability.
+func (p *EventProducer) SendEvents(ctx context.Context, key string, events []EventMessage) ([]int, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	start := time.Now()
+	now := time.Now()
+	msgs := make([]kafka.Message, len(events))
+	for i, ev := range events {
+		hdrs := make([]kafka.Header, 0, len(ev.Headers))
+		for k, v := range ev.Headers {
+			hdrs = append(hdrs, kafka.Header{Key: k, Value: []byte(v)})
+		}
+		msgs[i] = kafka.Message{Key: []byte(key), Value: ev.Value, Headers: hdrs, Time: now}
+	}
+
+	err := p.writer.WriteMessages(ctx, msgs...)
+	duration := time.Since(start)
+	if err == nil {
+		if p.metrics != nil {
+			p.metrics.EventBatchesReceived.Inc()
+			p.metrics.RequestDuration.WithLabelValues("kafka_produce").Observe(duration.Seconds())
+		}
+		return nil, nil
+	}
+
+	if p.metrics != nil {
+		p.metrics.ErrorsTotal.WithLabelValues("kafka_write").Inc()
+	}
+	var failed []int
+	var werrs kafka.WriteErrors
+	if errors.As(err, &werrs) && len(werrs) == len(msgs) {
+		for i, e := range werrs {
+			if e != nil {
+				failed = append(failed, i)
+			}
+		}
+	} else {
+		// Not a per-message error: treat every message as unwritten.
+		failed = make([]int, len(msgs))
+		for i := range msgs {
+			failed[i] = i
+		}
+	}
+	p.logger.WithFields(logrus.Fields{
+		"key":      key,
+		"events":   len(msgs),
+		"failed":   len(failed),
+		"duration": duration,
+		"error":    err.Error(),
+	}).Error("Failed to publish events to Kafka")
+	return failed, fmt.Errorf("kafka write failed for %d/%d events: %w", len(failed), len(msgs), err)
 }
 
 // sendToDLQ sends failed messages to the Dead Letter Queue.

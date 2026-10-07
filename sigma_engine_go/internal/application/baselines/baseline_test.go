@@ -22,38 +22,54 @@ import (
 // ShouldRecord tests
 // =============================================================================
 
-func TestShouldRecord_ProcessCreateEventID1(t *testing.T) {
-	assert.True(t, baselines.ShouldRecord(map[string]interface{}{
-		"event_id": 1,
-		"name":     "powershell.exe",
+// agentProcessEvent mirrors the Windows agent's wire format: a record UUID in
+// the top-level event_id and the collector action under data.
+func agentProcessEvent(action string) map[string]interface{} {
+	return map[string]interface{}{
+		"event_id":   "6f1c2d3e-0000-4000-8000-000000000001",
+		"event_type": "process",
+		"data":       map[string]interface{}{"name": "powershell.exe", "action": action},
+	}
+}
+
+func TestShouldRecord_AgentProcessCreation(t *testing.T) {
+	// Regression: the UUID event_id used to make this return false, so UEBA
+	// never trained on agent telemetry.
+	assert.True(t, baselines.ShouldRecord(agentProcessEvent("process_creation")))
+}
+
+func TestShouldRecord_AgentLegacyNoAction(t *testing.T) {
+	assert.True(t, baselines.ShouldRecord(agentProcessEvent("")))
+}
+
+func TestShouldRecord_AgentTerminationAndSnapshot_False(t *testing.T) {
+	assert.False(t, baselines.ShouldRecord(agentProcessEvent("process_termination")))
+	assert.False(t, baselines.ShouldRecord(agentProcessEvent("snapshot")))
+}
+
+func TestShouldRecord_AgentNonProcess_False(t *testing.T) {
+	assert.False(t, baselines.ShouldRecord(map[string]interface{}{
+		"event_id":   "6f1c2d3e-0000-4000-8000-000000000002",
+		"event_type": "dns",
+		"data":       map[string]interface{}{"name": "example.com"},
 	}))
 }
 
-func TestShouldRecord_WindowsEventID4688(t *testing.T) {
-	assert.True(t, baselines.ShouldRecord(map[string]interface{}{
-		"event_id": float64(4688),
-		"name":     "cmd.exe",
-	}))
+func TestShouldRecord_EventLogCodes(t *testing.T) {
+	assert.True(t, baselines.ShouldRecord(map[string]interface{}{"EventID": 1}))
+	assert.True(t, baselines.ShouldRecord(map[string]interface{}{"EventID": float64(4688)}))
+	assert.True(t, baselines.ShouldRecord(map[string]interface{}{"EventID": "4688"}))
+	assert.True(t, baselines.ShouldRecord(map[string]interface{}{"data": map[string]interface{}{"event_id": "1"}}))
 }
 
-func TestShouldRecord_StringEventID(t *testing.T) {
-	assert.True(t, baselines.ShouldRecord(map[string]interface{}{
-		"event_id": "1",
-	}))
-}
-
-func TestShouldRecord_FallbackNameField(t *testing.T) {
-	// No event_id but has a process name → treated as process event
-	assert.True(t, baselines.ShouldRecord(map[string]interface{}{
-		"name": "svchost.exe",
-	}))
+func TestShouldRecord_NameOnly_False(t *testing.T) {
+	// A bare "name" is not evidence of a process start (DNS/pipe events have it too).
+	assert.False(t, baselines.ShouldRecord(map[string]interface{}{"name": "svchost.exe"}))
 }
 
 func TestShouldRecord_NetworkEvent_False(t *testing.T) {
-	// event_id 3 = Sysmon NetworkConnect — should NOT be recorded
-	assert.False(t, baselines.ShouldRecord(map[string]interface{}{
-		"event_id": 3,
-	}))
+	// EventID 3 = Sysmon NetworkConnect — should NOT be recorded
+	assert.False(t, baselines.ShouldRecord(map[string]interface{}{"EventID": 3}))
 }
 
 func TestShouldRecord_NilData_False(t *testing.T) {

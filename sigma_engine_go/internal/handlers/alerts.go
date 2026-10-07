@@ -382,17 +382,23 @@ func generateHumanSummary(alert *database.Alert) string {
 	// Extract from context data
 	if cd := alert.ContextData; cd != nil {
 		if data, ok := cd["data"].(map[string]interface{}); ok {
-			if v, ok := data["process_name"].(string); ok {
-				processName = v
-			}
 			if v, ok := data["command_line"].(string); ok {
 				cmdLine = v
 			}
 			if v, ok := data["user_name"].(string); ok {
 				userName = v
 			}
-			if v, ok := data["name"].(string); ok && targetFile == "" {
-				targetFile = v
+			// The agent's "name" means different things per event type: the
+			// process image name on process events, the file name on file
+			// events (where the acting process is in process_name).
+			name, _ := data["name"].(string)
+			if v, ok := data["process_name"].(string); ok && v != "" {
+				processName = v
+				targetFile = name
+			} else if cd["event_type"] == "file" {
+				targetFile = name
+			} else {
+				processName = name
 			}
 		}
 		if v, ok := cd["user_name"].(string); ok && userName == "" {

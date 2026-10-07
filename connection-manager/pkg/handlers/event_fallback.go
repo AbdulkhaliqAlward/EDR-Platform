@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -195,6 +196,14 @@ func (s *EventFallbackStore) persistItem(item fallbackItem) {
 }
 
 // persistItemSync performs a bounded synchronous fallback write.
+// StoreSync durably writes a batch to the fallback table before returning.
+// Ingestion uses it so a batch is acknowledged to the agent only after its
+// data is committed somewhere (Kafka or this table).
+func (s *EventFallbackStore) StoreSync(ctx context.Context, batchID, agentID string, payload []byte, metadata map[string]string) error {
+	s.syncWriteUsed.Add(1)
+	return s.persistItemSync(ctx, fallbackItem{batchID: batchID, agentID: agentID, payload: payload, metadata: metadata})
+}
+
 func (s *EventFallbackStore) persistItemSync(ctx context.Context, item fallbackItem) error {
 	metadataJSON, err := json.Marshal(item.metadata)
 	if err != nil {
@@ -329,14 +338,24 @@ func (w *FallbackReplayWorker) Start(ctx context.Context) {
 	}
 }
 
-// replayBatch reads up to batchSz unreplayed rows, publishes each to Kafka,
-// and marks successfully published rows as replayed.
+// replayBatch claims up to batchSz unreplayed rows, re-publishes them to
+// Kafka and marks them replayed — all inside one transaction, so the
+// FOR UPDATE SKIP LOCKED row locks are held until the rows are marked and
+// two replicas can never replay the same batch. (Previously the SELECT ran
+// in autocommit mode, so its locks were released immediately.)
 func (w *FallbackReplayWorker) replayBatch(ctx context.Context) {
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	txCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	rows, err := w.pool.Query(queryCtx, `
-		SELECT id, batch_id, agent_id, payload, metadata
+	tx, err := w.pool.Begin(txCtx)
+	if err != nil {
+		w.logger.WithError(err).Warn("Fallback replay: begin transaction failed")
+		return
+	}
+	defer tx.Rollback(context.Background()) //nolint:errcheck // no-op after commit
+
+	rows, err := tx.Query(txCtx, `
+		SELECT id, batch_id, agent_id, payload
 		FROM event_batches_fallback
 		WHERE replayed = FALSE
 		ORDER BY created_at ASC
@@ -347,76 +366,69 @@ func (w *FallbackReplayWorker) replayBatch(ctx context.Context) {
 		w.logger.WithError(err).Warn("Fallback replay: failed to query unreplayed batches")
 		return
 	}
-	defer rows.Close()
-
-	replayed := 0
+	type row struct {
+		id      int64
+		batchID string
+		agentID string
+		payload []byte
+	}
+	var claimed []row
 	for rows.Next() {
-		var (
-			id       int64
-			batchID  string
-			agentID  string
-			payload  []byte
-			metadata json.RawMessage
-		)
-		if err := rows.Scan(&id, &batchID, &agentID, &payload, &metadata); err != nil {
+		var r row
+		if err := rows.Scan(&r.id, &r.batchID, &r.agentID, &r.payload); err != nil {
 			w.logger.WithError(err).Warn("Fallback replay: row scan error")
 			continue
 		}
+		claimed = append(claimed, r)
+	}
+	rows.Close()
+	if len(claimed) == 0 {
+		return
+	}
 
-		// Parse the stored payload as individual events (same as processBatch)
+	replayed := 0
+	for _, r := range claimed {
+		// Stored payloads are JSON arrays of already-normalised events (the
+		// same objects the primary path publishes).
 		var events []json.RawMessage
-		if err := json.Unmarshal(payload, &events); err != nil {
-			// Payload isn't a JSON array — publish as-is
-			headers := map[string]string{
-				"batch_id":   batchID,
-				"agent_id":   agentID,
-				"replay":     "true",
-				"replay_raw": "true",
-			}
-			if pubErr := w.producer.SendEventBatch(ctx, agentID, payload, headers); pubErr != nil {
-				w.logger.WithError(pubErr).WithField("batch_id", batchID).Warn("Fallback replay: Kafka publish failed (raw)")
-				continue
-			}
-		} else {
-			// Publish each event individually (matches primary path)
-			allOK := true
+		if err := json.Unmarshal(r.payload, &events); err != nil {
+			// A raw (e.g. undecompressable) batch cannot be turned into
+			// events; publishing it would only poison the topic. Keep it in
+			// the table for forensic recovery and stop retrying it.
+			w.logger.WithError(err).WithField("batch_id", r.batchID).
+				Error("Fallback replay: payload is not a JSON event array — retained in event_batches_fallback, not re-published")
+		} else if len(events) > 0 {
+			msgs := make([]kafka.EventMessage, len(events))
 			for i, evtRaw := range events {
-				headers := map[string]string{
-					"batch_id":    batchID,
-					"agent_id":    agentID,
-					"event_index": fmt.Sprintf("%d", i),
-					"event_count": fmt.Sprintf("%d", len(events)),
+				msgs[i] = kafka.EventMessage{Value: evtRaw, Headers: map[string]string{
+					"batch_id":    r.batchID,
+					"agent_id":    r.agentID,
+					"event_index": strconv.Itoa(i),
+					"event_count": strconv.Itoa(len(events)),
 					"replay":      "true",
-				}
-				if pubErr := w.producer.SendEventBatch(ctx, agentID, evtRaw, headers); pubErr != nil {
-					w.logger.WithError(pubErr).WithFields(logrus.Fields{
-						"batch_id":    batchID,
-						"event_index": i,
-					}).Warn("Fallback replay: Kafka publish failed")
-					allOK = false
-					break
-				}
+				}}
 			}
-			if !allOK {
-				continue // Don't mark as replayed — retry next cycle
+			if _, pubErr := w.producer.SendEvents(txCtx, r.agentID, msgs); pubErr != nil {
+				w.logger.WithError(pubErr).WithField("batch_id", r.batchID).Warn("Fallback replay: Kafka publish failed — will retry")
+				continue // stays unreplayed; retried next cycle (at-least-once)
 			}
 		}
 
-		// Mark replayed
-		markCtx, markCancel := context.WithTimeout(ctx, 3*time.Second)
-		_, err := w.pool.Exec(markCtx, `
+		if _, err := tx.Exec(txCtx, `
 			UPDATE event_batches_fallback
 			SET replayed = TRUE, replayed_at = $1
 			WHERE id = $2
-		`, time.Now().UTC(), id)
-		markCancel()
-		if err != nil {
-			w.logger.WithError(err).WithField("batch_id", batchID).Warn("Fallback replay: failed to mark as replayed")
+		`, time.Now().UTC(), r.id); err != nil {
+			w.logger.WithError(err).WithField("batch_id", r.batchID).Warn("Fallback replay: failed to mark as replayed")
 			continue
 		}
 		replayed++
 	}
 
+	if err := tx.Commit(txCtx); err != nil {
+		w.logger.WithError(err).Warn("Fallback replay: commit failed — batches will be replayed again")
+		return
+	}
 	if replayed > 0 {
 		w.logger.Infof("Fallback replay: successfully re-published %d batch(es) to Kafka", replayed)
 	}

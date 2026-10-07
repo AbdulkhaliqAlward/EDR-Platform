@@ -11,7 +11,11 @@ const (
 	EventCategoryFileEvent          EventCategory = "file_event"
 	EventCategoryFileAccess         EventCategory = "file_access"
 	EventCategoryFileDelete         EventCategory = "file_delete"
+	EventCategoryFileRename         EventCategory = "file_rename"
+	EventCategoryFileChange         EventCategory = "file_change"
 	EventCategoryRegistryEvent      EventCategory = "registry_event"
+	EventCategoryRegistryAdd        EventCategory = "registry_add"
+	EventCategoryRegistryDelete     EventCategory = "registry_delete"
 	EventCategoryRegistrySet        EventCategory = "registry_set"
 	EventCategoryRegistryRename     EventCategory = "registry_rename"
 	EventCategoryDriverLoad         EventCategory = "driver_load"
@@ -31,6 +35,9 @@ const (
 	EventCategoryUserManagement     EventCategory = "user_management"
 	EventCategoryGroupManagement    EventCategory = "group_management"
 	EventCategoryPowerShell         EventCategory = "powershell"
+
+	// EventCategoryClipboard is agent clipboard telemetry (no SigmaHQ category).
+	EventCategoryClipboard EventCategory = "clipboard"
 )
 
 // EventIDToCategory maps Windows EventIDs to event categories.
@@ -90,5 +97,20 @@ func InferCategoryFromEventID(eventID int) EventCategory {
 		return cat
 	}
 	return EventCategoryUnknown
+}
+
+// ExpandCategories returns the Sigma logsource categories an event of the
+// given primary category must be evaluated against: the primary category
+// itself plus its generic parent. In Sigma, registry_event is the umbrella
+// category for every registry operation, so registry_add / registry_delete /
+// registry_set / registry_rename events must also reach registry_event rules.
+func ExpandCategories(primary EventCategory) []EventCategory {
+	switch primary {
+	case EventCategoryRegistryAdd, EventCategoryRegistryDelete,
+		EventCategoryRegistrySet, EventCategoryRegistryRename:
+		return []EventCategory{primary, EventCategoryRegistryEvent}
+	default:
+		return []EventCategory{primary}
+	}
 }
 
