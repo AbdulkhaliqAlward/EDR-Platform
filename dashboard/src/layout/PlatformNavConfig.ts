@@ -67,6 +67,7 @@ export const MANAGED_SECURITY_TABS: ContextTab[] = [
 export const ITSM_TABS: ContextTab[] = [
     { to: '/itsm/playbooks', label: 'Response Playbooks' },
     { to: '/itsm/automations', label: 'Response Automations' },
+    { to: '/itsm/scripts', label: 'Script Library' },
 ];
 
 export const SYSTEM_CONTEXT_TABS: ContextTab[] = [

@@ -45,6 +45,7 @@ const ManagedSecurityOverviewPage = lazy(() => import('./pages/parity/paritySect
 const ManagedSecurityIncidentsPage = lazy(() => import('./pages/parity/paritySectionPages').then((m) => ({ default: m.ManagedSecurityIncidentsPage })));
 const ItsmPlaybooksPage = lazy(() => import('./pages/automation/PlaybooksPage').then((m) => ({ default: m.PlaybooksPage })));
 const ItsmAutomationsPage = lazy(() => import('./pages/automation/AutomationRulesPage').then((m) => ({ default: m.AutomationRulesPage })));
+const ItsmScriptLibraryPage = lazy(() => import('./pages/automation/ScriptLibraryPage').then((m) => ({ default: m.ScriptLibraryPage })));
 const ManagementNetworkPage = lazy(() => import('./pages/parity/paritySectionPages').then((m) => ({ default: m.ManagementNetworkPage })));
 const ManagementStaffPage = lazy(() => import('./pages/parity/paritySectionPages').then((m) => ({ default: m.ManagementStaffPage })));
 const ManagementAccountPage = lazy(() => import('./pages/parity/paritySectionPages').then((m) => ({ default: m.ManagementAccountPage })));
@@ -350,6 +351,7 @@ function AppRoutes() {
             <Route path="/itsm/tickets" element={<Navigate to="/itsm/playbooks" replace />} />
             <Route path="/itsm/playbooks" element={<ProtectedRoute><ItsmPlaybooksPage /></ProtectedRoute>} />
             <Route path="/itsm/automations" element={<ProtectedRoute><ItsmAutomationsPage /></ProtectedRoute>} />
+            <Route path="/itsm/scripts" element={<ProtectedRoute><ItsmScriptLibraryPage /></ProtectedRoute>} />
             <Route path="/itsm/integrations" element={<Navigate to="/itsm/playbooks" replace />} />
 
             {/* SOC extensions */}

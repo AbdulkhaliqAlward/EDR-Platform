@@ -14,6 +14,7 @@ import {
     alertsApi,
     authApi,
     eventsApi,
+    responseScriptsApi,
     type Agent,
     type Alert,
     type CmEventSummary,
@@ -62,7 +63,13 @@ function normalizeTab(raw: string | null): DetailTab | null {
     return null;
 }
 
-const RESPONSE_OPTIONS: { value: CommandType; label: string; destructive?: boolean }[] = [
+/**
+ * A response action in the UI: a command type, or 'run_script' (a stored script
+ * from the response script library, sent as run_cmd with script_id).
+ */
+type ResponseAction = CommandType | 'run_script';
+
+const RESPONSE_OPTIONS: { value: ResponseAction; label: string; destructive?: boolean }[] = [
     { value: 'kill_process', label: 'Kill / terminate process' },
     { value: 'quarantine_file', label: 'Quarantine file' },
     { value: 'isolate_network', label: 'Isolate network' },
@@ -72,6 +79,7 @@ const RESPONSE_OPTIONS: { value: CommandType; label: string; destructive?: boole
     { value: 'block_domain', label: 'Block domain' },
     { value: 'unblock_domain', label: 'Unblock domain' },
     { value: 'run_cmd', label: 'Run CMD (whitelisted)' },
+    { value: 'run_script', label: 'Run library script' },
     { value: 'custom', label: 'Custom command (admin)' },
     { value: 'collect_logs', label: 'Collect logs' },
     { value: 'collect_forensics', label: 'Collect forensics' },
@@ -251,7 +259,7 @@ export default function EndpointDetail() {
         [setSearchParams]
     );
 
-    const [cmdType, setCmdType] = useState<CommandType>('kill_process');
+    const [cmdType, setCmdType] = useState<ResponseAction>('kill_process');
     const [fields, setFields] = useState<Record<string, string>>({
         kill_tree: 'false',
         timeout: '300',
@@ -382,6 +390,15 @@ export default function EndpointDetail() {
     });
 
     const submitCommand = () => {
+        if (cmdType === 'run_script') {
+            // The server loads the stored command line; command_type/parameters are ignored.
+            execMutation.mutate({
+                command_type: 'run_cmd',
+                parameters: {},
+                script_id: (fields.script_id || '').trim(),
+            });
+            return;
+        }
         const opt = RESPONSE_OPTIONS.find((o) => o.value === cmdType);
         if (opt?.destructive) {
             setPendingDestructive(cmdType as 'restart_machine' | 'shutdown_machine' | 'uninstall_agent');
@@ -2785,8 +2802,8 @@ function ResponseTab({
     agentId: string;
     cmds: CommandListItem[];
     cmdsLoading: boolean;
-    cmdType: CommandType;
-    setCmdType: (c: CommandType) => void;
+    cmdType: ResponseAction;
+    setCmdType: (c: ResponseAction) => void;
     fields: Record<string, string>;
     setFields: React.Dispatch<React.SetStateAction<Record<string, string>>>;
     canExec: boolean;
@@ -2802,6 +2819,7 @@ function ResponseTab({
         staleTime: 5 * 60 * 1000,
     });
     const customEnabled = !!cmdCaps?.custom_commands_enabled;
+    const scriptsAvailable = !!cmdCaps?.script_library_available;
 
     const uniqueOptions = useMemo(() => {
         const seen = new Set<string>();
@@ -2810,10 +2828,21 @@ function ResponseTab({
             // The "custom" (admin, free-text) command appears only when the
             // server master switch is on AND the user is an admin.
             if (o.value === 'custom' && !customEnabled) return false;
+            // The script library needs server support (older servers omit it).
+            if (o.value === 'run_script' && !scriptsAvailable) return false;
             seen.add(o.value);
             return true;
         });
-    }, [customEnabled]);
+    }, [customEnabled, scriptsAvailable]);
+
+    const { data: libraryScripts = [], isLoading: scriptsLoading } = useQuery({
+        queryKey: ['response-scripts'],
+        queryFn: () => responseScriptsApi.list(),
+        enabled: cmdType === 'run_script' && scriptsAvailable,
+        staleTime: 60 * 1000,
+    });
+    const enabledScripts = useMemo(() => libraryScripts.filter((s) => s.enabled), [libraryScripts]);
+    const selectedScript = enabledScripts.find((s) => s.id === fields.script_id);
 
     const [cmdPage, setCmdPage] = useState(1);
     const CMD_PAGE_SIZE = 10;
@@ -2909,6 +2938,10 @@ function ResponseTab({
         }
         if (cmdType === 'run_cmd' && !fields.cmd?.trim()) {
             showToast('Please select a command to run.', 'error');
+            return;
+        }
+        if (cmdType === 'run_script' && !selectedScript) {
+            showToast('Please select a script from the library.', 'error');
             return;
         }
         if (cmdType === 'custom') {
@@ -3042,10 +3075,12 @@ function ResponseTab({
                             <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-3">Action Parameters</label>
 
-                                <div>
-                                    <label className="block text-[10px] text-slate-500 uppercase mb-1">Timeout (seconds)</label>
-                                    <input className="input w-full" type="number" min={0} max={3600} value={fields.timeout ?? '300'} onChange={(e) => patch('timeout', e.target.value)} disabled={!canExec} />
-                                </div>
+                                {cmdType !== 'run_script' && (
+                                    <div>
+                                        <label className="block text-[10px] text-slate-500 uppercase mb-1">Timeout (seconds)</label>
+                                        <input className="input w-full" type="number" min={0} max={3600} value={fields.timeout ?? '300'} onChange={(e) => patch('timeout', e.target.value)} disabled={!canExec} />
+                                    </div>
+                                )}
 
                                 {(cmdType === 'kill_process' || cmdType === 'terminate_process') && (
                                     <div className="mt-3 space-y-3 p-3 bg-slate-100 dark:bg-slate-800/40 rounded-xl">
@@ -3123,6 +3158,43 @@ function ResponseTab({
                                                 <option key={cmd.value} value={cmd.value}>{cmd.label}</option>
                                             ))}
                                         </select>
+                                    </div>
+                                )}
+
+                                {cmdType === 'run_script' && (
+                                    <div className="mt-3 space-y-3">
+                                        <label className="text-[10px] text-slate-500 uppercase">Library script</label>
+                                        <select
+                                            className="input w-full text-xs"
+                                            value={fields.script_id || ''}
+                                            onChange={(e) => patch('script_id', e.target.value)}
+                                            disabled={!canExec || scriptsLoading}
+                                        >
+                                            <option value="">{scriptsLoading ? 'Loading scripts…' : 'Select a script...'}</option>
+                                            {enabledScripts.map((s) => (
+                                                <option key={s.id} value={s.id}>{s.name}</option>
+                                            ))}
+                                        </select>
+                                        {!scriptsLoading && enabledScripts.length === 0 && (
+                                            <p className="text-[11px] text-slate-500">
+                                                No enabled scripts. An administrator can add them in{' '}
+                                                <Link to="/itsm/scripts" className="text-cyan-600 dark:text-cyan-400 hover:underline">Script Library</Link>.
+                                            </p>
+                                        )}
+                                        {selectedScript && (
+                                            <div className="p-3 bg-slate-100 dark:bg-slate-800/40 rounded-xl space-y-2">
+                                                {selectedScript.description && (
+                                                    <p className="text-xs text-slate-600 dark:text-slate-300">{selectedScript.description}</p>
+                                                )}
+                                                <div>
+                                                    <div className="text-[10px] text-slate-500 uppercase mb-1">Command that will run</div>
+                                                    <pre className="text-[11px] font-mono whitespace-pre-wrap break-all bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg p-2 text-slate-700 dark:text-slate-300">
+                                                        {selectedScript.cmd}
+                                                    </pre>
+                                                </div>
+                                                <div className="text-[10px] text-slate-500">Timeout {selectedScript.timeout_seconds}s · stored on the server, cannot be edited here</div>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 

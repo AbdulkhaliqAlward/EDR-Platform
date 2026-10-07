@@ -501,6 +501,43 @@ export interface CommandRequest {
     timeout_seconds?: number;
     /** Mandatory justification for a custom command (command_type 'custom'); audited. */
     reason?: string;
+    /**
+     * Run a stored script from the response script library. The server loads the
+     * command line itself and ignores command_type/parameters from the client.
+     */
+    script_id?: string;
+}
+
+/** A stored script in the dashboard-managed response script library. */
+export interface ResponseScript {
+    id: string;
+    name: string;
+    description: string;
+    cmd: string;
+    timeout_seconds: number;
+    enabled: boolean;
+    created_by: string;
+    updated_by: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface ResponseScriptInput {
+    name: string;
+    description: string;
+    cmd: string;
+    timeout_seconds: number;
+    enabled: boolean;
+}
+
+/** Which command features are enabled for the current user. */
+export interface CommandCapabilities {
+    custom_commands_enabled: boolean;
+    custom_commands_available: boolean;
+    /** Older servers omit the script library fields. */
+    script_library_available?: boolean;
+    script_library_manage?: boolean;
+    script_library_executables?: string[];
 }
 
 export interface AuditLog {
@@ -892,10 +929,8 @@ export const agentsApi = {
         return response.data;
     },
     /** Which command features are enabled for the current user (e.g. custom commands). */
-    commandCapabilities: async (): Promise<{ custom_commands_enabled: boolean; custom_commands_available: boolean }> => {
-        const response = await connectionApi.get<{ custom_commands_enabled: boolean; custom_commands_available: boolean }>(
-            '/api/v1/commands/capabilities'
-        );
+    commandCapabilities: async (): Promise<CommandCapabilities> => {
+        const response = await connectionApi.get<CommandCapabilities>('/api/v1/commands/capabilities');
         return response.data;
     },
     getCommands: async (agentId: string, params?: { limit?: number; offset?: number; status?: string }) => {
@@ -1039,6 +1074,29 @@ export interface AutomationRule {
     created_at?: string;
     updated_at?: string;
 }
+
+/**
+ * Response script library. Writes require an admin account; the out-of-band
+ * approval modal (when enabled) is handled by the connectionApi interceptor.
+ * Running a script is agentsApi.executeCommand(agentId, { script_id, ... }).
+ */
+export const responseScriptsApi = {
+    list: async (): Promise<ResponseScript[]> => {
+        const response = await connectionApi.get<{ data: ResponseScript[]; total: number }>('/api/v1/response-scripts');
+        return response.data.data || [];
+    },
+    create: async (data: ResponseScriptInput): Promise<ResponseScript> => {
+        const response = await connectionApi.post<{ data: ResponseScript }>('/api/v1/response-scripts', data);
+        return response.data.data;
+    },
+    update: async (id: string, data: ResponseScriptInput): Promise<ResponseScript> => {
+        const response = await connectionApi.put<{ data: ResponseScript }>(`/api/v1/response-scripts/${id}`, data);
+        return response.data.data;
+    },
+    delete: async (id: string): Promise<void> => {
+        await connectionApi.delete(`/api/v1/response-scripts/${id}`);
+    },
+};
 
 export const automationApi = {
     listPlaybooks: async () => {

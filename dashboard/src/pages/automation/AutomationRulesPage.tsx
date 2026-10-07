@@ -20,6 +20,56 @@ interface AutomationRule {
   triggerConditions?: any;
 }
 
+// Structured trigger conditions. This is exactly the shape evaluated by the
+// connection-manager AutomationService.evaluateAdvancedConditions; all set
+// conditions must match (AND).
+interface TriggerConditions {
+  severity?: string[];
+  rule_patterns?: string[];
+  min_risk_score?: number;
+}
+
+const SEVERITY_OPTIONS = [
+  { value: 'critical',      label: 'Critical',      cls: 'bg-rose-600 border-rose-600' },
+  { value: 'high',          label: 'High',          cls: 'bg-orange-500 border-orange-500' },
+  { value: 'medium',        label: 'Medium',        cls: 'bg-amber-500 border-amber-500' },
+  { value: 'low',           label: 'Low',           cls: 'bg-blue-500 border-blue-500' },
+  { value: 'informational', label: 'Informational', cls: 'bg-slate-500 border-slate-500' },
+];
+const SEVERITY_VALUES = new Set(SEVERITY_OPTIONS.map(s => s.value));
+
+// Returns the structured conditions, or null when the stored value is a legacy
+// free-text condition (or anything the engine would not evaluate).
+const isStringArray = (v: unknown): v is unknown[] => Array.isArray(v);
+
+const parseConditions = (raw: unknown): TriggerConditions | null => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const tc = raw as Record<string, unknown>;
+  const out: TriggerConditions = {};
+  if (isStringArray(tc.severity)) out.severity = tc.severity.filter((s): s is string => typeof s === 'string');
+  if (isStringArray(tc.rule_patterns)) out.rule_patterns = tc.rule_patterns.filter((p): p is string => typeof p === 'string' && p !== '');
+  if (typeof tc.min_risk_score === 'number' && tc.min_risk_score > 0) out.min_risk_score = tc.min_risk_score;
+  const hasAny = (out.severity?.length || 0) > 0 || (out.rule_patterns?.length || 0) > 0 || !!out.min_risk_score;
+  return hasAny ? out : null;
+};
+
+const describeConditions = (c: TriggerConditions): string => {
+  const parts: string[] = [];
+  if (c.severity?.length) parts.push(`Severity is ${c.severity.join(' or ')}`);
+  if (c.rule_patterns?.length) parts.push(`Rule name contains ${c.rule_patterns.map(p => `"${p}"`).join(' or ')}`);
+  if (c.min_risk_score) parts.push(`Risk score is at least ${c.min_risk_score}`);
+  return parts.join('  AND  ');
+};
+
+const legacyConditionText = (tc: unknown): string => {
+  if (tc && typeof tc === 'object') {
+    const cond = (tc as Record<string, unknown>).condition;
+    if (typeof cond === 'string') return cond;
+  }
+  if (typeof tc === 'string') return tc;
+  return JSON.stringify(tc);
+};
+
 interface AlertContext {
   alertId: string;
   alertDetails: {
@@ -42,7 +92,11 @@ export function AutomationRulesPage() {
   // Modal State
   const [isCreatingRule, setIsCreatingRule] = useState(false);
   const [newRuleName, setNewRuleName] = useState('');
-  const [triggerCondition, setTriggerCondition] = useState('');
+  const [condSeverities, setCondSeverities] = useState<string[]>([]);
+  const [condPatterns, setCondPatterns] = useState<string[]>([]);
+  const [patternInput, setPatternInput] = useState('');
+  const [condMinRisk, setCondMinRisk] = useState('');
+  const [editingLegacyCondition, setEditingLegacyCondition] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [playbooks, setPlaybooks] = useState<any[]>([]);
   const [selectedPlaybookId, setSelectedPlaybookId] = useState('');
@@ -151,16 +205,26 @@ export function AutomationRulesPage() {
     }
   };
 
+  const resetConditionForm = () => {
+    setCondSeverities([]);
+    setCondPatterns([]);
+    setPatternInput('');
+    setCondMinRisk('');
+    setEditingLegacyCondition(null);
+  };
+
   const openCreateModal = () => {
     setIsCreatingRule(true);
     setEditingRuleId(null);
     setAutoExecute(true);
+    resetConditionForm();
     if (alertContext?.alertDetails?.ruleName) {
       setNewRuleName(`Response Rule for: ${alertContext.alertDetails.ruleName}`);
-      setTriggerCondition(`RuleName == "${alertContext.alertDetails.ruleName}" && Severity == "${alertContext.alertDetails.severity}"`);
+      setCondPatterns([alertContext.alertDetails.ruleName]);
+      const sev = String(alertContext.alertDetails.severity || '').toLowerCase();
+      if (SEVERITY_VALUES.has(sev)) setCondSeverities([sev]);
     } else {
       setNewRuleName('');
-      setTriggerCondition('');
     }
   };
 
@@ -168,26 +232,69 @@ export function AutomationRulesPage() {
     setIsCreatingRule(true);
     setEditingRuleId(rule.id);
     setNewRuleName(rule.name);
-    // Best effort mapping of condition
-    let cond = rule.description.replace('Custom rule triggering on condition: ', '');
-    if (rule.triggerConditions && typeof rule.triggerConditions === 'string') cond = rule.triggerConditions;
-    setTriggerCondition(cond);
+    resetConditionForm();
+    const parsed = parseConditions(rule.triggerConditions);
+    if (parsed) {
+      setCondSeverities(parsed.severity || []);
+      setCondPatterns(parsed.rule_patterns || []);
+      setCondMinRisk(parsed.min_risk_score ? String(parsed.min_risk_score) : '');
+    } else if (rule.triggerConditions) {
+      setEditingLegacyCondition(legacyConditionText(rule.triggerConditions));
+    }
     setAutoExecute(rule.autoExecute);
     if (rule.playbookId) setSelectedPlaybookId(rule.playbookId);
   };
 
+  const toggleSeverity = (value: string) => {
+    setCondSeverities(prev => (prev.includes(value) ? prev.filter(s => s !== value) : [...prev, value]));
+  };
+
+  const addPattern = () => {
+    const p = patternInput.trim();
+    if (!p) return;
+    setCondPatterns(prev => (prev.some(x => x.toLowerCase() === p.toLowerCase()) ? prev : [...prev, p]));
+    setPatternInput('');
+  };
+
   const confirmCreateRule = async () => {
-    if (!newRuleName || !triggerCondition) {
-      alert("Please fill out required fields.");
+    if (!newRuleName.trim()) {
+      alert("Please enter a rule name.");
       return;
     }
+    if (!selectedPlaybookId) {
+      alert("Please select a target playbook.");
+      return;
+    }
+
+    // Include a pattern still sitting in the input box.
+    const patterns = [...condPatterns];
+    const pending = patternInput.trim();
+    if (pending && !patterns.some(x => x.toLowerCase() === pending.toLowerCase())) patterns.push(pending);
+
+    const conditions: TriggerConditions = {};
+    if (condSeverities.length > 0) conditions.severity = condSeverities;
+    if (patterns.length > 0) conditions.rule_patterns = patterns;
+    if (condMinRisk.trim() !== '') {
+      const n = Number(condMinRisk);
+      if (!Number.isInteger(n) || n < 1 || n > 100) {
+        alert("Minimum risk score must be a whole number between 1 and 100.");
+        return;
+      }
+      conditions.min_risk_score = n;
+    }
+    // An empty condition set would match every alert, so require at least one.
+    if (!conditions.severity && !conditions.rule_patterns && !conditions.min_risk_score) {
+      alert("Add at least one condition (severity, rule name, or minimum risk score).");
+      return;
+    }
+
     setIsSaving(true);
-    
+
     try {
       const payload = {
-        name: newRuleName,
-        description: `Custom rule triggering on condition: ${triggerCondition}`,
-        trigger_conditions: { condition: triggerCondition },
+        name: newRuleName.trim(),
+        description: `Triggers when: ${describeConditions(conditions)}`,
+        trigger_conditions: conditions,
         priority: 5,
         auto_execute: autoExecute,
         enabled: true,
@@ -288,6 +395,10 @@ export function AutomationRulesPage() {
           <p className="text-sm text-slate-500 mt-1">
             Rules evaluate incoming alerts and telemetry against conditions to trigger autonomous responses.
           </p>
+          <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            Automatic execution is not enabled on the server yet: rules are saved, but playbooks must currently be run from the Playbooks page.
+          </p>
         </div>
 
         {loading ? (
@@ -367,12 +478,23 @@ export function AutomationRulesPage() {
                            <Target className="w-4 h-4 text-blue-500" />
                            Trigger Condition
                         </div>
-                        <div className="pl-5 text-blue-600 dark:text-blue-400 font-semibold break-all whitespace-pre-wrap">
-                          {rule.triggerConditions.rule_name ? `RuleName == "${rule.triggerConditions.rule_name}"` : 
-                           rule.triggerConditions.condition ? rule.triggerConditions.condition : 
-                           typeof rule.triggerConditions === 'string' ? rule.triggerConditions :
-                           JSON.stringify(rule.triggerConditions)}
-                        </div>
+                        {(() => {
+                          const parsed = parseConditions(rule.triggerConditions);
+                          return parsed ? (
+                            <div className="pl-5 text-blue-600 dark:text-blue-400 font-semibold font-sans break-words">
+                              {describeConditions(parsed)}
+                            </div>
+                          ) : (
+                            <div className="pl-5">
+                              <span className="inline-block mb-1 px-1.5 py-0.5 text-[10px] font-sans font-bold uppercase tracking-wide bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded">
+                                Legacy condition — not evaluated. Click Configure to rebuild it.
+                              </span>
+                              <div className="text-slate-500 break-all whitespace-pre-wrap">
+                                {legacyConditionText(rule.triggerConditions)}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
@@ -449,19 +571,123 @@ export function AutomationRulesPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
-                  Trigger Condition (Sigma or SQL-like syntax) <span className="text-rose-500">*</span>
+                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Trigger When <span className="text-rose-500">*</span>
                 </label>
-                <textarea 
-                  value={triggerCondition}
-                  onChange={(e) => setTriggerCondition(e.target.value)}
-                  placeholder="e.g., RuleName == 'Suspicious File Write' && RiskScore > 80"
-                  className="w-full h-24 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono text-sm"
-                />
-                {alertContext?.alertDetails?.ruleName && (
+                <p className="text-xs text-slate-500 mb-3">
+                  Set one or more conditions. An alert must match <span className="font-semibold">all</span> of the conditions you set.
+                </p>
+
+                {editingLegacyCondition && (
+                  <div className="mb-3 p-3 text-xs rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-300">
+                    <div className="font-bold mb-1">This rule used a free-text condition that is not evaluated:</div>
+                    <div className="font-mono break-all">{editingLegacyCondition}</div>
+                    <div className="mt-1">Rebuild it with the options below and save.</div>
+                  </div>
+                )}
+
+                <div className="space-y-4 border border-slate-200 dark:border-slate-700 rounded-xl p-4 bg-slate-50/60 dark:bg-slate-950/40">
+                  {/* Severity */}
+                  <div>
+                    <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                      Alert severity is any of
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {SEVERITY_OPTIONS.map(opt => {
+                        const on = condSeverities.includes(opt.value);
+                        return (
+                          <button
+                            key={opt.value} type="button" onClick={() => toggleSeverity(opt.value)}
+                            className={`px-3 py-1.5 rounded-md border text-xs font-semibold transition-colors ${
+                              on ? `${opt.cls} text-white` : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-blue-400'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1">Leave all unselected to match any severity.</p>
+                  </div>
+
+                  {/* Rule name contains */}
+                  <div>
+                    <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                      Detection rule name contains any of
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={patternInput}
+                        onChange={e => setPatternInput(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addPattern(); } }}
+                        placeholder="e.g., ransomware, lsass, mimikatz"
+                        className="flex-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                      <button
+                        type="button" onClick={addPattern}
+                        className="px-3 py-2 text-sm font-medium rounded-lg border border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    {condPatterns.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {condPatterns.map(p => (
+                          <span key={p} className="flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-md bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 text-xs font-medium">
+                            {p}
+                            <button
+                              type="button" onClick={() => setCondPatterns(prev => prev.filter(x => x !== p))}
+                              className="p-0.5 rounded hover:bg-blue-200 dark:hover:bg-blue-800" title="Remove"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <p className="text-[11px] text-slate-400 mt-1">Case-insensitive; matches part of the rule name.</p>
+                  </div>
+
+                  {/* Minimum risk score */}
+                  <div>
+                    <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
+                      Risk score is at least
+                    </div>
+                    <input
+                      type="number" min={1} max={100}
+                      value={condMinRisk}
+                      onChange={e => setCondMinRisk(e.target.value)}
+                      placeholder="1–100 (optional)"
+                      className="w-40 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
+
+                  {/* Live summary */}
+                  {(() => {
+                    const preview: TriggerConditions = {};
+                    if (condSeverities.length) preview.severity = condSeverities;
+                    const pats = [...condPatterns];
+                    if (patternInput.trim() && !pats.some(x => x.toLowerCase() === patternInput.trim().toLowerCase())) pats.push(patternInput.trim());
+                    if (pats.length) preview.rule_patterns = pats;
+                    const n = Number(condMinRisk);
+                    if (condMinRisk.trim() && Number.isInteger(n) && n >= 1 && n <= 100) preview.min_risk_score = n;
+                    const text = describeConditions(preview);
+                    return (
+                      <div className="text-xs pt-3 border-t border-slate-200 dark:border-slate-700">
+                        <span className="font-semibold text-slate-600 dark:text-slate-400">Summary: </span>
+                        {text
+                          ? <span className="text-blue-600 dark:text-blue-400 font-semibold">{text}</span>
+                          : <span className="text-rose-500">No conditions set yet.</span>}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {alertContext?.alertDetails?.ruleName && !editingRuleId && (
                   <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-2 flex items-center gap-1.5 font-medium">
                     <CheckCircle className="w-3.5 h-3.5" />
-                    Condition pre-filled based on the currently active alert context.
+                    Conditions pre-filled from the currently active alert.
                   </p>
                 )}
               </div>

@@ -60,6 +60,7 @@ type Handlers struct {
 	uninstallSigner     ed25519.PrivateKey                     // optional: Ed25519 key for offline uninstall tokens (nil when unavailable)
 	uninstallTokenTTL   time.Duration                          // validity window for minted uninstall tokens
 	allowCustomCommands bool                                   // master switch for admin custom run_cmd (default false)
+	responseScriptRepo  repository.ResponseScriptRepository    // optional: dashboard-managed script library
 }
 
 // NewHandlers creates a new handlers instance.

@@ -650,6 +650,9 @@ func main() {
 		apiHandlers.SetSiemRepo(repository.NewPostgresSiemConnectorRepository(pool))
 		logger.Info("SIEM connectors API enabled (siem_connectors)")
 
+		apiHandlers.SetResponseScriptRepo(repository.NewPostgresResponseScriptRepository(pool))
+		logger.Info("Response script library API enabled (response_scripts)")
+
 		malwareHashRepo := repository.NewPostgresMalwareHashRepository(pool)
 		apiHandlers.SetMalwareHashRepo(malwareHashRepo)
 		sigSyncSvc := service.NewSignatureSyncService(malwareHashRepo, logger)

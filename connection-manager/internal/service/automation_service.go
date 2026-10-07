@@ -133,9 +133,10 @@ func (s *AutomationService) shouldExecute(rule *models.AutomationRule, alert *mo
 
 // evaluateAdvancedConditions evaluates complex trigger conditions
 func (s *AutomationService) evaluateAdvancedConditions(conditions map[string]interface{}, alert *models.Alert) bool {
-	// Check severity
+	// Check severity. JSON values decode as plain strings, so compare against
+	// string(alert.Severity) — comparing to the AlertSeverity type never matches.
 	if severities, ok := conditions["severity"].([]interface{}); ok {
-		if !contains(severities, alert.Severity) {
+		if !contains(severities, string(alert.Severity)) {
 			return false
 		}
 	}
@@ -145,12 +146,23 @@ func (s *AutomationService) evaluateAdvancedConditions(conditions map[string]int
 		ruleName := strings.ToLower(alert.RuleName)
 		matched := false
 		for _, pattern := range patterns {
-			if strings.Contains(ruleName, strings.ToLower(pattern.(string))) {
+			p, isStr := pattern.(string)
+			if !isStr || p == "" {
+				continue
+			}
+			if strings.Contains(ruleName, strings.ToLower(p)) {
 				matched = true
 				break
 			}
 		}
 		if !matched {
+			return false
+		}
+	}
+
+	// Check minimum risk score (0-100, alerts.risk_score)
+	if minRisk, ok := conditions["min_risk_score"].(float64); ok && minRisk > 0 {
+		if float64(alert.RiskScore) < minRisk {
 			return false
 		}
 	}

@@ -159,6 +159,15 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	commands.POST("/approval", handlers.IssueCommandApproval, handlers.RequirePermission("responses", "execute"))
 	commands.POST("/approval/verify", handlers.VerifyCommandApproval, handlers.RequirePermission("responses", "execute"))
 
+	// ── Response script library ──────────────────────────────────────────
+	// Running a script is POST /agents/:id/commands with script_id.
+	// Writes additionally require the admin role (enforced in-handler).
+	scripts := protected.Group("/response-scripts")
+	scripts.GET("", handlers.ListResponseScripts, handlers.RequirePermission("responses", "read"))
+	scripts.POST("", handlers.CreateResponseScript, handlers.RequirePermission("responses", "execute"))
+	scripts.PUT("/:id", handlers.UpdateResponseScript, handlers.RequirePermission("responses", "execute"))
+	scripts.DELETE("/:id", handlers.DeleteResponseScript, handlers.RequirePermission("responses", "execute"))
+
 	// ── Alert endpoints ──────────────────────────────────────────────────
 	alerts := protected.Group("/alerts")
 	alerts.GET("", handlers.ListAlerts, handlers.RequirePermission("alerts", "read"))

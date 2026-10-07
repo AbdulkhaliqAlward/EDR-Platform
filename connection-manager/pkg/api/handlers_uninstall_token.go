@@ -34,6 +34,11 @@ func (h *Handlers) GetCommandCapabilities(c echo.Context) error {
 		"custom_commands_enabled": h.allowCustomCommands && userHasRole(user, "admin"),
 		// Whether the feature is switched on at all (for an explanatory message).
 		"custom_commands_available": h.allowCustomCommands,
+		// Response script library: whether it is available, whether the caller
+		// may manage it (admin), and which executables a script may start.
+		"script_library_available":   h.responseScriptRepo != nil,
+		"script_library_manage":      h.responseScriptRepo != nil && userHasRole(user, "admin"),
+		"script_library_executables": libraryExecutableNames(),
 	})
 }
 

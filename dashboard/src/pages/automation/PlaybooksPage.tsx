@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertContextPanel } from '../../components/automation/AlertContextPanel';
 import { UserAssistant } from '../../components/automation/UserAssistant';
-import { Play, Shield, Clock, TrendingUp, AlertTriangle, Plus, Terminal, X, CheckCircle, Target, Trash2, Filter, Zap, ToggleRight } from 'lucide-react';
+import { Play, Shield, Clock, TrendingUp, AlertTriangle, Plus, Terminal, X, CheckCircle, Target, Trash2, Filter, Zap, ToggleRight, ChevronUp, ChevronDown } from 'lucide-react';
 import { automationApi, agentsApi } from '../../api/client';
 
 // Windows event log channels available for collection.
@@ -35,6 +35,42 @@ const COMMAND_PARAMS: Record<string, Array<{ key: string; label: string; placeho
   process_terminate: [{ key: 'process_name', label: 'Process Name / PID', placeholder: 'e.g., vssadmin.exe  or  PID:1234', required: true  }],
   yara_scan:         [{ key: 'file_path',    label: 'Path to Scan', placeholder: 'C:\\Windows\\Temp', required: true  }],
 };
+
+// Actions offered in the playbook builder. Every value here is handled by the
+// execution switch in confirmExecution and by mapCommandType on the server.
+const ACTION_OPTIONS: Array<{ value: string; label: string; group: string }> = [
+  { value: 'isolate_network',       label: 'Isolate host from network',   group: 'Containment' },
+  { value: 'unisolate_network',     label: 'Restore network access',      group: 'Containment' },
+  { value: 'terminate_process',     label: 'Terminate process',           group: 'Containment' },
+  { value: 'quarantine_file',       label: 'Quarantine file',             group: 'Containment' },
+  { value: 'scan_file',             label: 'Scan file / folder',          group: 'Investigation' },
+  { value: 'collect_logs',          label: 'Collect event logs',          group: 'Investigation' },
+  { value: 'collect_forensics',     label: 'Collect forensics package',   group: 'Investigation' },
+  { value: 'process_tree_snapshot', label: 'Process tree snapshot',       group: 'Investigation' },
+  { value: 'persistence_scan',      label: 'Persistence scan',            group: 'Investigation' },
+  { value: 'lsass_access_audit',    label: 'LSASS access audit',          group: 'Investigation' },
+  { value: 'network_last_seen',     label: 'Recent network connections',  group: 'Investigation' },
+  { value: 'filesystem_timeline',   label: 'Filesystem timeline',         group: 'Investigation' },
+  { value: 'memory_dump',           label: 'Memory dump',                 group: 'Investigation' },
+  { value: 'agent_integrity_check', label: 'Agent integrity check',       group: 'Validation' },
+  { value: 'update_signatures',     label: 'Update signatures',           group: 'Remediation' },
+  { value: 'run_cmd',               label: 'Run approved command',        group: 'Remediation' },
+];
+const ACTION_GROUPS = ['Containment', 'Investigation', 'Remediation', 'Validation'];
+const actionLabel = (type: string) => ACTION_OPTIONS.find(a => a.value === type)?.label || type;
+
+// Params the analyst normally supplies at run time (pre-filled from alert context).
+const RUN_TIME_PARAMS = new Set(['process_name', 'file_path']);
+// Numeric params that must be positive integers when set.
+const NUMERIC_PARAMS = new Set(['max_events', 'window_hours']);
+
+interface DraftStep {
+  key: number;
+  type: string;
+  description: string;
+  timeout: string;
+  params: Record<string, string>;
+}
 
 // Map API ResponsePlaybook to the component's Playbook interface
 interface Playbook {
@@ -91,6 +127,8 @@ export function PlaybooksPage() {
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [cmdParams, setCmdParams] = useState<Record<string, string>>({});
   const [newPlaybookCategory, setNewPlaybookCategory] = useState('investigation');
+  const [newSteps, setNewSteps] = useState<DraftStep[]>([]);
+  const stepKeyRef = useRef(0);
   const [agents, setAgents] = useState<{ id: string; hostname: string }[]>([]);
 
   useEffect(() => {
@@ -136,7 +174,9 @@ export function PlaybooksPage() {
           type: cmd.type || cmd.command_type || 'unknown',
           description: cmd.description || 'Command',
           timeout: cmd.timeout || 300,
-          params: cmd.params || {},
+          // Seeded playbooks store step params under "params"; playbooks created
+          // through the API are serialized by the server under "parameters".
+          params: cmd.params || cmd.parameters || {},
         })),
         mitreTechniques: p.mitre_techniques || [],
         enabled: p.enabled,
@@ -341,18 +381,93 @@ export function PlaybooksPage() {
     }, 3000);
   };
 
+  const openCreatePlaybook = () => {
+    setNewPlaybookName('');
+    setNewPlaybookDesc('');
+    setNewPlaybookCategory('investigation');
+    setNewSteps([]);
+    setIsCreatingPlaybook(true);
+  };
+
+  const addStep = () => {
+    stepKeyRef.current += 1;
+    setNewSteps(prev => [...prev, {
+      key: stepKeyRef.current,
+      type: 'isolate_network',
+      description: '',
+      timeout: '300',
+      params: {},
+    }]);
+  };
+
+  const updateStep = (key: number, patch: Partial<DraftStep>) => {
+    setNewSteps(prev => prev.map(s => (s.key === key ? { ...s, ...patch } : s)));
+  };
+
+  const setStepParam = (key: number, param: string, value: string) => {
+    setNewSteps(prev => prev.map(s => (s.key === key ? { ...s, params: { ...s.params, [param]: value } } : s)));
+  };
+
+  const moveStep = (index: number, delta: number) => {
+    setNewSteps(prev => {
+      const target = index + delta;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const removeStep = (key: number) => {
+    setNewSteps(prev => prev.filter(s => s.key !== key));
+  };
+
   const confirmCreatePlaybook = async () => {
-    if (!newPlaybookName || !newPlaybookDesc) {
+    if (!newPlaybookName.trim() || !newPlaybookDesc.trim()) {
       alert("Please fill out required fields.");
       return;
     }
+
+    const problems: string[] = [];
+    if (newSteps.length === 0) problems.push('Add at least one action step.');
+    newSteps.forEach((s, idx) => {
+      const label = `Step ${idx + 1} (${actionLabel(s.type)})`;
+      const t = Number(s.timeout);
+      if (!Number.isInteger(t) || t < 1 || t > 3600) problems.push(`${label}: timeout must be a whole number between 1 and 3600 seconds.`);
+      if (s.type === 'run_cmd' && !s.params.cmd?.trim()) problems.push(`${label}: command is required.`);
+      Object.entries(s.params).forEach(([k, v]) => {
+        if (NUMERIC_PARAMS.has(k) && v.trim() !== '' && !/^[1-9]\d*$/.test(v.trim())) {
+          problems.push(`${label}: ${k} must be a positive whole number.`);
+        }
+      });
+    });
+    if (problems.length > 0) {
+      alert(`Please fix the following:\n\n- ${problems.join('\n- ')}`);
+      return;
+    }
+
     setIsSavingPlaybook(true);
     try {
       const payload = {
-        name: newPlaybookName,
-        description: newPlaybookDesc,
+        name: newPlaybookName.trim(),
+        description: newPlaybookDesc.trim(),
         category: newPlaybookCategory,
-        commands: [{ type: 'isolate_network', description: 'Isolate machine from network', timeout: 300 }]
+        commands: newSteps.map(s => {
+          // Only send params that belong to this action and have a value.
+          const parameters: Record<string, string> = {};
+          (COMMAND_PARAMS[s.type] || []).forEach(pd => {
+            const v = (s.params[pd.key] || '').trim();
+            if (v) parameters[pd.key] = v;
+          });
+          return {
+            type: s.type,
+            description: s.description.trim() || actionLabel(s.type),
+            timeout: Number(s.timeout),
+            // Manual runs halt on the first failed step, so record that behavior.
+            on_failure: 'stop',
+            parameters,
+          };
+        }),
       };
 
       await automationApi.createPlaybook(payload);
@@ -360,6 +475,7 @@ export function PlaybooksPage() {
       setIsCreatingPlaybook(false);
       setNewPlaybookName('');
       setNewPlaybookDesc('');
+      setNewSteps([]);
       alert(`Playbook "${newPlaybookName}" created successfully!`);
 
       // Refresh list
@@ -415,7 +531,7 @@ export function PlaybooksPage() {
             </div>
           )}
           <button
-            onClick={() => setIsCreatingPlaybook(true)}
+            onClick={openCreatePlaybook}
             className="btn btn-primary flex items-center gap-2"
           >
             <Plus className="w-4 h-4" />
@@ -947,6 +1063,153 @@ export function PlaybooksPage() {
                   <option value="remediation">Remediation</option>
                   <option value="validation">Validation</option>
                 </select>
+              </div>
+
+              {/* Action steps */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300">
+                    Action Steps <span className="text-rose-500">*</span>
+                  </label>
+                  <span className="text-xs text-slate-500">Steps run in order; execution stops at the first failure.</span>
+                </div>
+
+                {newSteps.length === 0 && (
+                  <div className="text-sm text-slate-500 border border-dashed border-slate-300 dark:border-slate-700 rounded-lg p-4 text-center">
+                    No steps yet. Add the first action this playbook should perform.
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  {newSteps.map((step, idx) => (
+                    <div key={step.key} className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 bg-slate-50/60 dark:bg-slate-950/40">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className="flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400">
+                            {idx + 1}
+                          </span>
+                          <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{actionLabel(step.type)}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button type="button" onClick={() => moveStep(idx, -1)} disabled={idx === 0}
+                            className="p-1.5 rounded-md text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed" title="Move up">
+                            <ChevronUp className="w-4 h-4" />
+                          </button>
+                          <button type="button" onClick={() => moveStep(idx, 1)} disabled={idx === newSteps.length - 1}
+                            className="p-1.5 rounded-md text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed" title="Move down">
+                            <ChevronDown className="w-4 h-4" />
+                          </button>
+                          <button type="button" onClick={() => removeStep(step.key)}
+                            className="p-1.5 rounded-md text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title="Remove step">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="sm:col-span-2">
+                          <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Action</label>
+                          <select
+                            value={step.type}
+                            onChange={e => updateStep(step.key, { type: e.target.value, params: {} })}
+                            className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                          >
+                            {ACTION_GROUPS.map(group => (
+                              <optgroup key={group} label={group}>
+                                {ACTION_OPTIONS.filter(a => a.group === group).map(a => (
+                                  <option key={a.value} value={a.value}>{a.label}</option>
+                                ))}
+                              </optgroup>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Timeout (seconds)</label>
+                          <input
+                            type="number" min={1} max={3600}
+                            value={step.timeout}
+                            onChange={e => updateStep(step.key, { timeout: e.target.value })}
+                            className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Action-specific parameters */}
+                      {(COMMAND_PARAMS[step.type] || []).map(pd => {
+                        if (pd.type === 'checklist') {
+                          const selected = new Set((step.params[pd.key] || '').split(',').map(v => v.trim()).filter(Boolean));
+                          const toggle = (val: string) => {
+                            const next = new Set(selected);
+                            if (next.has(val)) next.delete(val); else next.add(val);
+                            setStepParam(step.key, pd.key, [...next].join(','));
+                          };
+                          return (
+                            <div key={pd.key} className="mt-3">
+                              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                                {pd.label} <span className="font-normal text-slate-400">(none selected = System, Security)</span>
+                              </label>
+                              <div className="flex flex-wrap gap-1.5">
+                                {LOG_TYPE_OPTIONS.map(opt => (
+                                  <button
+                                    key={opt.value} type="button" onClick={() => toggle(opt.value)} title={opt.desc}
+                                    className={`px-2.5 py-1 rounded-md border text-xs font-medium transition-colors ${
+                                      selected.has(opt.value)
+                                        ? 'bg-indigo-600 border-indigo-600 text-white'
+                                        : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-indigo-400'
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        }
+                        const isRunTime = RUN_TIME_PARAMS.has(pd.key);
+                        const isRequired = step.type === 'run_cmd' && pd.key === 'cmd';
+                        return (
+                          <div key={pd.key} className="mt-3">
+                            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                              {pd.label}
+                              {isRequired && <span className="text-rose-500 ml-1">*</span>}
+                              {isRunTime && <span className="font-normal text-slate-400 ml-1">(optional — can be filled from the alert at run time)</span>}
+                            </label>
+                            <input
+                              type="text"
+                              value={step.params[pd.key] || ''}
+                              onChange={e => setStepParam(step.key, pd.key, e.target.value)}
+                              placeholder={pd.placeholder}
+                              className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                            />
+                            {step.type === 'run_cmd' && pd.key === 'cmd' && (
+                              <p className="text-xs text-slate-500 mt-1">Only commands on the agent's approved playbook list will run.</p>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      <div className="mt-3">
+                        <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Description (optional)</label>
+                        <input
+                          type="text"
+                          value={step.description}
+                          onChange={e => updateStep(step.key, { description: e.target.value })}
+                          placeholder={actionLabel(step.type)}
+                          className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={addStep}
+                  className="mt-3 w-full px-4 py-2.5 border border-dashed border-indigo-300 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 font-medium flex items-center justify-center gap-2 transition-colors text-sm"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Step
+                </button>
               </div>
             </div>
 

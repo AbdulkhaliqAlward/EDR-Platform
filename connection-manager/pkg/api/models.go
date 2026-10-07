@@ -227,6 +227,11 @@ type CommandRequest struct {
 	// Reason is a mandatory human justification for a custom command
 	// (command_type "custom"). Recorded in the audit log. Ignored for other types.
 	Reason string `json:"reason,omitempty"`
+
+	// ScriptID runs a stored script from the response script library. When set,
+	// the server loads the command line itself and ignores command_type and
+	// parameters from the client; it is dispatched as run_cmd at the library tier.
+	ScriptID string `json:"script_id,omitempty"`
 }
 
 // CommandResponse for command execution.

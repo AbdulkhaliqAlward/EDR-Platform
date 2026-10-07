@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -547,6 +548,22 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 		return nil // gate wrote the 403 — stop here
 	}
 
+	// ── Response script library ───────────────────────────────────────────────
+	// A script run uses ONLY the server-stored command line: client-supplied
+	// command_type and parameters are discarded.
+	var runScript *repository.ResponseScript
+	if strings.TrimSpace(req.ScriptID) != "" {
+		script, status, code, msg := h.loadRunnableScript(c.Request().Context(), req.ScriptID)
+		if script == nil {
+			return errorResponse(c, status, code, msg)
+		}
+		runScript = script
+		req.CommandType = "run_cmd"
+		req.Parameters = map[string]string{"cmd": script.Cmd}
+		req.Timeout = script.TimeoutSeconds
+		req.TimeoutSeconds = 0
+	}
+
 	// Reject unknown types here (API allowlist). Agent still enforces its own rules
 	// (e.g. run_cmd executable whitelist) after delivery.
 	if mapCommandType(req.CommandType) == edrv1.CommandType_COMMAND_TYPE_UNSPECIFIED {
@@ -591,6 +608,12 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 		req.Parameters["authz_tier"] = "custom"
 		h.logger.Warnf("[C2] CUSTOM command authorized by admin %q on agent %s: %q (reason: %s)",
 			user.Username, agentID, req.Parameters["cmd"], req.Reason)
+	}
+
+	// A stored library script runs at the library tier (set server-side only).
+	if runScript != nil {
+		req.Parameters["authz_tier"] = "library"
+		req.Parameters["from_playbook"] = "true" // legacy marker for agents built before authz_tier
 	}
 
 	// Validate registry is available
@@ -667,6 +690,10 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 			if len(user.Roles) > 0 {
 				meta["issued_by_role"] = user.Roles[0]
 			}
+		}
+		if runScript != nil {
+			meta["script_id"] = runScript.ID.String()
+			meta["script_name"] = runScript.Name
 		}
 		dbCmd := &models.Command{
 			ID:             commandID,
@@ -829,6 +856,10 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 		details := "agent=" + agentID.String() + " type=" + req.CommandType
 		if req.CommandType == "custom" {
 			details += " cmd=" + req.Parameters["cmd"] + " reason=" + req.Reason
+		}
+		if runScript != nil {
+			details += " script_id=" + runScript.ID.String() + " script=" + strconv.Quote(runScript.Name) +
+				" cmd=" + strconv.Quote(runScript.Cmd)
 		}
 		auditEntry := models.NewAuditLog(userID, username, auditAction, "command", commandID).
 			WithContext(ip, ua).
