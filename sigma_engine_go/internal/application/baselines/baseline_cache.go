@@ -8,7 +8,7 @@
 //	fetch the baseline for a (agent, process, hour) tuple.  At typical SOC
 //	event rates this would add 2–5 ms per alert.
 //
-//	BaselineCache uses a simple TTL map: entries are cached for 30 minutes,
+//	BaselineCache uses a simple TTL map: entries are cached for 10 minutes,
 //	which is long enough to be highly effective (hot processes repeat rapidly)
 //	while staying fresh enough that a machine learning a new process pattern
 //	quickly appears in the scorer without a service restart.
@@ -16,14 +16,15 @@ package baselines
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
 	// defaultCacheTTL is how long a baseline entry is held in memory.
-	// 30 minutes balances freshness vs DB load.
-	defaultCacheTTL = 30 * time.Minute
+	// 10 minutes balances freshness vs DB load.
+	defaultCacheTTL = 10 * time.Minute
 
 	// defaultCleanupInterval controls how often expired entries are evicted.
 	defaultCleanupInterval = 5 * time.Minute
@@ -39,7 +40,8 @@ const (
 type BaselineProvider interface {
 	// Lookup returns the baseline for the given (agentID, processName, hourOfDay).
 	// Returns nil, nil if no baseline is found (process not yet profiled).
-	Lookup(ctx context.Context, agentID, processName string, hourOfDay int) (*ProcessBaseline, error)
+	// The hour-of-day and the history cutoff are taken from `at` (event time).
+	Lookup(ctx context.Context, agentID, processName string, at time.Time) (*ProcessBaseline, error)
 }
 
 // =============================================================================
@@ -57,10 +59,13 @@ type BaselineCache struct {
 	ttl     time.Duration
 	mu      sync.RWMutex
 	entries map[string]*cacheEntry
+	stop    chan struct{}
+	done    chan struct{}
+	once    sync.Once
 }
 
 // NewBaselineCache creates a new read cache around the given repository.
-// ttl=0 uses the default (30 minutes).
+// ttl=0 uses the default (10 minutes).
 func NewBaselineCache(repo BaselineRepository, ttl time.Duration) *BaselineCache {
 	if ttl <= 0 {
 		ttl = defaultCacheTTL
@@ -69,38 +74,48 @@ func NewBaselineCache(repo BaselineRepository, ttl time.Duration) *BaselineCache
 		repo:    repo,
 		ttl:     ttl,
 		entries: make(map[string]*cacheEntry),
+		stop:    make(chan struct{}), done: make(chan struct{}),
 	}
 	go c.cleanupLoop()
 	return c
 }
 
-// cacheKey returns a compact string key for the cache map.
-func cacheKey(agentID, processName string, hourOfDay int) string {
-	return agentID + "|" + processName + "|" + string(rune('0'+hourOfDay/10)) + string(rune('0'+hourOfDay%10))
-}
-
 // Lookup returns the cached baseline, fetching from DB if not cached.
-func (c *BaselineCache) Lookup(ctx context.Context, agentID, processName string, hourOfDay int) (*ProcessBaseline, error) {
-	key := cacheKey(agentID, processName, hourOfDay)
+func (c *BaselineCache) Lookup(ctx context.Context, agentID, processName string, at time.Time) (*ProcessBaseline, error) {
+	hour := at.UTC().Truncate(time.Hour)
+	processName = strings.ToLower(processName)
+	key := agentID + "|" + processName + "|" + hour.Format(time.RFC3339)
 
 	// Fast path: cache hit
 	c.mu.RLock()
 	if entry, ok := c.entries[key]; ok && time.Now().Before(entry.expiresAt) {
 		c.mu.RUnlock()
-		return entry.baseline, nil
+		return copyBaseline(entry.baseline), nil
 	}
 	c.mu.RUnlock()
 
 	// Slow path: DB fetch
-	baseline, err := c.repo.GetBaseline(ctx, agentID, processName, hourOfDay)
+	baseline, err := c.repo.GetBaseline(ctx, agentID, processName, hour.Hour(), hour)
 	if err != nil {
 		return nil, err
 	}
 
 	// Cache the result (including nil → negative cache so we don't hammer DB for new processes)
 	c.mu.Lock()
+	if len(c.entries) >= maxPendingBuckets {
+		for k, e := range c.entries {
+			if time.Now().After(e.expiresAt) {
+				delete(c.entries, k)
+			}
+		}
+		if len(c.entries) >= maxPendingBuckets {
+			// Skip caching this lookup rather than exceed the fixed memory bound.
+			c.mu.Unlock()
+			return baseline, nil
+		}
+	}
 	c.entries[key] = &cacheEntry{
-		baseline:  baseline,
+		baseline:  copyBaseline(baseline),
 		expiresAt: time.Now().Add(c.ttl),
 	}
 	c.mu.Unlock()
@@ -108,19 +123,17 @@ func (c *BaselineCache) Lookup(ctx context.Context, agentID, processName string,
 	return baseline, nil
 }
 
-// Invalidate removes a cached entry (call after a successful Upsert in tests).
-func (c *BaselineCache) Invalidate(agentID, processName string, hourOfDay int) {
-	key := cacheKey(agentID, processName, hourOfDay)
-	c.mu.Lock()
-	delete(c.entries, key)
-	c.mu.Unlock()
-}
-
 // cleanupLoop evicts expired entries periodically to prevent unbounded growth.
 func (c *BaselineCache) cleanupLoop() {
+	defer close(c.done)
 	ticker := time.NewTicker(defaultCleanupInterval)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-c.stop:
+			return
+		case <-ticker.C:
+		}
 		now := time.Now()
 		c.mu.Lock()
 		for k, e := range c.entries {
@@ -130,6 +143,23 @@ func (c *BaselineCache) cleanupLoop() {
 		}
 		c.mu.Unlock()
 	}
+}
+
+func (c *BaselineCache) Stop() {
+	c.once.Do(func() { close(c.stop) })
+	<-c.done
+}
+
+func copyBaseline(b *ProcessBaseline) *ProcessBaseline {
+	if b == nil {
+		return nil
+	}
+	copy := *b
+	if b.FirstSeenAt != nil {
+		first := *b.FirstSeenAt
+		copy.FirstSeenAt = &first
+	}
+	return &copy
 }
 
 // =============================================================================
@@ -148,8 +178,9 @@ func NewRepositoryProviderAdapter(repo BaselineRepository) *RepositoryProviderAd
 }
 
 // Lookup delegates directly to the repository (no caching).
-func (a *RepositoryProviderAdapter) Lookup(ctx context.Context, agentID, processName string, hourOfDay int) (*ProcessBaseline, error) {
-	return a.repo.GetBaseline(ctx, agentID, processName, hourOfDay)
+func (a *RepositoryProviderAdapter) Lookup(ctx context.Context, agentID, processName string, at time.Time) (*ProcessBaseline, error) {
+	hour := at.UTC().Truncate(time.Hour)
+	return a.repo.GetBaseline(ctx, agentID, strings.ToLower(processName), hour.Hour(), hour)
 }
 
 // =============================================================================
@@ -161,6 +192,6 @@ func (a *RepositoryProviderAdapter) Lookup(ctx context.Context, agentID, process
 type NoopBaselineProvider struct{}
 
 // Lookup always returns nil, nil.
-func (NoopBaselineProvider) Lookup(_ context.Context, _, _ string, _ int) (*ProcessBaseline, error) {
+func (NoopBaselineProvider) Lookup(_ context.Context, _, _ string, _ time.Time) (*ProcessBaseline, error) {
 	return nil, nil
 }

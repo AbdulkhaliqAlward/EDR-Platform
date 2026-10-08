@@ -26,16 +26,17 @@ export function UEBAPanel({ snapshot }: UEBAPanelProps) {
                         </span>
                     )}
                 </div>
+                {bd.ueba_reason && <p className="text-xs text-slate-600 dark:text-slate-400 mt-2">{bd.ueba_reason}</p>}
             </div>
 
-            {/* Temporal Burst */}
+            {/* Temporal Burst — distinct detections on this host */}
             <div>
-                <span className="text-xs text-slate-500 uppercase tracking-wider block mb-2">Temporal Burst</span>
+                <span className="text-xs text-slate-500 uppercase tracking-wider block mb-2">Distinct detections on this host</span>
                 <div className="flex items-center gap-3">
                     <div className="flex items-center gap-1.5">
                         <Activity className={`w-4 h-4 ${snapshot.burst_count > 3 ? 'text-orange-500' : 'text-slate-400'}`} />
                         <span className={`font-semibold text-sm ${snapshot.burst_count > 3 ? 'text-orange-600 dark:text-orange-400' : 'text-slate-700 dark:text-slate-300'}`}>
-                            {snapshot.burst_count} fire{snapshot.burst_count !== 1 ? 's' : ''}
+                            {snapshot.burst_count} rule{snapshot.burst_count !== 1 ? 's' : ''}
                         </span>
                         <span className="text-xs text-slate-500">in {Math.round(snapshot.burst_window_sec / 60)} min window</span>
                     </div>

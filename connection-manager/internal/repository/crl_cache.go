@@ -17,7 +17,8 @@ type CRLCache struct {
 	logger   *logrus.Logger
 
 	// revoked maps fingerprint → true for revoked certificates.
-	revoked sync.Map
+	revokedMu sync.RWMutex
+	revoked   map[string]bool
 
 	// lastSeenBuf buffers fingerprint → latest seen time for batch DB writes.
 	lastSeenBuf sync.Map
@@ -54,15 +55,21 @@ func NewCRLCache(certRepo CertificateRepository, logger *logrus.Logger) *CRLCach
 // IsRevoked checks if a fingerprint is in the revocation cache.
 // This NEVER queries the database — cache only.
 func (c *CRLCache) IsRevoked(fingerprint string) bool {
-	_, revoked := c.revoked.Load(fingerprint)
-	return revoked
+	c.revokedMu.RLock()
+	defer c.revokedMu.RUnlock()
+	return c.revoked[fingerprint]
 }
 
 // AddRevoked immediately adds a fingerprint to the in-memory cache.
 // Called when a certificate is revoked via the REST API so the change
 // takes effect instantly without waiting for the next refresh cycle.
 func (c *CRLCache) AddRevoked(fingerprint string) {
-	c.revoked.Store(fingerprint, true)
+	c.revokedMu.Lock()
+	defer c.revokedMu.Unlock()
+	if c.revoked == nil {
+		c.revoked = make(map[string]bool)
+	}
+	c.revoked[fingerprint] = true
 }
 
 // RecordLastSeen records that a fingerprint was seen at the current time.
@@ -87,23 +94,21 @@ func (c *CRLCache) refresh() error {
 	}
 
 	// Build fresh revoked set
-	newRevoked := &sync.Map{}
+	newRevoked := make(map[string]bool, len(fingerprints))
 	for _, fp := range fingerprints {
-		newRevoked.Store(fp, true)
+		newRevoked[fp] = true
 	}
 
 	// Merge: preserve any manually-added entries (via AddRevoked) not yet in DB.
 	// This ensures immediate revocations are never evicted by the next refresh.
-	c.revoked.Range(func(key, value any) bool {
-		fp := key.(string)
-		if _, inNew := newRevoked.Load(fp); !inNew {
-			newRevoked.Store(fp, true)
-		}
-		return true
-	})
-
-	// Atomic swap of the cache map
-	c.revoked = *newRevoked
+	// Merge and publish under the same lock used by AddRevoked. A revocation
+	// arriving during the DB read cannot be lost between merge and publication.
+	c.revokedMu.Lock()
+	for fp := range c.revoked {
+		newRevoked[fp] = true
+	}
+	c.revoked = newRevoked
+	c.revokedMu.Unlock()
 
 	c.logger.WithField("count", len(fingerprints)).Debug("[CRL] Cache refreshed from DB")
 	return nil
@@ -146,13 +151,15 @@ func (c *CRLCache) flushLastSeen() {
 	var count int
 	c.lastSeenBuf.Range(func(key, value any) bool {
 		fingerprint := key.(string)
-		c.lastSeenBuf.Delete(key)
 
 		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := c.certRepo.UpdateLastSeen(dbCtx, fingerprint); err != nil {
-			c.logger.WithError(err).WithField("fingerprint", fingerprint[:12]).
+			c.logger.WithError(err).WithField("fingerprint", fingerprint[:min(12, len(fingerprint))]).
 				Warn("[CRL] Failed to flush last_seen_at")
 		} else {
+			// Keep observations made while this write was in flight, and keep
+			// failed writes for retry on the next flush.
+			c.lastSeenBuf.CompareAndDelete(key, value)
 			count++
 		}
 		cancel()

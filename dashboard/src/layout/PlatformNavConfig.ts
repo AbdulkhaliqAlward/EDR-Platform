@@ -68,6 +68,7 @@ export const ITSM_TABS: ContextTab[] = [
     { to: '/itsm/playbooks', label: 'Response Playbooks' },
     { to: '/itsm/automations', label: 'Response Automations' },
     { to: '/itsm/scripts', label: 'Script Library' },
+    { to: '/itsm/exceptions', label: 'Detection Exceptions' },
 ];
 
 export const SYSTEM_CONTEXT_TABS: ContextTab[] = [

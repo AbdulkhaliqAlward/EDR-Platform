@@ -35,6 +35,9 @@ const (
 	EventCategoryUserManagement     EventCategory = "user_management"
 	EventCategoryGroupManagement    EventCategory = "group_management"
 	EventCategoryPowerShell         EventCategory = "powershell"
+	// Sigma PowerShell logsource categories.
+	EventCategoryPsScript EventCategory = "ps_script" // Script Block Logging, EventID 4104
+	EventCategoryPsModule EventCategory = "ps_module" // Module Logging, EventID 4103
 
 	// EventCategoryClipboard is agent clipboard telemetry (no SigmaHQ category).
 	EventCategoryClipboard EventCategory = "clipboard"
@@ -64,8 +67,8 @@ var EventIDToCategory = map[int]EventCategory{
 	23:   EventCategoryFileDelete,
 	25:   EventCategoryProcessTampering,
 	26:   EventCategoryFileDelete,
-	4103: EventCategoryPowerShell,
-	4104: EventCategoryPowerShell,
+	4103: EventCategoryPsModule,
+	4104: EventCategoryPsScript,
 	4105: EventCategoryPowerShell,
 	4106: EventCategoryPowerShell,
 	4624: EventCategoryAuthentication,

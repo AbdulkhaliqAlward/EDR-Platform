@@ -7,6 +7,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"strings"
 	"sync"
@@ -61,9 +62,39 @@ type Engine struct {
 	registry     *handlers.AgentRegistry
 	playbooks    map[string]*playbookDef
 
-	mu      sync.Mutex
-	running map[string]bool // agentID → in-flight
+	mu             sync.Mutex
+	running        map[string]bool      // agentID → in-flight
+	lastRun        map[string]time.Time // agentID → last post-isolation triage start
+	automationGate func(context.Context) bool
+	endpointGate   func(context.Context, string) (func(), error)
+	commandPoll    time.Duration
 }
+
+// SetEndpointGate wires legacy runs into the response engine's endpoint queue.
+// Set before the server accepts command results.
+func (e *Engine) SetEndpointGate(gate func(context.Context, string) (func(), error)) {
+	e.endpointGate = gate
+}
+
+// SetAutomationGate connects this legacy automated path to the same
+// server-authoritative switch as alert-triggered playbooks. Wire before use.
+func (e *Engine) SetAutomationGate(gate func(context.Context) bool) {
+	e.automationGate = gate
+}
+
+func (e *Engine) automationEnabled() bool {
+	if e.automationGate == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return e.automationGate(ctx)
+}
+
+// triageDedupWindow suppresses a second post-isolation triage for the same
+// endpoint (e.g. a repeated isolate command while already isolated): the
+// first run already captured the evidence.
+const triageDedupWindow = 30 * time.Minute
 
 // NewEngine creates and initialises a playbook Engine.
 func NewEngine(
@@ -79,6 +110,7 @@ func NewEngine(
 		registry:     registry,
 		playbooks:    make(map[string]*playbookDef),
 		running:      make(map[string]bool),
+		lastRun:      make(map[string]time.Time),
 	}
 	e.loadEmbeddedPlaybooks()
 	return e
@@ -108,6 +140,9 @@ func (e *Engine) loadEmbeddedPlaybooks() {
 // OnIsolationSucceeded is called by the gRPC server after is_isolated=true is committed.
 // It launches the default playbook asynchronously.
 func (e *Engine) OnIsolationSucceeded(agentID uuid.UUID) {
+	if !e.automationEnabled() {
+		return
+	}
 	if e.incidentRepo == nil || e.commandRepo == nil || e.registry == nil {
 		return
 	}
@@ -116,6 +151,11 @@ func (e *Engine) OnIsolationSucceeded(agentID uuid.UUID) {
 	if e.running[agentID.String()] {
 		e.mu.Unlock()
 		e.logger.WithField("agent_id", agentID).Info("[Playbook] Already running — skipping duplicate")
+		return
+	}
+	if last, ok := e.lastRun[agentID.String()]; ok && time.Since(last) < triageDedupWindow {
+		e.mu.Unlock()
+		e.logger.WithField("agent_id", agentID).Infof("[Playbook] Post-isolation triage ran %s ago — skipping duplicate", time.Since(last).Round(time.Second))
 		return
 	}
 	e.running[agentID.String()] = true
@@ -129,6 +169,14 @@ func (e *Engine) OnIsolationSucceeded(agentID uuid.UUID) {
 		}()
 		e.runPlaybook(agentID, "default_post_isolation")
 	}()
+}
+
+// OnIsolationRestored resets the triage de-duplication window so the next,
+// separate isolation of the endpoint is triaged again.
+func (e *Engine) OnIsolationRestored(agentID uuid.UUID) {
+	e.mu.Lock()
+	delete(e.lastRun, agentID.String())
+	e.mu.Unlock()
 }
 
 func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
@@ -145,6 +193,17 @@ func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), totalTimeout)
 	defer cancel()
+	if e.endpointGate != nil {
+		release, err := e.endpointGate(ctx, agentID.String())
+		if err != nil {
+			e.logger.WithError(err).Warn("[Playbook] Endpoint queue wait failed")
+			return
+		}
+		defer release()
+	}
+	if !e.automationEnabled() {
+		return
+	}
 
 	run := &repository.PlaybookRun{
 		AgentID:   agentID,
@@ -158,6 +217,9 @@ func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
 		e.logger.WithError(err).Error("[Playbook] Failed to create run record")
 		return
 	}
+	e.mu.Lock()
+	e.lastRun[agentID.String()] = time.Now()
+	e.mu.Unlock()
 
 	e.logger.WithFields(logrus.Fields{
 		"agent_id": agentID, "run_id": runID, "playbook": playbookName,
@@ -165,14 +227,11 @@ func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
 
 	successCount, failCount := 0, 0
 
-	// cumulativeOffset tracks the sum of all preceding step timeouts.
-	// Each command's ExpiresAt must account for the time the agent needs
-	// to finish ALL prior steps before it even starts this one.
-	// Without this, step N expires while steps 1..N-1 are still running
-	// on the agent, causing spurious "command expired" failures.
-	var cumulativeOffset time.Duration
-
 	for _, step := range pb.Steps {
+		if !e.automationEnabled() {
+			_ = e.incidentRepo.FinishRun(ctx, runID, "cancelled")
+			return
+		}
 		select {
 		case <-ctx.Done():
 			e.logger.Warnf("[Playbook] Timeout at step %s", step.ID)
@@ -195,11 +254,13 @@ func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
 			stepID, err := e.incidentRepo.CreateStep(ctx, stepRec)
 			if err != nil {
 				e.logger.WithError(err).Warnf("[Playbook] Cannot create step %s", s.ID)
+				failCount++
 				return
 			}
 
 			if !e.registry.IsOnline(agentID.String()) {
 				_ = e.incidentRepo.UpdateStep(ctx, stepID, "skipped", nil, "agent offline")
+				failCount++
 				return
 			}
 			_ = e.incidentRepo.UpdateStep(ctx, stepID, "running", nil, "")
@@ -212,9 +273,8 @@ func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
 			params["authz_tier"] = "library"
 			params["from_playbook"] = "true" // legacy marker for older agents
 
-			// Expiry = cumulative wait for prior steps + this step's own timeout + 60s grace.
-			// The 60s grace covers network latency, gRPC queuing, and agent dispatch overhead.
-			effectiveExpiry := cumulativeOffset + stepTimeout + 60*time.Second
+			// Dispatch follows the preceding result, so no cumulative offset is needed.
+			effectiveExpiry := stepTimeout + 30*time.Second
 
 			cmdID := uuid.New()
 			dbCmd := &models.Command{
@@ -259,33 +319,68 @@ func (e *Engine) runPlaybook(agentID uuid.UUID, playbookName string) {
 			}
 
 			if sendErr := e.registry.Send(agentID.String(), protoCmd); sendErr != nil {
+				_ = e.commandRepo.UpdateStatus(ctx, cmdID, models.CommandStatusFailed, nil, sendErr.Error())
 				e.logger.WithError(sendErr).Warnf("[Playbook] Send failed for step %s", s.ID)
 				_ = e.incidentRepo.UpdateStep(ctx, stepID, "failed", &cmdID, sendErr.Error())
 				failCount++
 				return
 			}
-			successCount++
 			e.logger.Infof("[Playbook] Dispatched %s (cmd %s, expires_in=%v)", s.ID, cmdID, effectiveExpiry)
-
-			// Advance cumulative offset so the next step's expiry accounts for this step.
-			cumulativeOffset += stepTimeout
-
-			time.Sleep(200 * time.Millisecond)
+			if waitErr := e.awaitCommand(ctx, cmdID, effectiveExpiry); waitErr != nil {
+				_ = e.incidentRepo.UpdateStep(ctx, stepID, "failed", &cmdID, waitErr.Error())
+				failCount++
+				return
+			}
+			_ = e.incidentRepo.UpdateStep(ctx, stepID, "success", &cmdID, "")
+			successCount++
 		}(step)
 	}
 
 done:
 	finalStatus := "completed"
-	if failCount > 0 && successCount == 0 {
+	if ctx.Err() != nil {
+		finalStatus = "cancelled"
+	} else if failCount > 0 && successCount == 0 {
 		finalStatus = "failed"
 	} else if failCount > 0 {
 		finalStatus = "partial"
 	}
-	_ = e.incidentRepo.FinishRun(ctx, runID, finalStatus)
+	finishCtx, finishCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer finishCancel()
+	_ = e.incidentRepo.FinishRun(finishCtx, runID, finalStatus)
 	e.logger.WithFields(logrus.Fields{
 		"agent_id": agentID, "run_id": runID, "status": finalStatus,
 		"success": successCount, "failed": failCount,
 	}).Info("[Playbook] Finished")
+}
+
+// A successful Send only means queued delivery. Run/step success requires an
+// actual terminal result written by the authenticated gRPC result handler.
+func (e *Engine) awaitCommand(ctx context.Context, id uuid.UUID, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	poll := e.commandPoll
+	if poll <= 0 {
+		poll = time.Second
+	}
+	tick := time.NewTicker(poll)
+	defer tick.Stop()
+	for {
+		cmd, err := e.commandRepo.GetByID(ctx, id)
+		if err == nil && cmd != nil {
+			switch cmd.Status {
+			case models.CommandStatusCompleted:
+				return nil
+			case models.CommandStatusFailed, models.CommandStatusTimeout, models.CommandStatusCancelled:
+				return fmt.Errorf("agent command %s: %s", cmd.Status, cmd.ErrorMessage)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("command result unverified: %w", ctx.Err())
+		case <-tick.C:
+		}
+	}
 }
 
 // OnCommandResult updates the step status when a command result arrives from the agent.
@@ -300,15 +395,18 @@ func (e *Engine) OnCommandResult(ctx context.Context, agentID uuid.UUID, command
 		return // Not a playbook command
 	}
 
-	stepStatus := "success"
-	errMsg := ""
-	statusLower := strings.ToLower(status)
-	if statusLower == "failed" || statusLower == "error" {
-		stepStatus = "failed"
+	stepStatus, errMsg := "failed", ""
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "success", "ok", "succeeded", "done":
+		stepStatus = "success"
+	case "failed", "error":
 		errMsg = "agent reported failure"
-	} else if statusLower == "timeout" {
-		stepStatus = "failed"
+	case "timeout":
 		errMsg = "timeout"
+	case "cancelled", "canceled":
+		errMsg = "cancelled"
+	default:
+		return // acknowledgements/unknown states do not prove success
 	}
 
 	_ = e.incidentRepo.UpdateStep(ctx, step.ID, stepStatus, &commandID, errMsg)

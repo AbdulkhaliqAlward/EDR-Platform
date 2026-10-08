@@ -62,6 +62,8 @@ type Handlers struct {
 	allowCustomCommands bool                                   // master switch for admin custom run_cmd (default false)
 	responseScriptRepo  repository.ResponseScriptRepository    // optional: dashboard-managed script library
 	respEngine          *responseEngineDeps                    // optional: server-side response engine
+	// optional: analyst-managed detection exceptions (applied by the sigma engine)
+	detectionExceptionRepo *repository.DetectionExceptionRepository
 }
 
 // NewHandlers creates a new handlers instance.

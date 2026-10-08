@@ -1,0 +1,57 @@
+{
+  "setting": {
+    "enabled": false,
+    "configured": false,
+    "locked": false
+  },
+  "rule": {
+    "id": "fixture-rule",
+    "name": "Exact technique response",
+    "description": "Triggers when: Sigma rule ID is sigma-test  OR  MITRE technique is T1059 or T1486 (including sub-techniques)",
+    "priority": 5,
+    "auto_execute": false,
+    "enabled": true,
+    "playbook_id": "fixture-pb",
+    "trigger_conditions": {
+      "logic_operator": "OR",
+      "rule_ids": [
+        "sigma-test"
+      ],
+      "mitre_techniques": [
+        "T1059",
+        "T1486"
+      ]
+    },
+    "cooldown_minutes": 30
+  },
+  "saved": [
+    {
+      "kind": "settings",
+      "input": {
+        "enabled": false,
+        "reason": "Mock verification only"
+      }
+    },
+    {
+      "kind": "rule",
+      "input": {
+        "name": "Exact technique response",
+        "description": "Triggers when: Sigma rule ID is sigma-test  OR  MITRE technique is T1059 or T1486 (including sub-techniques)",
+        "trigger_conditions": {
+          "logic_operator": "OR",
+          "rule_ids": [
+            "sigma-test"
+          ],
+          "mitre_techniques": [
+            "T1059",
+            "T1486"
+          ]
+        },
+        "priority": 5,
+        "cooldown_minutes": 30,
+        "auto_execute": false,
+        "playbook_id": "fixture-pb"
+      }
+    }
+  ]
+}

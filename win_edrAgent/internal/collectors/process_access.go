@@ -283,7 +283,7 @@ func goProcessAccessEvent(evt *C.ParsedProcessAccessEvent) {
 	targetNameLow := strings.ToLower(targetName)
 
 	// Skip agent's own processes
-	if isSelfOrChildProcess(callerNameLow, "") {
+	if isSelfPID(callerPid) {
 		return
 	}
 

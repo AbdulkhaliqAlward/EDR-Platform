@@ -80,7 +80,9 @@ func (r *PostgresCommandRepository) Create(ctx context.Context, cmd *models.Comm
 	if cmd.TimeoutSeconds == 0 {
 		cmd.TimeoutSeconds = 300
 	}
-	cmd.ExpiresAt = cmd.IssuedAt.Add(time.Duration(cmd.TimeoutSeconds) * time.Second)
+	if cmd.ExpiresAt.IsZero() {
+		cmd.ExpiresAt = cmd.IssuedAt.Add(time.Duration(cmd.TimeoutSeconds) * time.Second)
+	}
 
 	// Serialize maps to JSON bytes for JSONB columns
 	paramsJSON, _ := json.Marshal(cmd.Parameters)
@@ -110,7 +112,7 @@ func (r *PostgresCommandRepository) Create(ctx context.Context, cmd *models.Comm
 func (r *PostgresCommandRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Command, error) {
 	query := `
 		SELECT id, agent_id, command_type, parameters, priority, status,
-			result, error_message, exit_code, timeout_seconds, issued_at,
+			result, COALESCE(error_message, ''), exit_code, timeout_seconds, issued_at,
 			sent_at, acknowledged_at, started_at, completed_at, expires_at,
 			issued_by, metadata
 		FROM commands WHERE id = $1`
@@ -135,6 +137,10 @@ func (r *PostgresCommandRepository) UpdateStatus(
 	status models.CommandStatus, result map[string]any, errorMsg string,
 ) error {
 	now := time.Now()
+	rank := commandStatusRank(status)
+	if rank == 0 {
+		return fmt.Errorf("invalid command status %q", status)
+	}
 
 	// Serialize result to JSON bytes for JSONB column
 	var resultJSON []byte
@@ -142,10 +148,8 @@ func (r *PostgresCommandRepository) UpdateStatus(
 		var err error
 		resultJSON, err = json.Marshal(result)
 		if err != nil {
-			resultJSON = []byte("{}")
+			return fmt.Errorf("encode command result: %w", err)
 		}
-	} else {
-		resultJSON = []byte("{}")
 	}
 
 	// Compute timestamp columns in Go to avoid CASE expressions reusing $2
@@ -165,9 +169,12 @@ func (r *PostgresCommandRepository) UpdateStatus(
 
 	query := `
 		UPDATE commands SET
-			status = $1::varchar,
-			result = $2::jsonb,
-			error_message = $3::text,
+			status = CASE WHEN $9::int < 5 AND
+				(CASE status WHEN 'pending' THEN 1 WHEN 'sent' THEN 2
+				 WHEN 'acknowledged' THEN 3 WHEN 'executing' THEN 4 ELSE 5 END) > $9::int
+				THEN status ELSE $1::varchar END,
+			result = COALESCE($2::jsonb, result),
+			error_message = CASE WHEN $9::int < 5 THEN error_message ELSE $3::text END,
 			completed_at = COALESCE($4::timestamptz, completed_at),
 			started_at = COALESCE($5::timestamptz, started_at),
 			sent_at = COALESCE($6::timestamptz, sent_at),
@@ -177,7 +184,7 @@ func (r *PostgresCommandRepository) UpdateStatus(
 	result2, err := r.db.Exec(ctx, query,
 		statusStr, resultJSON, errorMsg,
 		completedAt, startedAt, sentAt, acknowledgedAt,
-		id,
+		id, rank,
 	)
 	if err != nil {
 		return err
@@ -186,6 +193,23 @@ func (r *PostgresCommandRepository) UpdateStatus(
 		return ErrNotFound
 	}
 	return nil
+}
+
+func commandStatusRank(status models.CommandStatus) int {
+	switch status {
+	case models.CommandStatusPending:
+		return 1
+	case models.CommandStatusSent:
+		return 2
+	case models.CommandStatusAcknowledged:
+		return 3
+	case models.CommandStatusExecuting:
+		return 4
+	case models.CommandStatusCompleted, models.CommandStatusFailed, models.CommandStatusTimeout, models.CommandStatusCancelled:
+		return 5
+	default:
+		return 0
+	}
 }
 
 // Delete removes a command.
@@ -216,7 +240,7 @@ func (r *PostgresCommandRepository) ListByAgent(
 	// Fetch commands
 	query := `
 		SELECT id, agent_id, command_type, parameters, priority, status,
-			result, error_message, issued_at, completed_at, issued_by
+			result, COALESCE(error_message, ''), issued_at, completed_at, issued_by
 		FROM commands
 		WHERE agent_id = $1
 		ORDER BY issued_at DESC

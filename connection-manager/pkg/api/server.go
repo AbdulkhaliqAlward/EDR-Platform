@@ -162,6 +162,14 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	// ── Response script library ──────────────────────────────────────────
 	// Running a script is POST /agents/:id/commands with script_id.
 	// Writes additionally require the admin role (enforced in-handler).
+	// ── Detection exceptions (false-positive suppression) ───────────────
+	// Writes additionally require the admin or security role (in-handler).
+	exceptions := protected.Group("/detection-exceptions")
+	exceptions.GET("", handlers.ListDetectionExceptions, handlers.RequirePermission("alerts", "read"))
+	exceptions.POST("", handlers.CreateDetectionException, handlers.RequirePermission("alerts", "write"))
+	exceptions.PATCH("/:id", handlers.UpdateDetectionException, handlers.RequirePermission("alerts", "write"))
+	exceptions.DELETE("/:id", handlers.DeleteDetectionException, handlers.RequirePermission("alerts", "write"))
+
 	scripts := protected.Group("/response-scripts")
 	scripts.GET("", handlers.ListResponseScripts, handlers.RequirePermission("responses", "read"))
 	scripts.POST("", handlers.CreateResponseScript, handlers.RequirePermission("responses", "execute"))
@@ -205,6 +213,7 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	events := protected.Group("/events")
 	events.POST("/search", handlers.SearchEvents, handlers.RequirePermission("alerts", "read"))
 	events.GET("/stats", handlers.GetEventStats, handlers.RequirePermission("alerts", "read"))
+	events.GET("/prevention-activity", handlers.ListPreventionActivity, handlers.RequirePermission("alerts", "read"))
 	events.GET("/:id", handlers.GetEvent, handlers.RequirePermission("alerts", "read"))
 	events.POST("/export", handlers.ExportEvents, handlers.RequirePermission("alerts", "read"))
 
@@ -304,6 +313,8 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 		automation.DELETE("/playbooks/:id", handlers.AutomationHandlers.DeletePlaybook, handlers.RequirePermission("responses", "execute"))
 		// Server-side response engine (see handlers_response.go)
 		automation.GET("/catalog", handlers.GetResponseCatalog, handlers.RequirePermission("responses", "read"))
+		automation.GET("/settings", handlers.GetAutomationSettings, handlers.RequirePermission("responses", "read"))
+		automation.PUT("/settings", handlers.UpdateAutomationSettings, handlers.RequirePermission("responses", "execute"))
 		automation.GET("/alerts/:id/suggestions", handlers.GetAlertSuggestions, handlers.RequirePermission("responses", "read"))
 		automation.GET("/playbooks/:id/preview", handlers.PreviewPlaybookRun, handlers.RequirePermission("responses", "read"))
 		automation.POST("/playbooks/:id/run", handlers.RunPlaybook, handlers.RequirePermission("responses", "execute"))

@@ -14,17 +14,14 @@ import "C"
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 
+	"github.com/edr-platform/win-agent/internal/processlineage"
 	"golang.org/x/sys/windows"
-
-	"github.com/edr-platform/win-agent/internal/event"
-	"github.com/edr-platform/win-agent/internal/logging"
 )
 
 // Unused GUID kept for session compat parameter.
@@ -33,95 +30,9 @@ var kernelProcessGUID = C.GUID{
 	Data4: [8]C.uchar{0xA2, 0x96, 0x1F, 0x7F, 0x7D, 0x3B, 0x40, 0x0C},
 }
 
-// =====================================================================
-// Collector
-// =====================================================================
-
-type ETWCollector struct {
-	logger    *logging.Logger
-	eventChan chan<- *event.Event
-	filter    *Filter
-	session   string
-	running   atomic.Bool
-	collected atomic.Uint64
-	dropped   atomic.Uint64
-	errors    atomic.Uint64
-
-	// Config toggles for event types handled by the same kernel session.
-	fileEnabled      bool
-	imageLoadEnabled bool
-
-	// Optional autonomous file response (local hash DB + quarantine).
-	fileAutoResp FileAutoResponse
-	// Optional autonomous process response (rule-pack driven terminate).
-	processAutoResp ProcessAutoResponse
-
-	// Per-type metrics
-	fileEvents      atomic.Uint64
-	imageLoadEvents atomic.Uint64
-}
-
-var globalCollector atomic.Pointer[ETWCollector]
-
-func NewETWCollector(session string, ch chan<- *event.Event, l *logging.Logger, filter *Filter, fileEnabled, imageLoadEnabled bool) *ETWCollector {
-	if session == "" {
-		session = "EDRKernelTrace"
-	}
-	return &ETWCollector{
-		logger:           l,
-		eventChan:        ch,
-		filter:           filter,
-		session:          session,
-		fileEnabled:      fileEnabled,
-		imageLoadEnabled: imageLoadEnabled,
-	}
-}
-
-// SetFileAutoResponse registers optional local hash-match quarantine (nil disables).
-func (c *ETWCollector) SetFileAutoResponse(h FileAutoResponse) {
-	c.fileAutoResp = h
-}
-
-// SetProcessAutoResponse registers optional local process auto-response (nil disables).
-func (c *ETWCollector) SetProcessAutoResponse(h ProcessAutoResponse) {
-	c.processAutoResp = h
-}
-
-func (c *ETWCollector) Start(ctx context.Context) error {
-	if c.running.Load() {
-		return fmt.Errorf("already running")
-	}
-	c.running.Store(true)
-	globalCollector.Store(c)
-	go c.run(ctx)
-	return nil
-}
-
-func (c *ETWCollector) Stop() error {
-	c.running.Store(false)
-	c.logger.Infof("ETW stats: process=%d imageload=%d fileio=%d dropped=%d errors=%d",
-		c.collected.Load(), c.imageLoadEvents.Load(), c.fileEvents.Load(),
-		c.dropped.Load(), c.errors.Load())
-	return nil
-}
-
-func (c *ETWCollector) run(ctx context.Context) {
-	c.logger.Info("[BASELINE] Running initial process snapshot...")
-	c.baseline()
-	c.logger.Info("[BASELINE] Initial snapshot complete")
-
-	c.logger.Infof("[ETW] Starting kernel tracer (Process=ON, ImageLoad=%v, FileIO=%v)",
-		c.imageLoadEnabled, c.fileEnabled)
-	for ctx.Err() == nil && c.running.Load() {
-		if err := c.session_(ctx); err != nil && ctx.Err() == nil && c.running.Load() {
-			c.logger.Errorf("[ETW] Session error: %v — restarting in 3s", err)
-			time.Sleep(3 * time.Second)
-		}
-	}
-	c.logger.Info("[ETW] Tracer stopped")
-}
-
 func (c *ETWCollector) session_(ctx context.Context) error {
+	ctx, sessionCancel := context.WithCancel(ctx)
+	defer sessionCancel()
 	name16, err := windows.UTF16FromString(c.session)
 	if err != nil {
 		return err
@@ -136,18 +47,26 @@ func (c *ETWCollector) session_(ctx context.Context) error {
 		return fmt.Errorf("StartKernelProcessSession: error %d", ret)
 	}
 	c.logger.Info("[ETW] Session ACTIVE — SYSTEM_LOGGER_MODE + EnableFlags=PROCESS|IMAGE_LOAD|FILE_IO_INIT")
+	processlineage.Default.BeginCoverage(time.Now())
 
 	var diag atomic.Uint64
 	globalDiag.Store(&diag)
 	go func() {
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 		c.logger.Infof("[ETW] Diagnostic: %d events in first 5s", diag.Load())
 	}()
 
+	stopDone := make(chan struct{})
 	go func() {
+		defer close(stopDone)
 		<-ctx.Done()
 		C.StopKernelSession(&kernelProcessGUID)
 	}()
+	defer func() { sessionCancel(); <-stopDone }()
 
 	ret = C.ProcessKernelEvents(np, nil)
 	if ret != 0 && ctx.Err() != nil {
@@ -160,31 +79,10 @@ func (c *ETWCollector) session_(ctx context.Context) error {
 }
 
 // =====================================================================
-// C → Go callback (no goroutine, already parsed by C/TDH)
+// C → Go callbacks (no goroutines here: jobs go to bounded worker pools)
 // =====================================================================
 
 var globalDiag atomic.Pointer[atomic.Uint64]
-
-var (
-	dedupMu    sync.Mutex
-	dedupCache = make(map[uint32]int64, 64)
-)
-
-func isDuplicate(pid uint32) bool {
-	now := time.Now().UnixNano()
-	dedupMu.Lock()
-	defer dedupMu.Unlock()
-	for k, ts := range dedupCache {
-		if now-ts > 2_000_000_000 {
-			delete(dedupCache, k)
-		}
-	}
-	if t, ok := dedupCache[pid]; ok && now-t < 2_000_000_000 {
-		return true
-	}
-	dedupCache[pid] = now
-	return false
-}
 
 //export goProcessEvent
 func goProcessEvent(evt *C.ParsedProcessEvent) {
@@ -197,7 +95,7 @@ func goProcessEvent(evt *C.ParsedProcessEvent) {
 	ppid := uint32(evt.parentId)
 	opcode := uint8(evt.opcode)
 
-	// Convert C strings to Go strings (copies — safe for goroutine)
+	// Convert C strings to Go strings (copies — safe after the callback)
 	imageName := C.GoString(&evt.imageFileName[0])
 	cmdLine := wcharToGo(&evt.commandLine[0], 4096)
 
@@ -210,16 +108,14 @@ func goProcessEvent(evt *C.ParsedProcessEvent) {
 		}
 	}
 
-	if opcode == 1 {
-		go collector.processStart(pid, ppid, imageName, cmdLine)
-	} else {
-		go collector.processEnd(pid, ppid, imageName)
+	ft := uint64(evt.eventTime)
+	eventTime := time.Unix(0, (&windows.Filetime{LowDateTime: uint32(ft), HighDateTime: uint32(ft >> 32)}).Nanoseconds()).UTC()
+	if ft == 0 {
+		processlineage.Default.Gap(time.Now())
+		eventTime = time.Now()
 	}
+	collector.enqueueProcess(procJob{start: opcode == 1, pid: pid, ppid: ppid, img: imageName, cmd: cmdLine, at: eventTime})
 }
-
-// =====================================================================
-// C → Go callbacks: Image Load and File I/O events
-// =====================================================================
 
 //export goImageLoadEvent
 func goImageLoadEvent(evt *C.ParsedImageLoadEvent) {
@@ -232,16 +128,12 @@ func goImageLoadEvent(evt *C.ParsedImageLoadEvent) {
 	opcode := uint8(evt.opcode)
 	imagePath := wcharToGo(&evt.imagePath[0], 1024)
 
-	if imagePath == "" {
-		return
-	}
-
 	// Only care about loads (opcode 10), not unloads.
-	if opcode != 10 {
+	if imagePath == "" || opcode != 10 {
 		return
 	}
 
-	go collector.handleImageLoad(pid, imagePath)
+	collector.enqueueAsync(func() { collector.handleImageLoad(pid, imagePath) })
 }
 
 //export goFileIoEvent
@@ -263,7 +155,7 @@ func goFileIoEvent(evt *C.ParsedFileIoEvent) {
 	// \Device\HarddiskVolume3\Users\foo\file.txt → C:\Users\foo\file.txt
 	filePath = kernelPathToWin32(filePath)
 
-	go collector.handleFileIo(pid, opcode, filePath)
+	collector.enqueueAsync(func() { collector.handleFileIo(pid, opcode, filePath) })
 }
 
 // kernelPathToWin32 converts a kernel device path to a Win32 drive-letter path.
@@ -371,501 +263,10 @@ func kernelPathToWin32(p string) string {
 }
 
 func wcharToGo(p *C.WCHAR, max int) string {
-	if p == nil {
+	if p == nil || max <= 0 {
 		return ""
 	}
-	chars := make([]uint16, 0, 256)
-	base := uintptr(unsafe.Pointer(p))
-	for i := 0; i < max; i++ {
-		ch := *(*uint16)(unsafe.Pointer(base + uintptr(i*2)))
-		if ch == 0 {
-			break
-		}
-		chars = append(chars, ch)
-	}
-	if len(chars) == 0 {
-		return ""
-	}
-	return windows.UTF16ToString(chars)
-}
-
-// =====================================================================
-// Sigma-Enriched Process Events
-// =====================================================================
-
-// trustedOSProcess is an O(1) lookup table of Windows kernel and shell
-// infrastructure processes that fire continuously with zero security signal.
-// These are hard-coded (not configurable) because they represent immutable
-// OS internals — an attacker cannot create a process with these exact names
-// from a non-system path and get past ETW's kernel-level PID attribution.
-//
-// The configurable ExcludeProcesses list in FilterConfig handles user-defined
-// exclusions and is applied AFTER event creation in the filter pipeline.
-var trustedOSProcess = map[string]bool{
-	// Session managers / kernel (PID 0-4 already skipped)
-	"conhost.exe":  true,
-	"wmiprvse.exe": true,
-
-	// Shell / Desktop infrastructure (fire hundreds of times/minute)
-	"backgroundtaskhost.exe":    true,
-	"applicationframehost.exe":  true,
-	"gamebarpresencewriter.exe": true,
-	"textinputhost.exe":         true,
-	"systemsettings.exe":        true,
-
-	// Search indexing — extremely noisy, no security signal
-	"searchprotocolhost.exe": true,
-	"searchfilterhost.exe":   true,
-
-	// Audio / Media
-	"audiodg.exe":     true,
-	"fontdrvhost.exe": true,
-
-	// Peripheral / device infrastructure
-	"dashost.exe": true, // Device Association Framework Provider Host
-	"ctfmon.exe":  true, // CTF Loader (text input framework)
-	"sihost.exe":  true, // Shell Infrastructure Host
-
-	// Windows Update telemetry (periodic, no detection value)
-	"compattelrunner.exe":     true,
-	"musnotification.exe":     true,
-	"microsoftedgeupdate.exe": true,
-	"wuauclt.exe":             true,
-}
-
-// agentSelfPSMarkers is the consolidated catalogue of substrings that the
-// agent embeds in every PowerShell command it shells out to (WMI inventory,
-// network adapter snapshot, Authenticode checks, USB enumeration, volume
-// serial lookup, kill-process logging, etc.). Any powershell.exe invocation
-// whose command line contains one of these is the agent's own helper —
-// never an attacker.
-//
-// Keep this list lower-case; matching is performed against a lower-cased
-// command line.
-var agentSelfPSMarkers = []string{
-	// WMI / CIM family
-	"get-ciminstance",
-	"win32_process",
-	"win32_computersystem",
-	"win32_logicaldisk",
-	"win32_operatingsystem",
-	// Network
-	"get-nettcpconnection",
-	"get-netadapter",
-	// Process inspection used by responder/executor
-	"get-process -id",
-	// Authenticode signature check used by triage handler
-	"get-authenticodesignature",
-	// Registry-based logon-user lookup (legacy fallback path; the agent now
-	// uses native registry, but keep marker for safety on older agents)
-	"lastloggedonuser",
-	"hklm:\\software\\microsoft\\windows\\currentversion\\authentication\\logonui",
-	// Output serialisation invariably appended by every helper script
-	"convertto-json",
-	"convertto-csv",
-}
-
-// isSelfOrChildProcess returns true if the process is the EDR agent itself
-// or a short-lived helper it spawned (PowerShell for WMI/Network/Authenticode
-// checks). Suppressing these prevents a telemetry feedback loop in which the
-// agent's own activity floods the detection pipeline and produces self-alerts
-// (T1059, T1021, etc.).
-//
-// The function is intentionally defensive — any of the following make a
-// process "self":
-//   - basename matches the agent executable;
-//   - basename is powershell.exe AND the command line carries any marker that
-//     the agent embeds in its own helper invocations.
-func isSelfOrChildProcess(nameLow, cmdLine string) bool {
-	// Skip the agent executable itself.
-	if nameLow == "edr-agent.exe" || nameLow == "agent.exe" || nameLow == "edr_agent.exe" {
-		return true
-	}
-
-	// Skip PowerShell helper invocations spawned by the agent.
-	if nameLow == "powershell.exe" || nameLow == "pwsh.exe" {
-		cmdLow := strings.ToLower(cmdLine)
-		// The agent always passes -NoProfile to its helpers; require it as a
-		// cheap pre-filter so we never suppress an attacker-launched shell
-		// that happens to mention one of the marker cmdlets.
-		if strings.Contains(cmdLow, "-noprofile") {
-			for _, marker := range agentSelfPSMarkers {
-				if strings.Contains(cmdLow, marker) {
-					return true
-				}
-			}
-		}
-	}
-
-	return false
-}
-
-// agentPID is captured once at process start; it never changes for the lifetime
-// of the agent and lets us perform an O(1) check against any incoming ppid.
-var agentPID = uint32(os.Getpid())
-
-// isAgentChildByPPID returns true when ppid equals the agent's own PID.
-// This is the deterministic, content-agnostic way to recognise a helper
-// process: regardless of what the helper executes, if its parent is us, it is
-// us. Use this in any code path where the parent PID is available.
-func isAgentChildByPPID(ppid uint32) bool {
-	return ppid != 0 && ppid == agentPID
-}
-
-func (c *ETWCollector) processStart(pid, ppid uint32, eventImg, eventCmd string) {
-	if isDuplicate(pid) {
-		return
-	}
-
-	// --- Enrich via Windows APIs (reliable for live processes) ---
-	exePath := getImagePath(pid)
-	cmdLine := getCmdLine(pid)
-
-	// --- Fallback to event data (short-lived processes) ---
-	if exePath == "" {
-		exePath = eventImg
-	}
-	if cmdLine == "" {
-		cmdLine = eventCmd
-	}
-
-	name := baseName(exePath)
-	if name == "" {
-		name = exePath
-	}
-	nameLow := strings.ToLower(name)
-
-	// Hard-coded noise filter — these processes fire constantly with zero
-	// security signal. They cannot be abused by attackers (kernel-managed).
-	// The configurable FilterConfig.ExcludeProcesses handles additional
-	// user-defined exclusions in the pipeline after event creation.
-	if trustedOSProcess[nameLow] {
-		return
-	}
-
-	// Self-exclusion: skip the agent's own child processes.
-	// The agent spawns PowerShell for WMI/Network queries; these generate
-	// noise and create a telemetry feedback loop.
-	//
-	// Two layers:
-	//  1. Deterministic ppid match — any direct child of edr-agent.exe.
-	//  2. Heuristic name+cmdline match — covers indirect helpers (e.g.
-	//     powershell launching cmd.exe) and historical patterns.
-	if isAgentChildByPPID(ppid) || isSelfOrChildProcess(nameLow, cmdLine) {
-		return
-	}
-
-	if cmdLine == "" {
-		cmdLine = exePath
-	}
-	if exePath == "" {
-		exePath = name
-	}
-
-	// Sigma enrichment: ParentImage, User
-	parentImage := getImagePath(ppid)
-	if parentImage == "" {
-		parentImage = fmt.Sprintf("pid:%d", ppid)
-	}
-	userSid, userName, isElevated, integrity := getPrivileges(pid)
-	sigStatus, sigIssuer := SignatureTrustClass(exePath)
-
-	evt := event.NewEvent(event.EventTypeProcess, event.SeverityLow, map[string]interface{}{
-		"action":            "process_creation",
-		"pid":               pid,
-		"ppid":              ppid,
-		"name":              name,
-		"executable":        exePath,
-		"command_line":      cmdLine,
-		"parent_executable": parentImage,
-		"parent_name":       baseName(parentImage),
-		"user_sid":          userSid,
-		"user_name":         userName,
-		"is_elevated":       isElevated,
-		"integrity_level":   integrity,
-		"signature_status":  sigStatus,
-		"signature_issuer":  sigIssuer,
-	})
-	// Apply configurable process filtering BEFORE local autonomous response.
-	// This ensures server-pushed allow exceptions (exclude_process) prevent
-	// both telemetry noise and accidental auto-terminate decisions.
-	if c.filter != nil && c.filter.ShouldFilter(evt) {
-		return
-	}
-
-	if c.processAutoResp != nil {
-		if alt, stop := c.processAutoResp.EvaluateAndAct(context.Background(), evt.Data); stop {
-			if alt != nil {
-				if c.filter != nil && c.filter.ShouldFilter(alt) {
-					return
-				}
-				c.send(alt)
-			}
-			return
-		}
-	}
-	c.sendPriority(evt)
-	c.logger.Infof("[ETW] Process START: pid=%d ppid=%d name=%s cmd=%s",
-		pid, ppid, name, truncStr(cmdLine, 80))
-}
-
-func (c *ETWCollector) processEnd(pid, ppid uint32, eventImg string) {
-	name := baseName(getImagePath(pid))
-	if name == "" {
-		name = baseName(eventImg)
-	}
-	if name == "" || trustedOSProcess[strings.ToLower(name)] {
-		return
-	}
-	evt := event.NewEvent(event.EventTypeProcess, event.SeverityLow, map[string]interface{}{
-		"action": "process_termination",
-		"pid":    pid,
-		"ppid":   ppid,
-		"name":   name,
-	})
-	if c.filter != nil && c.filter.ShouldFilter(evt) {
-		return
-	}
-	c.sendPriority(evt)
-}
-
-// =====================================================================
-// Baseline Snapshot (Toolhelp32, runs once)
-// =====================================================================
-
-func (c *ETWCollector) baseline() {
-	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if err != nil {
-		return
-	}
-	defer windows.CloseHandle(snap)
-
-	var e windows.ProcessEntry32
-	e.Size = uint32(unsafe.Sizeof(e))
-
-	table := map[uint32]struct{ n, x string }{}
-	if windows.Process32First(snap, &e) == nil {
-		for {
-			n := windows.UTF16ToString(e.ExeFile[:])
-			x := getImagePath(e.ProcessID)
-			if x == "" {
-				x = n
-			}
-			table[e.ProcessID] = struct{ n, x string }{n, x}
-			if windows.Process32Next(snap, &e) != nil {
-				break
-			}
-		}
-	}
-
-	if windows.Process32First(snap, &e) != nil {
-		return
-	}
-	for {
-		pid := e.ProcessID
-		ppid := e.ParentProcessID
-		info := table[pid]
-		pinfo := table[ppid]
-		cmd := getCmdLine(pid)
-		if cmd == "" {
-			cmd = info.x
-		}
-		sid, user, elev, integ := getPrivileges(pid)
-		snapSig, snapIss := SignatureTrustClass(info.x)
-		evt := event.NewEvent(event.EventTypeProcess, event.SeverityLow, map[string]interface{}{
-			"action": "snapshot", "pid": pid, "ppid": ppid,
-			"name": info.n, "executable": info.x, "command_line": cmd,
-			"parent_name": pinfo.n, "parent_executable": pinfo.x,
-			"user_sid": sid, "user_name": user,
-			"is_elevated": elev, "integrity_level": integ,
-			"signature_status": snapSig,
-			"signature_issuer": snapIss,
-		})
-		c.send(evt)
-		if windows.Process32Next(snap, &e) != nil {
-			break
-		}
-	}
-}
-
-// =====================================================================
-// Windows API Helpers
-// =====================================================================
-
-func getImagePath(pid uint32) string {
-	if pid == 0 || pid == 4 {
-		return ""
-	}
-	h, err := windows.OpenProcess(0x1000, false, pid)
-	if err != nil {
-		return ""
-	}
-	defer windows.CloseHandle(h)
-	var buf [windows.MAX_PATH]uint16
-	sz := uint32(len(buf))
-	if windows.QueryFullProcessImageName(h, 0, &buf[0], &sz) != nil {
-		return ""
-	}
-	return windows.UTF16ToString(buf[:sz])
-}
-
-var (
-	ntdll = windows.NewLazyDLL("ntdll.dll")
-	ntqip = ntdll.NewProc("NtQueryInformationProcess")
-)
-
-func getCmdLine(pid uint32) string {
-	if pid == 0 || pid == 4 {
-		return ""
-	}
-	h, err := windows.OpenProcess(0x1000, false, pid)
-	if err != nil {
-		return ""
-	}
-	defer windows.CloseHandle(h)
-
-	const infoCls = 60
-	var retLen uint32
-	buf := make([]byte, 1024)
-	r, _, _ := ntqip.Call(uintptr(h), infoCls,
-		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)),
-		uintptr(unsafe.Pointer(&retLen)))
-
-	if r == 0xC0000004 && retLen > 0 && retLen < 65536 {
-		buf = make([]byte, retLen)
-		r, _, _ = ntqip.Call(uintptr(h), infoCls,
-			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)),
-			uintptr(unsafe.Pointer(&retLen)))
-	}
-	if r != 0 || retLen < 8 {
-		return ""
-	}
-
-	length := *(*uint16)(unsafe.Pointer(&buf[0]))
-	if length == 0 || int(length)+16 > len(buf) {
-		return ""
-	}
-	ptr := *(*uintptr)(unsafe.Pointer(&buf[8]))
-	base := uintptr(unsafe.Pointer(&buf[0]))
-	off := int(ptr - base)
-	if off < 0 || off+int(length) > len(buf) {
-		return ""
-	}
-	s := make([]uint16, length/2)
-	for i := range s {
-		s[i] = *(*uint16)(unsafe.Pointer(&buf[off+i*2]))
-	}
-	return windows.UTF16ToString(s)
-}
-
-func getPrivileges(pid uint32) (sid, user string, elevated bool, integrity string) {
-	if pid == 0 || pid == 4 {
-		return
-	}
-	h, err := windows.OpenProcess(0x1000, false, pid)
-	if err != nil {
-		return
-	}
-	defer windows.CloseHandle(h)
-
-	var tok windows.Token
-	if windows.OpenProcessToken(h, windows.TOKEN_QUERY, &tok) != nil {
-		return
-	}
-	defer tok.Close()
-
-	if u, err := tok.GetTokenUser(); err == nil {
-		sid = u.User.Sid.String()
-		if acct, dom, _, err := u.User.Sid.LookupAccount(""); err == nil {
-			user = dom + `\` + acct
-		}
-	}
-	elevated = tok.IsElevated()
-
-	var isz uint32
-	windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, nil, 0, &isz)
-	if isz > 0 {
-		ib := make([]byte, isz)
-		if windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, &ib[0], isz, &isz) == nil {
-			tml := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&ib[0]))
-			switch tml.Label.Sid.String() {
-			case "S-1-16-4096":
-				integrity = "Low"
-			case "S-1-16-8192":
-				integrity = "Medium"
-			case "S-1-16-12288":
-				integrity = "High"
-			case "S-1-16-16384":
-				integrity = "System"
-			default:
-				integrity = tml.Label.Sid.String()
-			}
-		}
-	}
-	return
-}
-
-// =====================================================================
-// Utility
-// =====================================================================
-
-func (c *ETWCollector) send(evt *event.Event) {
-	select {
-	case c.eventChan <- evt:
-		c.collected.Add(1)
-	default:
-		c.dropped.Add(1)
-	}
-}
-
-// sendPriority sends a high-value event (process creation, registry) with a
-// blocking timeout instead of dropping immediately. This prevents the flood of
-// file I/O events from silently drowning out security-critical process telemetry.
-func (c *ETWCollector) sendPriority(evt *event.Event) {
-	select {
-	case c.eventChan <- evt:
-		c.collected.Add(1)
-	case <-time.After(2 * time.Second):
-		c.dropped.Add(1)
-		c.logger.Warnf("[ETW] Priority event DROPPED after 2s timeout (channel full): type=%s", evt.Type)
-	}
-}
-
-func baseName(p string) string {
-	if i := strings.LastIndex(p, `\`); i >= 0 {
-		return p[i+1:]
-	}
-	if i := strings.LastIndex(p, `/`); i >= 0 {
-		return p[i+1:]
-	}
-	return p
-}
-
-func truncStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
-
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-// Public API for agent
-func (c *ETWCollector) IsRunning() bool { return c.running.Load() }
-func (c *ETWCollector) Stats() ETWStats {
-	return ETWStats{c.running.Load(), c.collected.Load(), c.dropped.Load(), c.errors.Load()}
-}
-
-type ETWStats struct {
-	Running         bool
-	EventsCollected uint64
-	EventsDropped   uint64
-	Errors          uint64
+	// The callback supplies a fixed C buffer of this size. Keep its pointer
+	// intact while copying; uintptr arithmetic cannot retain pointer lifetime.
+	return windows.UTF16ToString(unsafe.Slice((*uint16)(unsafe.Pointer(p)), max))
 }

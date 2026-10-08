@@ -1,0 +1,1 @@
+-- Retain the shared additive column: either service may still use it.

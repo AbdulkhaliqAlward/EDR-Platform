@@ -52,6 +52,8 @@ type Store interface {
 	CompleteInbox(ctx context.Context, id uuid.UUID, outcome string) error
 	CleanupInbox(ctx context.Context, olderThan time.Duration) (int64, error)
 	GetOrInitState(ctx context.Context, key, def string) (string, error)
+	GetState(ctx context.Context, key string) (value string, updatedAt time.Time, found bool, err error)
+	SetState(ctx context.Context, key, value string) error
 	ReserveRule(ctx context.Context, ruleID, agentID uuid.UUID, cooldownMinutes int) (bool, error)
 	RefreshRuleSuccessRate(ctx context.Context, ruleID uuid.UUID) error
 	CreateExecution(ctx context.Context, e *repository.ExecutionRecord) error
@@ -97,6 +99,13 @@ type Engine struct {
 	wg      sync.WaitGroup
 	once    sync.Once
 
+	// agentLocks serialises runs per endpoint: a manual run and an automated
+	// run (or two automated runs) never interleave their steps on one host.
+	agentLocksMu sync.Mutex
+	agentLocks   map[string]*endpointSlot
+	runMu        sync.Mutex // protects work admission against shutdown
+	stopping     bool
+
 	commandPoll time.Duration // test hook
 }
 
@@ -115,6 +124,7 @@ func New(cfg Config, logger *logrus.Logger, store Store,
 		cfg: cfg, logger: logger, store: store, commands: commands, playbooks: playbooks,
 		rules: rules, scripts: scripts, agents: agents, dispatcher: dispatcher,
 		sem: make(chan struct{}, cfg.MaxConcurrentRuns), baseCtx: ctx, cancel: cancel,
+		agentLocks:  map[string]*endpointSlot{},
 		commandPoll: time.Second,
 	}
 }
@@ -129,7 +139,15 @@ type RunRequest struct {
 	Username   string
 	// Overrides replaces step parameters by step index (manual runs).
 	Overrides map[int]map[string]string
+	// Guard, when set, can refuse a fully bound plan before anything is
+	// recorded or dispatched (automation guardrails).
+	Guard func(*Plan) error
 }
+
+// GuardrailError is returned when an automated run is refused by policy.
+type GuardrailError struct{ Reason string }
+
+func (g *GuardrailError) Error() string { return "guardrail: " + g.Reason }
 
 // BoundStep is a playbook step with its parameters bound to the alert, plus
 // its runtime state.
@@ -144,6 +162,8 @@ type BoundStep struct {
 	ScriptID    string            `json:"script_id,omitempty"`
 	ScriptName  string            `json:"script_name,omitempty"`
 	Errors      []string          `json:"errors,omitempty"`
+	// Destructive marks containment actions (kill, quarantine, isolate).
+	Destructive bool `json:"destructive,omitempty"`
 
 	Status      string     `json:"status"` // pending | running | success | failed | skipped
 	CommandID   string     `json:"command_id,omitempty"`
@@ -158,6 +178,8 @@ type Plan struct {
 	PlaybookID    string      `json:"playbook_id"`
 	PlaybookName  string      `json:"playbook_name"`
 	AlertID       string      `json:"alert_id,omitempty"`
+	AlertTitle    string      `json:"alert_title,omitempty"`
+	AlertSeverity string      `json:"alert_severity,omitempty"`
 	AgentID       string      `json:"agent_id"`
 	AgentHostname string      `json:"agent_hostname,omitempty"`
 	AgentOnline   bool        `json:"agent_online"`
@@ -205,6 +227,8 @@ func (e *Engine) Prepare(ctx context.Context, req RunRequest) (*Plan, error) {
 			return nil, err
 		}
 		plan.AlertID = alert.ID
+		plan.AlertTitle = alert.RuleTitle
+		plan.AlertSeverity = strings.ToLower(alert.Severity)
 		plan.Variables = BuildAlertVars(alert)
 	}
 
@@ -249,6 +273,14 @@ func (e *Engine) Prepare(ctx context.Context, req RunRequest) (*Plan, error) {
 	plan.Ready = true
 	for i, cmd := range steps {
 		bs := e.bindStep(ctx, i, cmd, plan.Variables, req.Overrides[i])
+		if req.Trigger == "automation" && bs.Type == "terminate_process" {
+			// Automatic containment always targets the whole tree. An analyst
+			// can still explicitly choose process-only scope for a manual run.
+			bs.Params["kill_tree"] = "true"
+			if bs.Params["process_path"] == "" || bs.Params["process_started_at"] == "" {
+				bs.Errors = append(bs.Errors, "automatic termination requires the measured process image and creation time; review this alert manually")
+			}
+		}
 		if len(bs.Errors) > 0 {
 			plan.Ready = false
 		}
@@ -292,6 +324,7 @@ func (e *Engine) bindStep(ctx context.Context, idx int, cmd models.PlaybookComma
 	switch bs.Type {
 	case "run_script":
 		bs.Label = "Run library script"
+		bs.Destructive = true // a script can change the host; treat as containment
 		sid := strings.TrimSpace(cmd.ScriptID)
 		if sid == "" {
 			sid = bs.Params["script_id"]
@@ -321,6 +354,7 @@ func (e *Engine) bindStep(ctx context.Context, idx int, cmd models.PlaybookComma
 		// Legacy free-text step (seeded / older playbooks). Never templated:
 		// alert values are attacker-influenced and must not reach a command line.
 		bs.Label = "Run command (legacy)"
+		bs.Destructive = true
 		c := bs.Params["cmd"]
 		bs.Params = map[string]string{"cmd": c}
 		if hasTemplate(c) {
@@ -337,6 +371,7 @@ func (e *Engine) bindStep(ctx context.Context, idx int, cmd models.PlaybookComma
 		return bs
 	}
 	bs.Label = action.Label
+	bs.Destructive = action.Destructive
 
 	// Only the action's declared parameters reach the agent (stored and
 	// override values alike); anything else is dropped.
@@ -392,6 +427,9 @@ func (e *Engine) bindStep(ctx context.Context, idx int, cmd models.PlaybookComma
 
 // Start validates a run, records it and executes it asynchronously.
 func (e *Engine) Start(ctx context.Context, req RunRequest) (*repository.ExecutionRecord, *Plan, error) {
+	if req.Trigger == "automation" && !e.autoResponseEnabled(ctx) {
+		return nil, nil, &GuardrailError{Reason: "automated response is disabled"}
+	}
 	plan, err := e.Prepare(ctx, req)
 	if err != nil {
 		return nil, nil, err
@@ -402,24 +440,91 @@ func (e *Engine) Start(ctx context.Context, req RunRequest) (*repository.Executi
 	if !plan.AgentOnline {
 		return nil, plan, ErrAgentOffline
 	}
-	rec, err := e.newExecution(ctx, req, plan, "running", "")
+	if req.Guard != nil {
+		if err := req.Guard(plan); err != nil {
+			return nil, plan, err
+		}
+	}
+	// Recorded as pending (queued) until this endpoint is free: runs on one
+	// host execute strictly one after another, whatever triggered them.
+	rec, err := e.newExecution(ctx, req, plan, "pending", "")
 	if err != nil {
 		return nil, plan, err
 	}
+	// API responses must not share records/steps with the asynchronous worker.
+	// Otherwise JSON encoding can race status and step updates immediately
+	// after Start returns.
+	initialRec := *rec
+	initialRec.Steps = append(json.RawMessage(nil), rec.Steps...)
+	initialPlan := *plan
+	initialPlan.Steps = nil
+	_ = json.Unmarshal(marshalSteps(plan.Steps), &initialPlan.Steps)
 
-	e.wg.Add(1)
+	if !e.admitWork() {
+		e.finish(rec, plan, "cancelled", "server shutting down")
+		return nil, plan, errors.New("response engine is shutting down")
+	}
 	go func() {
 		defer e.wg.Done()
+		unlock, ok := e.lockAgent(plan.AgentID)
+		if !ok {
+			e.finish(rec, plan, "cancelled", "server shutting down before the playbook started")
+			return
+		}
+		defer unlock()
 		select {
 		case e.sem <- struct{}{}:
 			defer func() { <-e.sem }()
 		case <-e.baseCtx.Done():
-			e.finish(rec, plan, "failed", "server shutting down before the playbook started")
+			e.finish(rec, plan, "cancelled", "server shutting down before the playbook started")
 			return
 		}
+		if err := e.automaticRunAllowed(e.baseCtx, rec); err != nil {
+			e.finish(rec, plan, "cancelled", err.Error())
+			return
+		}
+		rec.Status = "running"
+		rec.StartedAt = time.Now().UTC()
+		e.persist(rec, plan)
 		e.execute(rec, plan)
 	}()
-	return rec, plan, nil
+	return &initialRec, &initialPlan, nil
+}
+
+// Recheck when queued work starts and before each undispatched step. The
+// operator switch and an analyst verdict can change while a run waits.
+func (e *Engine) automaticRunAllowed(ctx context.Context, rec *repository.ExecutionRecord) error {
+	if rec.TriggerSource != "automation" {
+		return nil
+	}
+	if !e.autoResponseEnabled(ctx) {
+		return &GuardrailError{Reason: "automated response is disabled"}
+	}
+	if rec.AlertID != nil {
+		alert, err := e.store.GetSigmaAlert(ctx, *rec.AlertID)
+		if err != nil {
+			return &GuardrailError{Reason: "alert state unavailable"}
+		}
+		if closedAlertStatuses[strings.ToLower(alert.Status)] {
+			return &GuardrailError{Reason: "alert was closed by an analyst"}
+		}
+	}
+	return nil
+}
+
+// lockAgent waits until no other run is active on the endpoint. It returns
+// false if the engine stops while waiting.
+func (e *Engine) lockAgent(agentID string) (func(), bool) {
+	release, err := e.AcquireEndpoint(e.baseCtx, agentID)
+	return release, err == nil
+}
+
+// ActiveOn reports whether a run is executing on the endpoint right now.
+func (e *Engine) ActiveOn(agentID string) bool {
+	e.agentLocksMu.Lock()
+	ch, ok := e.agentLocks[NormalizeAgentID(agentID)]
+	e.agentLocksMu.Unlock()
+	return ok && len(ch.token) > 0
 }
 
 func (e *Engine) newExecution(ctx context.Context, req RunRequest, plan *Plan, status, errMsg string) (*repository.ExecutionRecord, error) {
@@ -435,6 +540,9 @@ func (e *Engine) newExecution(ctx context.Context, req RunRequest, plan *Plan, s
 		PlaybookName:      plan.PlaybookName,
 		RuleID:            req.RuleID,
 		AgentID:           agentID,
+		AgentHostname:     plan.AgentHostname,
+		AlertTitle:        plan.AlertTitle,
+		AlertSeverity:     plan.AlertSeverity,
 		Status:            status,
 		TriggerSource:     trigger,
 		CreatedByUsername: req.Username,
@@ -468,6 +576,13 @@ func (e *Engine) execute(rec *repository.ExecutionRecord, plan *Plan) {
 	firstErr := ""
 	for i := range plan.Steps {
 		s := &plan.Steps[i]
+		if err := e.automaticRunAllowed(ctx, rec); err != nil {
+			for j := i; j < len(plan.Steps); j++ {
+				plan.Steps[j].Status = "skipped"
+			}
+			e.finish(rec, plan, "cancelled", err.Error())
+			return
+		}
 		if stopped {
 			s.Status = "skipped"
 			continue
@@ -545,6 +660,25 @@ func (e *Engine) runStep(ctx context.Context, rec *repository.ExecutionRecord, p
 	agentID := plan.AgentID
 	if !e.dispatcher.IsOnline(agentID) {
 		return ErrAgentOffline
+	}
+
+	// Desired-state actions: when the endpoint is already in the requested
+	// isolation state the step succeeds without a command. Re-sending
+	// isolation would rebuild the firewall rules under the block policy and
+	// drop the agent's live connection.
+	if s.Type == "isolate_network" || s.Type == "unisolate_network" {
+		if id, err := uuid.Parse(agentID); err == nil {
+			if agent, aerr := e.agents.GetByID(ctx, id); aerr == nil && agent != nil {
+				if s.Type == "isolate_network" && agent.IsIsolated {
+					s.Output = "Endpoint is already isolated — no change needed"
+					return nil
+				}
+				if s.Type == "unisolate_network" && !agent.IsIsolated {
+					s.Output = "Endpoint is not isolated — no change needed"
+					return nil
+				}
+			}
+		}
 	}
 
 	cmdType := s.Type
@@ -671,7 +805,10 @@ func commandOutput(result map[string]any) string {
 // Stop cancels running work and waits (bounded) for runs to record their state.
 func (e *Engine) Stop(timeout time.Duration) {
 	e.once.Do(func() {
+		e.runMu.Lock()
+		e.stopping = true
 		e.cancel()
+		e.runMu.Unlock()
 		done := make(chan struct{})
 		go func() { e.wg.Wait(); close(done) }()
 		select {

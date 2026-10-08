@@ -26,6 +26,7 @@ type fakeStore struct {
 	executions map[uuid.UUID]*repository.ExecutionRecord
 	reserved   map[string]bool
 	inbox      map[uuid.UUID]string
+	state      map[string]string
 }
 
 func newFakeStore() *fakeStore {
@@ -34,6 +35,7 @@ func newFakeStore() *fakeStore {
 		executions: map[uuid.UUID]*repository.ExecutionRecord{},
 		reserved:   map[string]bool{},
 		inbox:      map[uuid.UUID]string{},
+		state:      map[string]string{},
 	}
 }
 
@@ -74,6 +76,18 @@ func (f *fakeStore) CompleteInbox(_ context.Context, id uuid.UUID, outcome strin
 func (f *fakeStore) CleanupInbox(context.Context, time.Duration) (int64, error) { return 0, nil }
 func (f *fakeStore) GetOrInitState(_ context.Context, _, def string) (string, error) {
 	return def, nil
+}
+func (f *fakeStore) GetState(_ context.Context, key string) (string, time.Time, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.state[key]
+	return v, time.Now(), ok, nil
+}
+func (f *fakeStore) SetState(_ context.Context, key, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state[key] = value
+	return nil
 }
 func (f *fakeStore) ReserveRule(_ context.Context, id, agent uuid.UUID, _ int) (bool, error) {
 	f.mu.Lock()
@@ -235,6 +249,7 @@ type fixture struct {
 	agentID  uuid.UUID
 	alertID  uuid.UUID
 	scriptID uuid.UUID
+	agents   *fakeAgents
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -254,7 +269,7 @@ func newFixture(t *testing.T) *fixture {
 	f.scripts = &fakeScripts{items: map[uuid.UUID]*repository.ResponseScript{
 		f.scriptID: {ID: f.scriptID, Name: "List tasks", Cmd: `powershell -Command "Get-ScheduledTask"`, Enabled: true},
 	}}
-	agents := &fakeAgents{items: map[uuid.UUID]*models.Agent{f.agentID: {ID: f.agentID, Hostname: "WS-01", Status: "online"}}}
+	f.agents = &fakeAgents{items: map[uuid.UUID]*models.Agent{f.agentID: {ID: f.agentID, Hostname: "WS-01", Status: "online"}}}
 	f.store.alerts[f.alertID] = &repository.SigmaAlertRecord{
 		ID: f.alertID.String(), AgentID: "agent-" + f.agentID.String(), RuleID: "r1",
 		RuleTitle: "Suspicious Ransomware Activity", Severity: "critical", RiskScore: 92,
@@ -263,11 +278,12 @@ func newFixture(t *testing.T) *fixture {
 			"event_type": "process",
 			"data": map[string]any{
 				"name": "evil.exe", "pid": float64(4242), "executable": `C:\Users\a\evil.exe`,
-				"command_line": `evil.exe --encrypt`,
+				"command_line":       `evil.exe --encrypt`,
+				"process_start_time": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano),
 			},
 		},
 	}
-	f.e = New(Config{AutoExecute: true, GRPCAddress: "srv:47051"}, logger, f.store, f.cmds, f.pbs, f.rules, f.scripts, agents, f.disp)
+	f.e = New(Config{AutoExecute: true, GRPCAddress: "srv:47051"}, logger, f.store, f.cmds, f.pbs, f.rules, f.scripts, f.agents, f.disp)
 	f.e.commandPoll = 2 * time.Millisecond
 	return f
 }
@@ -552,5 +568,17 @@ func TestTriggerCooldownIsPerEndpoint(t *testing.T) {
 	}
 	for _, id := range ids {
 		waitDone(t, f, id)
+	}
+}
+
+func TestAggregatedAlertMatchesExactRelatedRuleIdentity(t *testing.T) {
+	c := Conditions{RuleIDs: []string{"11111111-1111-4111-8111-111111111111"}, LogicOperator: "AND"}
+	alert := &repository.SigmaAlertRecord{RuleID: "another-primary", Severity: "medium", RelatedRuleIDs: []string{"11111111-1111-4111-8111-111111111111"}}
+	if !c.Matches(alert) || !c.ContainmentAllowedFor(alert) {
+		t.Fatal("exact aggregated identity must match opt-in")
+	}
+	alert.RelatedRuleIDs = []string{"different"}
+	if c.Matches(alert) || c.ContainmentAllowedFor(alert) {
+		t.Fatal("titles or unrelated IDs cannot opt in")
 	}
 }

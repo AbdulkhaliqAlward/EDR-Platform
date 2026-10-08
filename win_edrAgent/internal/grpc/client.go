@@ -664,28 +664,25 @@ func (c *Client) SendCommandResult(ctx context.Context, res *command.Result, age
 	if res == nil {
 		return nil
 	}
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
-	if conn == nil {
-		c.logger.Warnf("SendCommandResult skipped: not connected")
-		return fmt.Errorf("not connected")
-	}
-	req := pb.NewCommandResultProto(
-		res.CommandID,
-		agentID,
-		res.Status,
-		res.Output,
-		res.Error,
-		res.Duration,
-		res.Timestamp,
-	)
-	out := &emptypb.Empty{}
-	err := conn.Invoke(ctx, pb.EventIngestionService_SendCommandResult_FullMethodName, req, out)
+	req := pb.NewCommandResultProto(res.CommandID, agentID, res.Status, res.Output, res.Error, res.Duration, res.Timestamp)
+	deliveryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	err := retryCommandResult(deliveryCtx, time.Second, func(attempt context.Context) error {
+		c.mu.RLock()
+		conn := c.conn
+		c.mu.RUnlock()
+		if conn == nil {
+			return grpcstatus.Error(codes.Unavailable, "not connected")
+		}
+		rpcCtx, done := context.WithTimeout(attempt, 8*time.Second)
+		defer done()
+		return conn.Invoke(rpcCtx, pb.EventIngestionService_SendCommandResult_FullMethodName, req, &emptypb.Empty{})
+	})
 	if err != nil {
-		c.logger.Warnf("SendCommandResult failed: %v", err)
+		c.logger.Warnf("Command result delivery unconfirmed: %v", err)
 		return err
 	}
+
 	c.logger.Debugf("Command result sent: id=%s status=%s", res.CommandID, res.Status)
 	return nil
 }

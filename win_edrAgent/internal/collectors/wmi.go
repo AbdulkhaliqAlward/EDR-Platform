@@ -162,14 +162,11 @@ func (c *WMICollector) collectProcesses() {
 		c.cacheMu.RUnlock()
 
 		if !exists && pid > 4 { // Skip System and Idle
-			// Self-exclusion: suppress the agent and its short-lived child
-			// processes (e.g. the PowerShell spawned by this very WMI query).
-			// Without this, each inventory pass re-discovers its own helper
-			// process and fires a "new-process" event that downstream Sigma
-			// rules (T1021/T1059) flag as suspicious. Two layers:
-			//   1. Deterministic ppid match against the agent's own PID.
-			//   2. Name+cmdline heuristic for indirect grand-children.
-			if !isAgentChildByPPID(uint32(ppid)) && !isSelfOrChildProcess(strings.ToLower(name), cmdLine) {
+			// WMI process discovery is a fallback for hosts where the ETW
+			// kernel tracer is not running: with ETW active it would only
+			// duplicate (lower-fidelity) process-creation events and alerts.
+			// The agent's own helper tree is excluded by process ancestry.
+			if !isSelfPID(uint32(pid)) && !etwProcessTracerActive() {
 				evt := event.NewEvent(event.EventTypeProcess, event.SeverityLow, map[string]interface{}{
 					"action":       "created",
 					"pid":          pid,

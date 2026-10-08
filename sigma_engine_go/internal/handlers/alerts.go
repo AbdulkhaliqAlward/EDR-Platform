@@ -93,6 +93,7 @@ type AlertResponse struct {
 
 	// ── Alert Aggregation metadata ───────────────────────────────────────────
 	MatchCount         *int     `json:"match_count,omitempty"`
+	RelatedRuleIDs     []string `json:"related_rule_ids,omitempty"`
 	RelatedRules       []string `json:"related_rules,omitempty"`
 	CombinedConfidence *float64 `json:"combined_confidence,omitempty"`
 	SeverityPromoted   *bool    `json:"severity_promoted,omitempty"`
@@ -353,13 +354,14 @@ func toAlertResponseWithRiskLevels(alert *database.Alert, riskLevels scoring.Ris
 		CreatedAt:         alert.CreatedAt,
 		UpdatedAt:         alert.UpdatedAt,
 		// Context-Aware Risk Scoring
-		RiskScore:          alert.RiskScore,
-		RiskLevel:          scoring.RiskLevelFromScore(alert.RiskScore, riskLevels),
-		ContextSnapshot:    alert.ContextSnapshot,
-		ScoreBreakdown:     alert.ScoreBreakdown,
+		RiskScore:       alert.RiskScore,
+		RiskLevel:       scoring.RiskLevelFromScore(alert.RiskScore, riskLevels),
+		ContextSnapshot: alert.ContextSnapshot,
+		ScoreBreakdown:  alert.ScoreBreakdown,
 		// Aggregation metadata
 		MatchCount:         alert.MatchCount,
 		RelatedRules:       alert.RelatedRules,
+		RelatedRuleIDs:     alert.RelatedRuleIDs,
 		CombinedConfidence: alert.CombinedConfidence,
 		SeverityPromoted:   alert.SeverityPromoted,
 		OriginalSeverity:   alert.OriginalSeverity,

@@ -359,8 +359,25 @@ func (h *AutomationHandlers) validateRuleRequest(ctx context.Context, req *Autom
 		}
 	}
 	if !partial || len(req.TriggerConditions) > 0 {
-		if _, ok := response.ParseConditions(req.TriggerConditions); !ok {
-			return errors.New("trigger conditions must set at least one of severity, rule_patterns or min_risk_score")
+		cond, ok := response.ParseConditions(req.TriggerConditions)
+		if !ok {
+			return errors.New("trigger conditions must set at least one of severity, rule_ids, rule_patterns, mitre_techniques or min_risk_score")
+		}
+		if len(cond.RuleIDs) > 100 || len(cond.RulePatterns) > 50 || len(cond.MitreTechniques) > 50 {
+			return errors.New("too many trigger conditions")
+		}
+		for _, id := range cond.RuleIDs {
+			if len(id) > 128 {
+				return errors.New("rule IDs must be at most 128 characters")
+			}
+		}
+		for _, t := range cond.MitreTechniques {
+			if !mitreTechniqueRe.MatchString(t) {
+				return fmt.Errorf("invalid MITRE technique %q (expected e.g. T1059 or T1059.001)", t)
+			}
+		}
+		if cond.MinRiskScore > 100 {
+			return errors.New("min_risk_score must be between 1 and 100")
 		}
 	}
 	if !partial || req.PlaybookID != uuid.Nil {
@@ -414,6 +431,9 @@ func (h *AutomationHandlers) CreateAutomationRule(c echo.Context) error {
 		rule.Enabled = *req.Enabled
 	}
 
+	if err := h.checkContainmentScope(ctx, &rule); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "AUTOMATION_SCOPE_TOO_BROAD", err.Error())
+	}
 	if err := h.automationService.CreateRule(ctx, &rule); err != nil {
 		h.logger.WithError(err).Error("CreateAutomationRule failed")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create rule")
@@ -477,6 +497,9 @@ func (h *AutomationHandlers) UpdateAutomationRule(c echo.Context) error {
 		rule.Enabled = *req.Enabled
 	}
 
+	if err := h.checkContainmentScope(ctx, rule); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "AUTOMATION_SCOPE_TOO_BROAD", err.Error())
+	}
 	if err := h.automationService.UpdateRule(ctx, rule); err != nil {
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update rule")
 	}
@@ -489,6 +512,31 @@ func (h *AutomationHandlers) UpdateAutomationRule(c echo.Context) error {
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
 	})
+}
+
+// checkContainmentScope enforces the automated-containment policy: an
+// enabled, auto-executing rule whose playbook contains containment actions
+// (kill, quarantine, isolate, scripts) must use AND logic and be limited to
+// high/critical alerts or to explicitly listed Sigma rule IDs. Broad triggers
+// (risk score or a title substring alone) may only suggest or run manually.
+func (h *AutomationHandlers) checkContainmentScope(ctx context.Context, rule *models.AutomationRule) error {
+	if !rule.Enabled || !rule.AutoExecute {
+		return nil
+	}
+	pb, err := h.automationService.GetPlaybookByID(ctx, rule.PlaybookID)
+	if err != nil {
+		return errors.New("target playbook not found")
+	}
+	if !response.DefinitionIsDestructive(pb.Commands) {
+		return nil
+	}
+	cond, ok := response.ParseConditions(rule.TriggerConditions)
+	if ok && cond.ScopedForContainment() {
+		return nil
+	}
+	return fmt.Errorf("playbook %q contains containment actions, so an auto-executing rule must match only "+
+		"high/critical alerts (severity condition) or list the exact Sigma rule IDs, using AND logic. "+
+		"Narrow the conditions, or turn off auto-execute to use this rule for suggestions only", pb.Name)
 }
 
 // DeleteAutomationRule deletes an automation rule
@@ -535,6 +583,9 @@ func (h *AutomationHandlers) ToggleAutomationRule(c echo.Context) error {
 	// enabling a manual-only rule silently made it auto-executing.)
 	rule.Enabled = req.Enabled
 
+	if err := h.checkContainmentScope(ctx, rule); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "AUTOMATION_SCOPE_TOO_BROAD", err.Error())
+	}
 	if err := h.automationService.UpdateRule(ctx, rule); err != nil {
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update rule")
 	}

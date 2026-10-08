@@ -30,12 +30,12 @@ import (
 )
 
 type forensicBundle struct {
-	Version   int `json:"version"`
-	CommandID string `json:"command_id"`
-	AgentID   string `json:"agent_id"`
-	TimeRange string `json:"time_range,omitempty"`
-	LogTypes  string `json:"log_types,omitempty"`
-	Summary   map[string]any `json:"summary,omitempty"`
+	Version   int                   `json:"version"`
+	CommandID string                `json:"command_id"`
+	AgentID   string                `json:"agent_id"`
+	TimeRange string                `json:"time_range,omitempty"`
+	LogTypes  string                `json:"log_types,omitempty"`
+	Summary   map[string]any        `json:"summary,omitempty"`
 	Events    []forensicBundleEvent `json:"events,omitempty"`
 }
 
@@ -76,6 +76,7 @@ type Server struct {
 // Using an interface avoids an import cycle (playbook → server → playbook).
 type PlaybookEngine interface {
 	OnIsolationSucceeded(agentID uuid.UUID)
+	OnIsolationRestored(agentID uuid.UUID)
 	OnCommandResult(ctx context.Context, agentID uuid.UUID, commandID uuid.UUID, status, output string)
 }
 
@@ -361,39 +362,43 @@ func (s *Server) RegisterAgent(ctx context.Context, req *edrv1.AgentRegistration
 // This closes the C2 feedback loop: Dashboard → Server → Agent → Execute → Result → Server.
 func (s *Server) SendCommandResult(ctx context.Context, res *edrv1.CommandResult) (*emptypb.Empty, error) {
 	if res == nil {
-		return &emptypb.Empty{}, nil
+		return nil, status.Error(codes.InvalidArgument, "missing command result")
 	}
-
-	s.logger.WithFields(logrus.Fields{
-		"command_id": res.CommandId,
-		"agent_id":   res.AgentId,
-		"status":     res.Status,
-		"output":     res.Output,
-		"error":      res.Error,
-	}).Info("Command result received from agent")
-
-	// Persist result to commands table
-	if s.commandRepo != nil {
-		// Map agent status to DB status (agent sends UPPERCASE: "SUCCESS", "FAILED")
-		dbStatus := models.CommandStatusCompleted
-		agentStatus := strings.ToLower(res.Status)
-		if agentStatus == "failed" || agentStatus == "error" {
-			dbStatus = models.CommandStatusFailed
-		} else if agentStatus == "timeout" {
-			dbStatus = models.CommandStatusTimeout
-		}
-
-		result := map[string]any{
-			"output": res.Output,
-		}
-		if cmdID, err := uuid.Parse(res.CommandId); err == nil {
-			if err := s.commandRepo.UpdateStatus(ctx, cmdID, dbStatus, result, res.Error); err != nil {
-				s.logger.WithError(err).Warn("Failed to persist command result to DB")
-			} else {
-				s.logger.Infof("Command %s result persisted: status=%s", res.CommandId, dbStatus)
-			}
-		}
+	certID, err := parseAgentUUIDFlexible(extractAgentIDFromContext(ctx))
+	if err != nil || certID == uuid.Nil {
+		return nil, status.Error(codes.Unauthenticated, "authenticated endpoint identity required")
 	}
+	payloadID, err := parseAgentUUIDFlexible(res.GetAgentId())
+	if err != nil || payloadID != certID {
+		return nil, status.Error(codes.PermissionDenied, "result endpoint differs from authenticated endpoint")
+	}
+	cmdID, err := uuid.Parse(res.CommandId)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid command ID")
+	}
+	dbStatus, err := commandResultStatus(res.Status)
+	if err != nil {
+		return nil, err
+	}
+	if s.commandRepo == nil {
+		return nil, status.Error(codes.Unavailable, "command persistence unavailable")
+	}
+	cmd, err := s.commandRepo.GetByID(ctx, cmdID)
+	if err == repository.ErrNotFound || (err == nil && cmd == nil) {
+		return nil, status.Error(codes.NotFound, "command not found")
+	}
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "command ownership could not be verified")
+	}
+	if cmd.AgentID != certID {
+		return nil, status.Error(codes.PermissionDenied, "command belongs to another endpoint")
+	}
+	result := map[string]any{"output": res.Output}
+	if err := s.commandRepo.UpdateStatus(ctx, cmdID, dbStatus, result, res.Error); err != nil {
+		s.logger.WithError(err).Warn("Failed to persist command result")
+		return nil, status.Error(codes.Unavailable, "command result was not confirmed persisted")
+	}
+	s.logger.WithFields(logrus.Fields{"command_id": res.CommandId, "agent_id": certID.String(), "status": dbStatus}).Info("Command result persisted")
 
 	// Persist forensic bundles (collect_logs / collect_forensics) if present in output JSON.
 	if s.forensicRepo != nil && s.commandRepo != nil {
@@ -430,12 +435,17 @@ func (s *Server) SendCommandResult(ctx context.Context, res *edrv1.CommandResult
 						s.updateAgentIsolation(ctx, agentID, true)
 						s.logger.Infof("[Isolation] Agent %s is now ISOLATED", agentID)
 						// Trigger post-isolation playbook asynchronously
-						if s.playbookEngine != nil {
+						// Only a new isolation is triaged — not a repeated command on an
+						// already-isolated host (agents report "already isolated").
+						if s.playbookEngine != nil && !strings.Contains(strings.ToLower(res.Output), "already isolated") {
 							s.playbookEngine.OnIsolationSucceeded(agentID)
 						}
 					case cmdType == "restore_network" || cmdType == "unisolate_network":
 						s.updateAgentIsolation(ctx, agentID, false)
 						s.logger.Infof("[Isolation] Agent %s isolation RESTORED", agentID)
+						if s.playbookEngine != nil {
+							s.playbookEngine.OnIsolationRestored(agentID)
+						}
 					case cmdType == "stop_agent" || cmdType == "stop_service":
 						// Mark suspended so frontend shows 'Start Agent' enabled.
 						// The stream-close defer checks current status and skips
@@ -671,4 +681,19 @@ func resolveAgentIDFromCommandResult(res *edrv1.CommandResult, cmd *models.Comma
 		}
 	}
 	return uuid.Nil
+}
+
+func commandResultStatus(value string) (models.CommandStatus, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "success", "completed", "ok", "succeeded", "done":
+		return models.CommandStatusCompleted, nil
+	case "failed", "error":
+		return models.CommandStatusFailed, nil
+	case "timeout":
+		return models.CommandStatusTimeout, nil
+	case "cancelled", "canceled":
+		return models.CommandStatusCancelled, nil
+	default:
+		return "", status.Error(codes.InvalidArgument, "unknown terminal command status")
+	}
 }

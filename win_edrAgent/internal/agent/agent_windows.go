@@ -5,6 +5,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"github.com/edr-platform/win-agent/internal/command"
 
 	"github.com/edr-platform/win-agent/internal/collectors"
 	"github.com/edr-platform/win-agent/internal/responder"
@@ -76,6 +78,16 @@ func startPlatformCollectors(ctx context.Context, a *Agent) {
 			if pErr != nil {
 				logger.Warnf("[Response] process auto-response disabled: %v", pErr)
 			} else {
+				peng.SetTerminator(func(actionCtx context.Context, params map[string]string) (string, error) {
+					res := a.commandHandler.Execute(actionCtx, &command.Command{
+						ID:   "local-prevention-" + params["pid"] + "-" + params["process_started_at"],
+						Type: command.CmdTerminateProcess, Parameters: params,
+					})
+					if res.Status != "SUCCESS" {
+						return res.Output, fmt.Errorf("%s", res.Error)
+					}
+					return res.Output, nil
+				})
 				processAuto = peng
 				logger.Infof("[Response] Process auto-response armed (mode=%s rules=%s)", mode, rulesPath)
 			}
@@ -134,6 +146,7 @@ func startPlatformCollectors(ctx context.Context, a *Agent) {
 		if processAuto != nil {
 			etw.SetProcessAutoResponse(processAuto)
 		}
+		a.RegisterDropSource("etw", func() uint64 { return etw.Stats().EventsDropped })
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -268,6 +281,25 @@ func startPlatformCollectors(ctx context.Context, a *Agent) {
 
 	// Vulnerability scanner collector (Trivy/Grype) — periodic local scans that
 	// emit normalized vulnerability_finding telemetry events.
+	if !cfg.Collectors.DisablePowerShellLogging {
+		ps := collectors.NewPowerShellCollector(eventChan, logger, `C:\ProgramData\EDR\state`, true)
+		a.RegisterDropSource("powershell", ps.Dropped)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Errorf("PowerShell collector panicked and was safely recovered: %v", r)
+				}
+			}()
+			if err := ps.Start(ctx); err != nil {
+				logger.Warnf("PowerShell collector failed to start: %v", err)
+			} else {
+				logger.Info("PowerShell script-block collector started (ps_script / ps_module telemetry)")
+			}
+		}()
+	} else {
+		logger.Info("PowerShell logging collector disabled by config")
+	}
+
 	if cfg.Collectors.VulnScanEnabled {
 		vs := collectors.NewVulnerabilityScannerCollector(cfg.Collectors, eventChan, logger)
 		go func() {

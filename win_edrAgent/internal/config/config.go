@@ -129,6 +129,12 @@ type CollectorConfig struct {
 	PipeEnabled          bool `yaml:"pipe_enabled"`           // Kernel FileIo pipe events (Cobalt Strike beacon pipe detection)
 	ProcessAccessEnabled bool `yaml:"process_access_enabled"` // LSASS/credential dump detection (Mimikatz T1003.001)
 
+	// PowerShell Script Block / Module logging (Sigma ps_script / ps_module).
+	// On by default (opt-out so configs saved before this field keep it on):
+	// the agent enables Script Block Logging by policy when the host has not
+	// configured it, and reads Microsoft-Windows-PowerShell/Operational.
+	DisablePowerShellLogging bool `yaml:"disable_powershell_logging"`
+
 	// Phase 2 — Vulnerability scanner integration (Trivy/Grype)
 	VulnScanEnabled  bool          `yaml:"vuln_scan_enabled"`
 	VulnScanInterval time.Duration `yaml:"vuln_scan_interval"`

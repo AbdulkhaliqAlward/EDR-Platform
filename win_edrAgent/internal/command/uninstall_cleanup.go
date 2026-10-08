@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/edr-platform/win-agent/internal/edrhosts"
+	"github.com/edr-platform/win-agent/internal/pslogging"
 )
 
 // sysmonInstalledByEDRMarker is written by enableSysmon only when the agent
@@ -54,6 +55,12 @@ func (h *Handler) cleanupHostArtifacts() {
 	} else {
 		h.logger.Info("[UNINSTALL] EDR_BLOCK_IP_* firewall rules removed")
 	}
+
+	// ── 2b. PowerShell Script Block Logging policy ─────────────────────────
+	// Only values the agent itself created are removed (GPO/admin settings
+	// are left as they were).
+	pslogging.RevertScriptBlockLogging()
+	h.logger.Info("[UNINSTALL] PowerShell logging policy reverted (agent-created values only)")
 
 	// ── 3. Hosts file: C2 mapping + domain sinkhole blocks ──────────────────
 	if data, err := os.ReadFile(edrhosts.Path); err != nil {

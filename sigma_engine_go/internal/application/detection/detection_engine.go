@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/edr-platform/sigma-engine/internal/application/mapping"
@@ -69,7 +70,16 @@ type SigmaDetectionEngine struct {
 	stats          *DetectionStats
 	quality        QualityConfig
 	mu             sync.RWMutex
+
+	exceptions *ExceptionManager
+	suppressed atomic.Uint64 // matches hidden by detection exceptions
 }
+
+// SetExceptionManager installs analyst-managed detection exceptions.
+func (e *SigmaDetectionEngine) SetExceptionManager(m *ExceptionManager) { e.exceptions = m }
+
+// SuppressedByExceptions returns how many rule matches exceptions hid.
+func (e *SigmaDetectionEngine) SuppressedByExceptions() uint64 { return e.suppressed.Load() }
 
 // NewSigmaDetectionEngine creates a new detection engine.
 //
@@ -148,6 +158,32 @@ func (e *SigmaDetectionEngine) LoadRules(rules []*domain.SigmaRule) error {
 		logger.Infof("Loaded %d rules into detection engine", len(usable))
 	}
 	return nil
+}
+
+func ValidateRule(rule *domain.SigmaRule) error {
+	if rule == nil {
+		return fmt.Errorf("nil rule")
+	}
+	if err := rule.Validate(); err != nil {
+		return err
+	}
+	_, err := compileRule(rule)
+	return err
+}
+
+// TestRule evaluates a separate snapshot using the actual matching pipeline.
+// It cannot change live rules, exception hits, persisted alerts or responses.
+func (e *SigmaDetectionEngine) TestRule(rule *domain.SigmaRule, event *domain.LogEvent) ([]*domain.DetectionResult, error) {
+	if err := ValidateRule(rule); err != nil {
+		return nil, err
+	}
+	e.mu.RLock()
+	test := NewSigmaDetectionEngine(e.fieldMapper, e.modifierEngine, nil, e.quality)
+	e.mu.RUnlock()
+	if err := test.LoadRules([]*domain.SigmaRule{rule}); err != nil {
+		return nil, err
+	}
+	return test.Detect(event), nil
 }
 
 // Detect evaluates an event against all loaded rules and returns matching results.
@@ -388,6 +424,12 @@ func (e *SigmaDetectionEngine) matchRule(rule *domain.SigmaRule, event *domain.L
 		return nil
 	}
 	confidence := math.Min(getLevelConfidence(rule.Level)*quality, 1.0)
+
+	// Analyst-approved exceptions (known-benign activity for this rule).
+	if e.exceptions.suppresses(rule, event, ec) {
+		e.suppressed.Add(1)
+		return nil
+	}
 
 	// Enrich output with decoded payloads (e.g., PowerShell -EncodedCommand) so the
 	// SOC sees the real script/command even when only base64 is logged.

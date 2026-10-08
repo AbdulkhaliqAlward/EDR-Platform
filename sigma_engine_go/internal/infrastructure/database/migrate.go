@@ -5,7 +5,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 
@@ -42,7 +42,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	logger.Infof("Running %d database migrations...", len(upFiles))
 
 	for _, filename := range upFiles {
-		sqlBytes, err := migrationFS.ReadFile(filepath.Join("migrations", filename))
+		sqlBytes, err := migrationFS.ReadFile(path.Join("migrations", filename))
 		if err != nil {
 			return fmt.Errorf("failed to read migration %s: %w", filename, err)
 		}

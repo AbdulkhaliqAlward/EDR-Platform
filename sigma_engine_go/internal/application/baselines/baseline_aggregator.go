@@ -1,161 +1,243 @@
-// Package baselines provides the BaselineAggregator — an event-driven
-// worker that incrementally updates process behavioral profiles.
+// Package baselines maintains per-host process execution baselines (UEBA,
+// statistical) from process-start telemetry.
 //
-// Design choice — Event-Driven vs Cron:
-//
-//	We chose an event-driven model (trigger on each process event) rather than
-//	a periodic cron job for two key reasons:
-//
-//	1. Near-Real-Time Model: The baseline model starts capturing data from the
-//	   first observed execution.  Within hours of agent deployment, the UEBA
-//	   component begins contributing signal to the risk score.
-//
-//	2. Graduation Project Feasibility: A cron-based aggregator would require
-//	   either pg_cron (complex PostgreSQL setup) or a separate scheduler
-//	   service.  The event-driven model runs inside the existing EventLoop
-//	   goroutine with zero added infrastructure.
-//
-// The aggregator is FIRE-AND-FORGET: it enqueues the update on a non-blocking
-// buffered channel and a background goroutine drains it.  The detection
-// pipeline is never blocked by a slow DB write.
+// Process starts are counted per (agent, process, UTC hour of the EVENT) in
+// memory and flushed to PostgreSQL in batches, so the detection pipeline does
+// no per-event database writes. The aggregator also keeps the counts of the
+// current and previous hour in memory so the risk scorer can compare the
+// observed rate with the baseline without a database round trip.
 package baselines
 
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/logger"
+	"github.com/google/uuid"
 )
 
 const (
-	// defaultQueueSize is the number of aggregation inputs that can be buffered
-	// before the aggregator starts dropping events (non-fatal, just no baseline update).
-	defaultQueueSize = 4096
-
-	// defaultWorkers is the number of background DB writer goroutines.
-	defaultWorkers = 2
+	defaultFlushInterval = 30 * time.Second
+	maxPendingBuckets    = 50000 // bound memory if the database is down
+	// maxEventAge: older events (e.g. replayed from an agent's disk queue)
+	// are outside the baseline window and are not counted.
+	maxEventAge = BaselineWindowDays * 24 * time.Hour
+	// maxClockSkew: events dated further in the future are clamped to now.
+	maxClockSkew = 5 * time.Minute
 )
 
-// BaselineAggregator receives process events from the EventLoop and
-// asynchronously UPSERTs behavioral baseline data into PostgreSQL.
-//
-// Usage:
-//
-//	agg := NewBaselineAggregator(repo, 0, 0) // defaults
-//	agg.Start(ctx)
-//	// in event processing loop:
-//	agg.Record(AggregationInput{...})
-//	// on shutdown:
-//	agg.Stop()
+// BaselineAggregator counts process starts and flushes them periodically.
 type BaselineAggregator struct {
-	repo      BaselineRepository
-	queue     chan AggregationInput
-	queueSize int
-	workers   int
-	cancel    context.CancelFunc
+	repo     BaselineRepository
+	interval time.Duration
 
-	Dropped uint64 // monotonic counter for observability
+	mu         sync.Mutex
+	flushMu    sync.Mutex
+	pending    map[bucketKey]int // not yet written
+	inflightID string
+	inflight   []HourlyCount
+	startOnce  sync.Once
+	recent     map[bucketKey]int // current/previous hour, for CurrentCount
+	cancel     context.CancelFunc
+	done       chan struct{}
+
+	Dropped uint64
 	Saved   uint64
 }
 
-// NewBaselineAggregator creates a new aggregator.
-// queueSize = 0 → defaultQueueSize; workers = 0 → defaultWorkers.
-func NewBaselineAggregator(repo BaselineRepository, queueSize, workers int) *BaselineAggregator {
-	if queueSize <= 0 {
-		queueSize = defaultQueueSize
-	}
-	if workers <= 0 {
-		workers = defaultWorkers
-	}
+// NewBaselineAggregator creates an aggregator. The two size arguments are
+// kept for API compatibility; flushInterval <= 0 uses the default.
+func NewBaselineAggregator(repo BaselineRepository, _ int, _ int) *BaselineAggregator {
 	return &BaselineAggregator{
-		repo:      repo,
-		queueSize: queueSize,
-		workers:   workers,
-		queue:     make(chan AggregationInput, queueSize),
+		repo:     repo,
+		interval: defaultFlushInterval,
+		pending:  map[bucketKey]int{},
+		recent:   map[bucketKey]int{},
 	}
 }
 
-// Start launches the background writer goroutines.
-func (a *BaselineAggregator) Start(ctx context.Context) {
-	workerCtx, cancel := context.WithCancel(ctx)
+// Start launches the flush loop.
+func (a *BaselineAggregator) Start(ctx context.Context) { a.startOnce.Do(func() { a.start(ctx) }) }
+
+func (a *BaselineAggregator) start(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
-
-	for i := 0; i < a.workers; i++ {
-		go a.worker(workerCtx)
+	a.done = make(chan struct{})
+	// Call Start before accepting events. Restore only observed counts; these
+	// persisted buckets must never be put back into the pending write buffer.
+	if reader, ok := a.repo.(RecentCountRepository); ok {
+		now := time.Now().UTC().Truncate(time.Hour)
+		rctx, rcancel := context.WithTimeout(ctx, 10*time.Second)
+		counts, err := reader.RecentCounts(rctx, now.Add(-time.Hour), now.Add(time.Hour), maxPendingBuckets)
+		rcancel()
+		if err != nil {
+			logger.Warnf("Observed baseline rate restoration unavailable: %v", err)
+		} else {
+			a.mu.Lock()
+			for _, c := range counts {
+				a.recent[bucketKey{c.AgentID, strings.ToLower(c.ProcessName), c.Hour.UTC().Truncate(time.Hour)}] += c.Count
+			}
+			a.mu.Unlock()
+		}
 	}
-	logger.Infof("BaselineAggregator started (%d workers, queue=%d)", a.workers, a.queueSize)
+	go func() {
+		defer close(a.done)
+		flush := time.NewTicker(a.interval)
+		defer flush.Stop()
+		prune := time.NewTicker(time.Hour)
+		defer prune.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				a.Flush(context.Background())
+				return
+			case <-flush.C:
+				a.Flush(ctx)
+			case <-prune.C:
+				pctx, c := context.WithTimeout(ctx, time.Minute)
+				if n, err := a.repo.Prune(pctx, time.Now().Add(-maxEventAge-24*time.Hour)); err != nil {
+					logger.Warnf("Baseline prune failed: %v", err)
+				} else if n > 0 {
+					logger.Debugf("Baseline pruned %d old hourly buckets", n)
+				}
+				c()
+			}
+		}
+	}()
+	logger.Infof("BaselineAggregator started (hourly execution counts, flush every %s)", a.interval)
 }
 
-// Record enqueues an aggregation input for async processing.
-// This is non-blocking: if the queue is full the event is silently dropped
-// (the baseline is best-effort, not required for correctness).
-func (a *BaselineAggregator) Record(in AggregationInput) {
-	if in.ObservedAt.IsZero() {
-		in.ObservedAt = time.Now().UTC()
-	}
-	select {
-	case a.queue <- in:
-	default:
-		a.Dropped++
-	}
-}
-
-// Stop gracefully shuts down the background workers.
+// Stop flushes and stops the aggregator.
 func (a *BaselineAggregator) Stop() {
 	if a.cancel != nil {
 		a.cancel()
+		<-a.done
 	}
 }
 
-// worker drains the queue and calls repo.Upsert for each item.
-func (a *BaselineAggregator) worker(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			// Drain any remaining queued events before exiting
-			for {
-				select {
-				case in := <-a.queue:
-					a.upsert(in)
-				default:
-					return
-				}
-			}
-		case in := <-a.queue:
-			a.upsert(in)
+// eventHour clamps the event time and returns its UTC hour; ok is false for
+// events too old to belong to the baseline window.
+func eventHour(t time.Time, now time.Time) (time.Time, bool) {
+	if t.IsZero() || t.After(now.Add(maxClockSkew)) {
+		t = now
+	}
+	if now.Sub(t) > maxEventAge {
+		return time.Time{}, false
+	}
+	return t.UTC().Truncate(time.Hour), true
+}
+
+// Record counts one process start. Never blocks on I/O.
+func (a *BaselineAggregator) Record(in AggregationInput) {
+	proc := strings.ToLower(strings.TrimSpace(in.ProcessName))
+	if in.AgentID == "" || proc == "" {
+		return
+	}
+	now := time.Now().UTC()
+	hour, ok := eventHour(in.ObservedAt, now)
+	if !ok {
+		return
+	}
+	k := bucketKey{in.AgentID, proc, hour}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, exists := a.pending[k]; !exists && len(a.pending) >= maxPendingBuckets {
+		a.Dropped++
+		return
+	}
+	a.pending[k]++
+	if now.Sub(hour) < 2*time.Hour {
+		if _, exists := a.recent[k]; exists || len(a.recent) < maxPendingBuckets {
+			a.recent[k]++
+		} else {
+			a.Dropped++
 		}
 	}
 }
 
-func (a *BaselineAggregator) upsert(in AggregationInput) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if err := a.repo.Upsert(ctx, in); err != nil {
-		logger.Warnf("BaselineAggregator upsert failed (%s/%s): %v", in.AgentID, in.ProcessName, err)
-		return
+// CurrentCount returns the process starts counted for the agent/process in
+// the hour of `at` (only the current and previous hour are kept).
+func (a *BaselineAggregator) CurrentCount(agentID, processName string, at time.Time) int {
+	if a == nil {
+		return 0
 	}
-	a.Saved++
+	hour, ok := eventHour(at, time.Now().UTC())
+	if !ok {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.recent[bucketKey{agentID, strings.ToLower(strings.TrimSpace(processName)), hour}]
+}
+
+// Flush writes pending counts. On failure they are kept for the next try.
+func (a *BaselineAggregator) Flush(ctx context.Context) {
+	a.flushMu.Lock()
+	defer a.flushMu.Unlock()
+	// Retry the immutable in-flight batch before new observations. A commit
+	// whose acknowledgement was lost must reuse the same idempotency token.
+	for pass := 0; pass < 2; pass++ {
+		a.mu.Lock()
+		if len(a.inflight) == 0 {
+			if len(a.pending) == 0 {
+				a.pruneRecentLocked()
+				a.mu.Unlock()
+				return
+			}
+			for k, n := range a.pending {
+				a.inflight = append(a.inflight, HourlyCount{k.agent, k.process, k.hour, n})
+			}
+			a.inflightID = uuid.NewString()
+			a.pending = map[bucketKey]int{}
+		}
+		batch, id := a.inflight, a.inflightID
+		a.pruneRecentLocked()
+		a.mu.Unlock()
+		wctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		var err error
+		if repo, ok := a.repo.(BatchCountRepository); ok {
+			err = repo.AddBatchCounts(wctx, id, batch)
+		} else {
+			err = a.repo.AddCounts(wctx, batch)
+		}
+		cancel()
+		if err != nil {
+			logger.Warnf("Baseline flush failed (%d buckets retained for retry): %v", len(batch), err)
+			return
+		}
+		a.mu.Lock()
+		a.Saved += uint64(len(batch))
+		a.inflight = nil
+		a.inflightID = ""
+		a.mu.Unlock()
+	}
+}
+
+func (a *BaselineAggregator) pruneRecentLocked() {
+	cut := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	for k := range a.recent {
+		if k.hour.Before(cut) {
+			delete(a.recent, k)
+		}
+	}
 }
 
 // =============================================================================
 // ShouldRecord determines whether an event should contribute to the baseline.
-// We only track process-creation events (EventID 4688 on Windows / Sysmon ID 1).
+// Only real process starts count (agent process_creation, Sysmon 1, 4688).
 // =============================================================================
 
 // ShouldRecord returns true if the event data represents a process creation.
-// It's a pure-function helper used by the EventLoop before calling Record().
-//
-// The agent wraps process fields inside a "data" sub-map, so we check both
-// the top-level key and the nested key.
+// The agent wraps process fields inside a "data" sub-map, so both the
+// top-level key and the nested key are checked.
 func ShouldRecord(eventData map[string]interface{}) bool {
 	if eventData == nil {
 		return false
 	}
 
-	// resolveVal checks top-level key first, then data.* sub-map.
 	resolveVal := func(key string) interface{} {
 		if v, ok := eventData[key]; ok && v != nil {
 			return v
@@ -187,10 +269,8 @@ func ShouldRecord(eventData map[string]interface{}) bool {
 		}
 	}
 
-	// Event Log / Sysmon telemetry: numeric provider event code only.
-	// The agent's top-level "event_id" is a record UUID, never a code, so it
-	// is deliberately not consulted here (it previously made this function
-	// return false for every agent event, so UEBA never trained).
+	// Event Log / Sysmon telemetry: numeric provider event code only. The
+	// agent's top-level "event_id" is a record UUID, never a code.
 	for _, v := range []interface{}{eventData["EventID"], eventData["event.code"], resolveVal("EventID"), resolveVal("event_code")} {
 		if code, ok := domain.ParseEventCode(v); ok {
 			return code == 1 || code == 4688
@@ -205,56 +285,43 @@ func ShouldRecord(eventData map[string]interface{}) bool {
 	return false
 }
 
-// ExtractAggregationInput converts a raw event payload into an AggregationInput.
-// Reads fields from both the top-level map and the nested data.{} sub-map
-// to support the Windows Agent's event format.
+// ExtractAggregationInput converts a raw event payload into an
+// AggregationInput, using the event's own timestamp (not the processing
+// time, which is wrong for delayed or replayed events).
 func ExtractAggregationInput(agentID string, eventData map[string]interface{}) AggregationInput {
-	// Extract the nested data sub-map once.
-	var dataSub map[string]interface{}
-	if sub, ok := eventData["data"]; ok && sub != nil {
-		if m, ok := sub.(map[string]interface{}); ok {
-			dataSub = m
-		}
-	}
-	resolveFn := func(key string) interface{} {
-		if v, ok := eventData[key]; ok && v != nil {
+	in := AggregationInput{AgentID: agentID, ObservedAt: EventTime(eventData)}
+	get := func(key string) string {
+		if v, ok := eventData[key].(string); ok && v != "" {
 			return v
 		}
-		if dataSub != nil {
-			if v, ok := dataSub[key]; ok && v != nil {
+		if sub, ok := eventData["data"].(map[string]interface{}); ok {
+			if v, ok := sub[key].(string); ok {
 				return v
-			}
-		}
-		return nil
-	}
-	getString := func(key string) string {
-		if v := resolveFn(key); v != nil {
-			if s, ok := v.(string); ok {
-				return s
 			}
 		}
 		return ""
 	}
-	getBool := func(key string) bool {
-		if v := resolveFn(key); v != nil {
-			if b, ok := v.(bool); ok {
-				return b
+	in.ProcessName = get("name")
+	if in.ProcessName == "" {
+		if p := get("executable"); p != "" {
+			if i := strings.LastIndexAny(p, `\/`); i >= 0 {
+				p = p[i+1:]
 			}
-			if s, ok := v.(string); ok {
-				return s == "1" || s == "true"
+			in.ProcessName = p
+		}
+	}
+	return in
+}
+
+// EventTime returns the event's timestamp (RFC 3339, top-level "timestamp"
+// or "@timestamp"), or the zero time when absent/invalid.
+func EventTime(eventData map[string]interface{}) time.Time {
+	for _, k := range []string{"timestamp", "@timestamp"} {
+		if s, ok := eventData[k].(string); ok && s != "" {
+			if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+				return t.UTC()
 			}
 		}
-		return false
 	}
-
-	return AggregationInput{
-		AgentID:        agentID,
-		ProcessName:    getString("name"),
-		ProcessPath:    getString("executable"),
-		SigStatus:      getString("signature_status"),
-		IntegrityLevel: getString("integrity_level"),
-		IsElevated:     getBool("is_elevated"),
-		ParentName:     getString("parent_name"),
-		ObservedAt:     time.Now().UTC(),
-	}
+	return time.Time{}
 }

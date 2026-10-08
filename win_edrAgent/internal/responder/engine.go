@@ -4,6 +4,8 @@ package responder
 import (
 	"context"
 	"fmt"
+	"github.com/edr-platform/win-agent/internal/actiongate"
+	"github.com/google/uuid"
 	"io"
 	"os"
 	"path/filepath"
@@ -92,7 +94,7 @@ func (e *Engine) RegisterRemovableRoot(root string) {
 }
 
 // EvaluateAndAct returns a high-severity replacement event and true when a file was quarantined locally.
-func (e *Engine) EvaluateAndAct(_ context.Context, filePath string, opcode uint8, pid uint32, base map[string]interface{}) (*event.Event, bool) {
+func (e *Engine) EvaluateAndAct(ctx context.Context, filePath string, opcode uint8, pid uint32, base map[string]interface{}) (*event.Event, bool) {
 	if e == nil || !e.enabled || e.store == nil {
 		return nil, false
 	}
@@ -126,7 +128,11 @@ func (e *Engine) EvaluateAndAct(_ context.Context, filePath string, opcode uint8
 	// time. A short settle delay lets the writer flush before we hash.
 	// Write events (opcode 68) already have content on disk — no delay needed.
 	if opcode == 64 {
-		time.Sleep(150 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(150 * time.Millisecond):
+		}
 		// Re-check file still exists after settle (Defender may have removed it).
 		if _, err := os.Stat(filePath); err != nil {
 			return nil, false
@@ -142,40 +148,72 @@ func (e *Engine) EvaluateAndAct(_ context.Context, filePath string, opcode uint8
 	if !ok {
 		return nil, false
 	}
+	release, err := actiongate.Default.Acquire(ctx)
+	if err != nil {
+		return nil, false
+	}
+	defer release()
+	// The file may have been restored/replaced while waiting behind a C2 action.
+	e.restoredMu.Lock()
+	expiry, isRestored = e.restoredPaths[lower]
+	e.restoredMu.Unlock()
+	if isRestored && time.Now().Before(expiry) {
+		return nil, false
+	}
+	currentHash, _, hashErr := scanner.FileSHA256Limited(filePath, e.maxScan)
+	if hashErr != nil || currentHash != hashHex {
+		return nil, false
+	}
 
 	if err := os.MkdirAll(e.quarantineDir, 0700); err != nil {
 		e.logger.Errorf("[Responder] quarantine dir: %v", err)
 		return nil, false
 	}
-	ts := time.Now().Format("20060102_150405")
 	baseName := filepath.Base(filePath)
-	qPath := filepath.Join(e.quarantineDir, fmt.Sprintf("%s_%s.quarantine", ts, baseName))
+	qPath := filepath.Join(e.quarantineDir, fmt.Sprintf("%s_%s.quarantine", uuid.NewString(), baseName))
+	failure := func(actionErr error) (*event.Event, bool) {
+		data := make(map[string]interface{}, len(base)+7)
+		for k, v := range base {
+			data[k] = v
+		}
+		data["action"], data["response_action"], data["autonomous"] = "auto_quarantine_failed", "quarantine", true
+		data["path"], data["quarantine_path"], data["quarantine_error"] = filePath, qPath, actionErr.Error()
+		return event.NewEvent(event.EventTypeFile, event.SeverityHigh, data), true
+	}
 	if err := os.Rename(filePath, qPath); err != nil {
 		// File may be locked — copy then remove.
 		if err := copyFileLimited(filePath, qPath, e.maxScan+1); err != nil {
 			e.logger.Errorf("[Responder] quarantine failed %s: %v", filePath, err)
-			return nil, false
+			return failure(err)
 		}
-		_ = os.Remove(filePath)
+		copiedHash, _, verifyErr := scanner.FileSHA256Limited(qPath, e.maxScan)
+		if verifyErr != nil || copiedHash != hashHex {
+			return failure(fmt.Errorf("quarantine copy identity could not be verified"))
+		}
+		if err := os.Remove(filePath); err != nil {
+			return failure(fmt.Errorf("original file remains accessible: %w", err))
+		}
 	}
 
 	metaPath := qPath + ".meta"
 	meta := fmt.Sprintf("OriginalPath: %s\nSHA256: %s\nThreat: %s\nTime: %s\nAction: auto_quarantine\n",
 		filePath, hashHex, rec.Name, time.Now().Format(time.RFC3339))
-	_ = os.WriteFile(metaPath, []byte(meta), 0600)
+	if err := os.WriteFile(metaPath, []byte(meta), 0600); err != nil {
+		return failure(fmt.Errorf("quarantine metadata was not saved: %w", err))
+	}
 
 	data := map[string]interface{}{
-		"action":            "auto_quarantined",
-		"path":              filePath,
-		"quarantine_path":   qPath,
-		"sha256":            hashHex,
-		"threat_name":       rec.Name,
-		"threat_family":     rec.Family,
-		"threat_severity":   rec.Severity,
-		"signature_source":  rec.Source,
-		"pid":               pid,
-		"device_serial":     volumeSerialForPath(filePath),
-		"autonomous":        true,
+		"action":           "auto_quarantined",
+		"path":             filePath,
+		"quarantine_path":  qPath,
+		"sha256":           hashHex,
+		"threat_name":      rec.Name,
+		"threat_family":    rec.Family,
+		"threat_severity":  rec.Severity,
+		"signature_source": rec.Source,
+		"pid":              pid,
+		"device_serial":    volumeSerialForPath(filePath),
+		"autonomous":       true,
 	}
 	for k, v := range base {
 		if _, exists := data[k]; !exists {

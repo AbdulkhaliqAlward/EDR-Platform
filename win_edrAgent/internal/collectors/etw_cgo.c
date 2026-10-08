@@ -127,6 +127,7 @@ static int tdhGetPointer(PEVENT_RECORD rec, LPCWSTR name, ULONGLONG* out) {
 // =====================================================================
 
 static void parseProcessEvent(PEVENT_RECORD rec, ParsedProcessEvent* out) {
+    out->eventTime = rec->EventHeader.TimeStamp.QuadPart;
     tdhGetULONG(rec, L"ProcessId",  &out->processId);
     tdhGetULONG(rec, L"ParentId",   &out->parentId);
     tdhGetAnsi  (rec, L"ImageFileName", out->imageFileName, sizeof(out->imageFileName));
@@ -205,9 +206,9 @@ static int guidsEqual(const GUID* a, const GUID* b) {
 // =====================================================================
 
 static int isNamedPipePath(const WCHAR* path) {
-    // Check for kernel device path: \Device\NamedPipe\ 
+    // Check for the kernel named-pipe device prefix.
     if (wcsncmp(path, L"\\Device\\NamedPipe\\", 18) == 0) return 1;
-    // Check for user-mode path: \\.\pipe\ 
+    // Check for the user-mode named-pipe prefix.
     if (wcsncmp(path, L"\\\\.\\pipe\\", 9) == 0) return 1;
     return 0;
 }

@@ -277,3 +277,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// SetRuleRuntime wires validation and activation before serving requests.
+func (s *Server) SetRuleRuntime(runtime RuleRuntime) { s.ruleHandler.runtime = runtime }

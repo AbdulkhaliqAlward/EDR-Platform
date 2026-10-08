@@ -27,7 +27,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/edr-platform/win-agent/internal/event"
 	"github.com/edr-platform/win-agent/internal/logging"
@@ -149,11 +148,12 @@ func (c *ETWCollector) handleImageLoad(pid uint32, imagePath string) {
 		return
 	}
 
-	// --- Signed System32 fast-path ---
-	// If the DLL is in System32 and has a valid Authenticode signature,
-	// it is a stock OS module. Skip event creation entirely — this is the
-	// single biggest volume reducer for image load telemetry.
-	if strings.Contains(lower, `\windows\system32\`) && isFileSigned(imagePath) {
+	// --- Microsoft-signed System32 fast-path ---
+	// A System32 DLL whose Authenticode signature (embedded or catalog)
+	// verifies to Microsoft is a stock OS module: skip it. This is the
+	// biggest volume reducer for image-load telemetry. Presence of a
+	// signature blob alone is NOT trusted (it can be forged/appended).
+	if strings.Contains(lower, `\windows\system32\`) && FileIdentityOf(imagePath).SignatureStatus == "microsoft" {
 		return
 	}
 
@@ -169,12 +169,13 @@ func (c *ETWCollector) handleImageLoad(pid uint32, imagePath string) {
 	// Self-exclusion: ignore image loads inside the agent itself or any
 	// helper process it spawned. Without this gate, the agent generates a
 	// burst of DLL-load events on every PowerShell helper invocation.
-	if isSelfOrChildProcess(strings.ToLower(procName), getCmdLine(pid)) {
+	if isSelfPID(pid) {
 		return
 	}
 
-	// Lightweight Authenticode check.
-	isSigned := isFileSigned(imagePath)
+	// Verified Authenticode status (cached per file version).
+	sig := FileIdentityOf(imagePath).SignatureStatus
+	isSigned := sig == "microsoft" || sig == "trusted"
 
 	// Create event IMMEDIATELY — no blocking on hash computation.
 	evt := event.NewEvent(event.EventTypeImageLoad, event.SeverityMedium, map[string]interface{}{
@@ -321,55 +322,4 @@ func computeFileHash(path string) string {
 	}
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
-}
-
-// isFileSigned does a lightweight check for Authenticode signature presence
-// by parsing the PE Security Directory entry. A full WinVerifyTrust check
-// requires heavy COM interop; this is a fast heuristic.
-func isFileSigned(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	var dosHeader [64]byte
-	if _, err := f.Read(dosHeader[:]); err != nil {
-		return false
-	}
-	if dosHeader[0] != 'M' || dosHeader[1] != 'Z' {
-		return false
-	}
-	peOffset := *(*int32)(unsafe.Pointer(&dosHeader[60]))
-	if peOffset < 0 || peOffset > 1024*1024 {
-		return false
-	}
-
-	buf := make([]byte, 4+20+2)
-	if _, err := f.ReadAt(buf, int64(peOffset)); err != nil {
-		return false
-	}
-	if string(buf[:4]) != "PE\x00\x00" {
-		return false
-	}
-	magic := *(*uint16)(unsafe.Pointer(&buf[24]))
-
-	var secDirOffset int64
-	switch magic {
-	case 0x10b: // PE32
-		secDirOffset = int64(peOffset) + 4 + 20 + 128
-	case 0x20b: // PE32+
-		secDirOffset = int64(peOffset) + 4 + 20 + 144
-	default:
-		return false
-	}
-
-	var secDir [8]byte
-	if _, err := f.ReadAt(secDir[:], secDirOffset); err != nil {
-		return false
-	}
-	rva := *(*uint32)(unsafe.Pointer(&secDir[0]))
-	size := *(*uint32)(unsafe.Pointer(&secDir[4]))
-
-	return rva > 0 && size > 0
 }

@@ -2,6 +2,7 @@ package response
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,6 +19,25 @@ const MaxPlaybookSteps = 25
 // ErrFreeTextCommandNotAllowed is returned when a non-admin saves a playbook
 // containing a free-text run_cmd step.
 var ErrFreeTextCommandNotAllowed = errors.New("free-text commands (run_cmd) in playbooks require an administrator; use a library script (run_script) instead")
+
+// DefinitionIsDestructive reports whether stored playbook steps contain a
+// containment action (or a script/command, which can change the host).
+func DefinitionIsDestructive(raw []byte) bool {
+	var steps []models.PlaybookCommand
+	if json.Unmarshal(raw, &steps) != nil {
+		return true // unknown content: treat as destructive (fail safe)
+	}
+	for _, s := range steps {
+		t := CanonicalType(s.Type)
+		if t == "run_script" || t == "run_cmd" {
+			return true
+		}
+		if a, ok := ActionFor(t); ok && a.Destructive {
+			return true
+		}
+	}
+	return false
+}
 
 // ValidateDefinition checks playbook steps when a playbook is created or
 // updated (alert binding is checked later, per run):

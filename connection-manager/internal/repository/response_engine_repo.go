@@ -26,6 +26,7 @@ type SigmaAlertRecord struct {
 	CreatedAt       time.Time
 	AgentID         string
 	RuleID          string
+	RelatedRuleIDs  []string
 	RuleTitle       string
 	Severity        string
 	Category        string
@@ -45,6 +46,9 @@ type ExecutionRecord struct {
 	PlaybookName      string          `json:"playbook_name"`
 	RuleID            *uuid.UUID      `json:"rule_id,omitempty"`
 	AgentID           uuid.UUID       `json:"agent_id"`
+	AgentHostname     string          `json:"agent_hostname"`
+	AlertTitle        string          `json:"alert_title"`
+	AlertSeverity     string          `json:"alert_severity"`
 	Status            string          `json:"status"`
 	TriggerSource     string          `json:"trigger_source"`
 	CreatedByUsername string          `json:"created_by_username"`
@@ -63,7 +67,16 @@ type ExecutionListFilter struct {
 	AlertID    *uuid.UUID
 	PlaybookID *uuid.UUID
 	AgentID    *uuid.UUID
-	Limit      int
+	// UpdatedSince returns only runs changed after this instant, oldest
+	// change first, so keyset pagination can drain the notification window.
+	UpdatedSince   *time.Time
+	UpdatedUntil   *time.Time
+	AfterUpdatedAt *time.Time
+	AfterID        *uuid.UUID
+	Trigger        string   // "manual" | "automation"
+	Statuses       []string // e.g. pending, running
+	Limit          int
+	Offset         int
 }
 
 // ResponseEngineRepository is the persistence used by the response engine.
@@ -100,10 +113,10 @@ func (r *ResponseEngineRepository) GetSigmaAlert(ctx context.Context, id uuid.UU
 		SELECT id::text, timestamp, created_at, COALESCE(agent_id, ''), rule_id, rule_title, severity,
 		       category, status, COALESCE(risk_score, 0),
 		       COALESCE(mitre_tactics, '{}'), COALESCE(mitre_techniques, '{}'),
-		       COALESCE(matched_fields, '{}'::jsonb), COALESCE(context_data, '{}'::jsonb)
+		       COALESCE(matched_fields, '{}'::jsonb), COALESCE(context_data, '{}'::jsonb), COALESCE(related_rule_ids, '{}')
 		FROM sigma_alerts WHERE id = $1`, id).
 		Scan(&a.ID, &a.Timestamp, &a.CreatedAt, &a.AgentID, &a.RuleID, &ruleTitle, &a.Severity,
-			&cat, &status, &a.RiskScore, &tactics, &techs, &matched, &ctxData)
+			&cat, &status, &a.RiskScore, &tactics, &techs, &matched, &ctxData, &a.RelatedRuleIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -186,6 +199,28 @@ func (r *ResponseEngineRepository) GetOrInitState(ctx context.Context, key, def 
 	return v, err
 }
 
+// GetState returns a stored engine setting.
+func (r *ResponseEngineRepository) GetState(ctx context.Context, key string) (string, time.Time, bool, error) {
+	var v string
+	var at time.Time
+	err := r.pool.QueryRow(ctx, `SELECT value, updated_at FROM response_engine_state WHERE key = $1`, key).Scan(&v, &at)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	return v, at, true, nil
+}
+
+// SetState stores an engine setting.
+func (r *ResponseEngineRepository) SetState(ctx context.Context, key, value string) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO response_engine_state (key, value, updated_at) VALUES ($1, $2, now())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, key, value)
+	return err
+}
+
 // ReserveRule atomically records that a rule fires now for an endpoint,
 // honouring the rule's cooldown for that endpoint. It returns false when the
 // rule is disabled or still cooling down for this endpoint, so concurrent
@@ -239,14 +274,16 @@ func (r *ResponseEngineRepository) RefreshRuleSuccessRate(ctx context.Context, r
 	return err
 }
 
-const executionColumns = `id, alert_id, playbook_id, playbook_name, rule_id, agent_id, status, trigger_source,
+const executionColumns = `id, alert_id, playbook_id, playbook_name, rule_id, agent_id,
+	COALESCE(agent_hostname, ''), COALESCE(alert_title, ''), COALESCE(alert_severity, ''), status, trigger_source,
 	created_by_username, started_at, completed_at, COALESCE(commands_executed, 0), COALESCE(commands_total, 0),
 	steps, COALESCE(error_message, ''), COALESCE(execution_time_ms, 0), updated_at`
 
 func scanExecution(row pgx.Row) (*ExecutionRecord, error) {
 	var e ExecutionRecord
 	var steps []byte
-	if err := row.Scan(&e.ID, &e.AlertID, &e.PlaybookID, &e.PlaybookName, &e.RuleID, &e.AgentID, &e.Status,
+	if err := row.Scan(&e.ID, &e.AlertID, &e.PlaybookID, &e.PlaybookName, &e.RuleID, &e.AgentID,
+		&e.AgentHostname, &e.AlertTitle, &e.AlertSeverity, &e.Status,
 		&e.TriggerSource, &e.CreatedByUsername, &e.StartedAt, &e.CompletedAt, &e.CommandsExecuted,
 		&e.CommandsTotal, &steps, &e.ErrorMessage, &e.ExecutionTimeMs, &e.UpdatedAt); err != nil {
 		return nil, err
@@ -272,11 +309,11 @@ func (r *ResponseEngineRepository) CreateExecution(ctx context.Context, e *Execu
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO playbook_executions (id, alert_id, playbook_id, playbook_name, rule_id, agent_id, status,
 			trigger_source, created_by_username, started_at, commands_executed, commands_total, steps,
-			error_message, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15)`,
+			error_message, updated_at, agent_hostname, alert_title, alert_severity)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16, $17, $18)`,
 		e.ID, e.AlertID, e.PlaybookID, e.PlaybookName, e.RuleID, e.AgentID, e.Status, e.TriggerSource,
 		e.CreatedByUsername, e.StartedAt, e.CommandsExecuted, e.CommandsTotal, string(e.Steps),
-		e.ErrorMessage, e.UpdatedAt)
+		e.ErrorMessage, e.UpdatedAt, e.AgentHostname, e.AlertTitle, e.AlertSeverity)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return ErrDuplicateExecution
@@ -290,10 +327,10 @@ func (r *ResponseEngineRepository) UpdateExecution(ctx context.Context, e *Execu
 	_, err := r.pool.Exec(ctx, `
 		UPDATE playbook_executions
 		SET status = $2, completed_at = $3, commands_executed = $4, commands_total = $5,
-		    steps = $6::jsonb, error_message = $7, execution_time_ms = $8, updated_at = $9
+		    steps = $6::jsonb, error_message = $7, execution_time_ms = $8, updated_at = $9, started_at = $10
 		WHERE id = $1`,
 		e.ID, e.Status, e.CompletedAt, e.CommandsExecuted, e.CommandsTotal, string(e.Steps),
-		e.ErrorMessage, e.ExecutionTimeMs, e.UpdatedAt)
+		e.ErrorMessage, e.ExecutionTimeMs, e.UpdatedAt, e.StartedAt)
 	return err
 }
 
@@ -326,8 +363,38 @@ func (r *ResponseEngineRepository) ListExecutions(ctx context.Context, f Executi
 		args = append(args, *f.AgentID)
 		q += fmt.Sprintf(" AND agent_id = $%d", len(args))
 	}
+	if f.Trigger != "" {
+		args = append(args, f.Trigger)
+		q += fmt.Sprintf(" AND trigger_source = $%d", len(args))
+	}
+	if len(f.Statuses) > 0 {
+		args = append(args, f.Statuses)
+		q += fmt.Sprintf(" AND status = ANY($%d)", len(args))
+	}
+	order := "started_at"
+	if f.UpdatedSince != nil {
+		args = append(args, *f.UpdatedSince)
+		q += fmt.Sprintf(" AND updated_at > $%d", len(args))
+		order = "updated_at"
+	}
+	if f.UpdatedUntil != nil {
+		args = append(args, *f.UpdatedUntil)
+		q += fmt.Sprintf(" AND updated_at <= $%d", len(args))
+	}
+	if f.AfterUpdatedAt != nil && f.AfterID != nil {
+		args = append(args, *f.AfterUpdatedAt, *f.AfterID)
+		q += fmt.Sprintf(" AND (updated_at, id) > ($%d, $%d)", len(args)-1, len(args))
+	}
 	args = append(args, limit)
-	q += fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d", len(args))
+	direction := "DESC"
+	if f.UpdatedSince != nil {
+		direction = "ASC"
+	}
+	q += fmt.Sprintf(" ORDER BY %s %s, id %s LIMIT $%d", order, direction, direction, len(args))
+	if f.Offset > 0 {
+		args = append(args, f.Offset)
+		q += fmt.Sprintf(" OFFSET $%d", len(args))
+	}
 
 	rows, err := r.pool.Query(ctx, q, args...)
 	if err != nil {

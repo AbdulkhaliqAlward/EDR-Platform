@@ -40,6 +40,7 @@ typedef struct {
     BYTE  opcode;       // 1=Start, 2=End
     BYTE  _pad[3];
     char  imageFileName[260];   // ANSI short name from kernel event
+    LONGLONG eventTime;        // ProcessTrace converts this to UTC FILETIME
     WCHAR commandLine[4096];    // Unicode full command line
 } ParsedProcessEvent;
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -258,11 +259,111 @@ func (h *Handlers) ListPlaybookExecutions(c echo.Context) error {
 	if n, perr := strconv.Atoi(c.QueryParam("limit")); perr == nil {
 		f.Limit = n
 	}
+	if raw := c.QueryParam("offset"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "offset must be a non-negative integer")
+		}
+		f.Offset = n
+	}
+	if raw := c.QueryParam("updated_until"); raw != "" {
+		t, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "updated_until must be an RFC 3339 timestamp")
+		}
+		f.UpdatedUntil = &t
+	}
+	if raw := c.QueryParam("cursor_updated_at"); raw != "" {
+		t, err := time.Parse(time.RFC3339Nano, raw)
+		id, idErr := uuid.Parse(c.QueryParam("cursor_id"))
+		if err != nil || idErr != nil || c.QueryParam("updated_since") == "" {
+			return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "cursor requires updated_since, an RFC 3339 cursor_updated_at and a UUID cursor_id")
+		}
+		f.AfterUpdatedAt, f.AfterID = &t, &id
+	} else if c.QueryParam("cursor_id") != "" {
+		return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "cursor_id requires cursor_updated_at")
+	}
+	if v := strings.TrimSpace(c.QueryParam("updated_since")); v != "" {
+		t, perr := time.Parse(time.RFC3339Nano, v)
+		if perr != nil {
+			return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "updated_since must be an RFC 3339 timestamp")
+		}
+		f.UpdatedSince = &t
+	}
+	switch trig := strings.ToLower(strings.TrimSpace(c.QueryParam("trigger"))); trig {
+	case "", "manual", "automation":
+		f.Trigger = trig
+	default:
+		return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "trigger must be manual or automation")
+	}
+	for _, st := range strings.Split(c.QueryParam("status"), ",") {
+		if st = strings.ToLower(strings.TrimSpace(st)); st != "" {
+			switch st {
+			case "pending", "running", "completed", "partial", "failed", "cancelled":
+				f.Statuses = append(f.Statuses, st)
+			default:
+				return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "unknown status "+strconv.Quote(st))
+			}
+		}
+	}
 	list, err := h.respEngine.store.ListExecutions(c.Request().Context(), f)
 	if err != nil {
 		return h.engineError(c, err, nil)
 	}
 	return c.JSON(http.StatusOK, map[string]any{"data": list, "total": len(list)})
+}
+
+// GetAutomationSettings returns whether automated response is on.
+func (h *Handlers) GetAutomationSettings(c echo.Context) error {
+	if h.responseUnavailable(c) {
+		return nil
+	}
+	st, err := h.respEngine.engine.AutomationSettings(c.Request().Context())
+	if err != nil {
+		return h.engineError(c, err, nil)
+	}
+	return c.JSON(http.StatusOK, map[string]any{"data": st})
+}
+
+// UpdateAutomationSettingsRequest is the body of PUT /automation/settings.
+type UpdateAutomationSettingsRequest struct {
+	Enabled       *bool  `json:"enabled"`
+	Reason        string `json:"reason"`
+	ApprovalToken string `json:"approval_token,omitempty"`
+}
+
+// UpdateAutomationSettings turns automated response on or off for the whole
+// platform. Administrators only; audited; subject to the approval gate.
+func (h *Handlers) UpdateAutomationSettings(c echo.Context) error {
+	if h.responseUnavailable(c) {
+		return nil
+	}
+	if user := getCurrentUser(c); user == nil || !userHasRole(user, "admin") {
+		return errorResponse(c, http.StatusForbidden, "AUTOMATION_REQUIRES_ADMIN",
+			"Turning automated response on or off requires an administrator account.")
+	}
+	var req UpdateAutomationSettingsRequest
+	if err := c.Bind(&req); err != nil || req.Enabled == nil {
+		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Body must be {\"enabled\": true|false, \"reason\": \"...\"}")
+	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	if len(req.Reason) > 500 {
+		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Reason is too long (max 500 characters)")
+	}
+	h.consumeApprovalIfRequired(c, req.ApprovalToken)
+	if c.Response().Committed {
+		return nil
+	}
+	st, err := h.respEngine.engine.SetAutoResponse(c.Request().Context(), *req.Enabled, currentUsername(c))
+	if err != nil {
+		return h.engineError(c, err, nil)
+	}
+	action := "automation.disabled"
+	if *req.Enabled {
+		action = "automation.enabled"
+	}
+	h.fireAudit(c, action, "automation_settings", uuid.Nil, fmt.Sprintf("enabled=%v reason=%q", *req.Enabled, req.Reason), false, "")
+	return c.JSON(http.StatusOK, map[string]any{"data": st})
 }
 
 // GetPlaybookExecution returns one run with its per-step results.

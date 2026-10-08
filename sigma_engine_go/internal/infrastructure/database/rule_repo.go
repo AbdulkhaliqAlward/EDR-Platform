@@ -50,7 +50,7 @@ func (r *PostgresRuleRepository) LoadAll(ctx context.Context) ([]*Rule, error) {
 		rules = append(rules, rule)
 	}
 
-	return rules, nil
+	return rules, rows.Err()
 }
 
 // GetByID retrieves a rule by its ID.

@@ -1,17 +1,14 @@
 # =============================================================================
 # EDR Platform — root .gitignore
 #
-# RULE OF THUMB: anything that can carry a password / API key / private key
-# MUST live under one of the patterns below. If you need to share a config,
-# commit a `*.example` template with all secret values blanked out.
+# Runtime configs and .env files are intentionally tracked in this private
+# repository at the owner's request. TLS material remains excluded below.
 # =============================================================================
 
 # ── Secrets / credentials ────────────────────────────────────────────────────
-# Real env files and configs (un-ignored per user requirement)
-# .env
-# .env.*
-# connection-manager/config/config.yaml
-# sigma_engine_go/config/config.yaml
+# Track environment files, including variants otherwise matching *.local.
+!.env
+!.env.*
 
 # TLS material / private keys / PKCS bundles — never commit any of these.
 *.pem

@@ -678,6 +678,58 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 	// NOTE: issued_by is intentionally left nil (NULL). The JWT UserID is a
 	// claims string that may not match the UUID in the users table, causing FK
 	// violations. The issuer username is stored in Metadata for audit purposes.
+	// ── Step 1b: Inject mode parameter for agent service control commands ───────
+	// The agent's restartService handler checks Parameters["mode"] to decide
+	// whether to stop+start (restart), stop only, or start only.
+	switch req.CommandType {
+	case "stop_agent", "stop_service":
+		if req.Parameters == nil {
+			req.Parameters = map[string]string{}
+		}
+		req.Parameters["mode"] = "stop" // agent: sc stop EDRAgent only
+	case "restart_agent", "restart_service":
+		if req.Parameters == nil {
+			req.Parameters = map[string]string{}
+		}
+		req.Parameters["mode"] = "restart" // agent: sc stop → sc start
+		// start_agent mode already injected in the offline-safe block above
+	case "enable_sysmon":
+		if req.Parameters == nil {
+			req.Parameters = map[string]string{}
+		}
+		req.Parameters["mode"] = "enable_sysmon"
+	case "disable_sysmon":
+		if req.Parameters == nil {
+			req.Parameters = map[string]string{}
+		}
+		req.Parameters["mode"] = "disable_sysmon"
+	case "isolate", "isolate_network", "unisolate", "unisolate_network", "restore_network":
+		// Auto-inject the C2 server address so the agent builds correct ALLOW
+		// firewall rules. The agent falls back to config.server.address when
+		// server_address is not provided, but explicit injection is more reliable.
+		if h.grpcAddress != "" {
+			if req.Parameters == nil {
+				req.Parameters = map[string]string{}
+			}
+			if req.Parameters["server_address"] == "" {
+				req.Parameters["server_address"] = h.grpcAddress
+			}
+		}
+	}
+
+	var releaseEndpoint func()
+	if h.respEngine != nil && h.respEngine.engine != nil {
+		var acquireErr error
+		releaseEndpoint, acquireErr = h.respEngine.engine.TryAcquireEndpoint(agentID.String())
+		if acquireErr != nil {
+			return errorResponse(c, http.StatusConflict, "ENDPOINT_BUSY", acquireErr.Error())
+		}
+		defer func() {
+			if releaseEndpoint != nil {
+				releaseEndpoint()
+			}
+		}()
+	}
 	commandID := uuid.New()
 	if h.commandRepo != nil {
 		params := make(map[string]any, len(req.Parameters))
@@ -724,45 +776,6 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 		})
 	}
 
-	// ── Step 1b: Inject mode parameter for agent service control commands ───────
-	// The agent's restartService handler checks Parameters["mode"] to decide
-	// whether to stop+start (restart), stop only, or start only.
-	switch req.CommandType {
-	case "stop_agent", "stop_service":
-		if req.Parameters == nil {
-			req.Parameters = map[string]string{}
-		}
-		req.Parameters["mode"] = "stop" // agent: sc stop EDRAgent only
-	case "restart_agent", "restart_service":
-		if req.Parameters == nil {
-			req.Parameters = map[string]string{}
-		}
-		req.Parameters["mode"] = "restart" // agent: sc stop → sc start
-		// start_agent mode already injected in the offline-safe block above
-	case "enable_sysmon":
-		if req.Parameters == nil {
-			req.Parameters = map[string]string{}
-		}
-		req.Parameters["mode"] = "enable_sysmon"
-	case "disable_sysmon":
-		if req.Parameters == nil {
-			req.Parameters = map[string]string{}
-		}
-		req.Parameters["mode"] = "disable_sysmon"
-	case "isolate", "isolate_network", "unisolate", "unisolate_network", "restore_network":
-		// Auto-inject the C2 server address so the agent builds correct ALLOW
-		// firewall rules. The agent falls back to config.server.address when
-		// server_address is not provided, but explicit injection is more reliable.
-		if h.grpcAddress != "" {
-			if req.Parameters == nil {
-				req.Parameters = map[string]string{}
-			}
-			if req.Parameters["server_address"] == "" {
-				req.Parameters["server_address"] = h.grpcAddress
-			}
-		}
-	}
-
 	// ── Step 2: Map REST command_type to proto and push to gRPC stream ─────────
 	cmdType := mapCommandType(req.CommandType)
 	cmd := &edrv1.Command{
@@ -788,6 +801,10 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 		}
 		return errorResponse(c, http.StatusConflict, "SEND_FAILED", err.Error())
 	}
+	if releaseEndpoint != nil {
+		h.respEngine.engine.HoldForCommand(commandID, execTimeoutSec, releaseEndpoint)
+		releaseEndpoint = nil // the result waiter now owns the gate
+	}
 
 	// ── Step 3: Update DB to 'sent' ────────────────────────────────────────────
 	if h.commandRepo != nil {
@@ -796,25 +813,11 @@ func (h *Handlers) ExecuteAgentCommand(c echo.Context) error {
 		}
 	}
 
-	// ── Step 3b: Proactively update isolation state ──────────────────────────
-	// Set is_isolated in the DB immediately at dispatch rather than waiting
-	// for the agent's asynchronous SendCommandResult ACK. This eliminates the
-	// race between the dashboard's next query and the async result, ensuring
-	// the UI shows "Restore Network" (or "Isolate Network") right away.
+	// Isolation state is confirmed by SendCommandResult / heartbeat. Dispatch
+	// alone must not mark it successful: a failed raw command would otherwise
+	// make the response engine skip containment as "already isolated".
 	if h.agentSvc != nil {
 		switch req.CommandType {
-		case "isolate_network", "isolate":
-			if err := h.agentSvc.SetIsolation(c.Request().Context(), agentID, true); err != nil {
-				h.logger.WithError(err).Warn("[Isolation] Failed to proactively set is_isolated=true")
-			} else {
-				h.logger.Infof("[Isolation] Agent %s proactively marked ISOLATED at dispatch", agentID)
-			}
-		case "restore_network", "unisolate_network", "unisolate":
-			if err := h.agentSvc.SetIsolation(c.Request().Context(), agentID, false); err != nil {
-				h.logger.WithError(err).Warn("[Isolation] Failed to proactively set is_isolated=false")
-			} else {
-				h.logger.Infof("[Isolation] Agent %s proactively marked UN-ISOLATED at dispatch", agentID)
-			}
 		case "uninstall_agent":
 			// Mark pending_uninstall right when the uninstall order is dispatched.
 			// A successful SendCommandResult from the agent promotes this to 'uninstalled';

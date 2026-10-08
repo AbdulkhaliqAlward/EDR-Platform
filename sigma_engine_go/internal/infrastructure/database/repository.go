@@ -32,6 +32,7 @@ type Alert struct {
 	Confidence         *float64               `json:"confidence,omitempty"`
 	FalsePositiveRisk  *float64               `json:"false_positive_risk,omitempty"`
 	MatchCount         *int                   `json:"match_count,omitempty"`
+	RelatedRuleIDs     []string               `json:"related_rule_ids,omitempty"`
 	RelatedRules       []string               `json:"related_rules,omitempty"`
 	CombinedConfidence *float64               `json:"combined_confidence,omitempty"`
 	SeverityPromoted   *bool                  `json:"severity_promoted,omitempty"`

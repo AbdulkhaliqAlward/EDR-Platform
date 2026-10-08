@@ -547,56 +547,22 @@ func (ag *AlertGenerator) GenerateAggregatedAlert(
 	return alert
 }
 
-// calculateAggregatedSeverity determines the final severity for an aggregated alert.
-// Implements severity promotion rules:
-//   - If matchCount > 3 AND severity is Low/Medium → promote to High
-//   - If matchCount > 5 AND combined confidence > 0.8 → promote to Critical
-//   - If combined confidence > 0.9 → +1 level
+// calculateAggregatedSeverity returns the alert severity for an aggregated
+// alert: the level of the highest-severity matching rule, unchanged.
 //
-// FIX ISSUE-08: Maximum promotion capped at +2 levels from original severity.
-// Rationale (NIST SP 800-61): Unbounded severity promotion can cause alert
-// fatigue when low-fidelity detections are over-escalated. A cap of +2 ensures
-// that Low→High is the maximum jump for aggregate-only signals; reaching Critical
-// requires at least a Medium base severity combined with strong multi-match evidence.
-//
-// Returns (finalSeverity, wasPromoted).
+// Sigma defines `level` as the rule author's assessment of the detection
+// (fidelity x impact); the platform reports it as-is. Several rules matching
+// the SAME event (e.g. three PowerShell download rules on one command line)
+// are correlated, not independent evidence, so they must not promote the
+// severity — that inflated High to Critical routinely. Multiple matches are
+// still reflected in the risk score's bounded correlation bonus and in
+// related_rules; cross-event correlation belongs to correlation rules.
 func (ag *AlertGenerator) calculateAggregatedSeverity(
 	baseSeverity domain.Severity,
-	matchCount int,
-	combinedConfidence float64,
+	_ int,
+	_ float64,
 ) (domain.Severity, bool) {
-	finalSeverity := baseSeverity
-	promoted := false
-
-	// Rule 1: Multiple matches (>3) with Low/Medium severity → promote to High
-	if matchCount > 3 && baseSeverity < domain.SeverityHigh {
-		finalSeverity = domain.SeverityHigh
-		promoted = true
-	}
-
-	// Rule 2: Many matches (>5) with high confidence → promote to Critical
-	if matchCount > 5 && combinedConfidence > 0.8 && baseSeverity < domain.SeverityCritical {
-		finalSeverity = domain.SeverityCritical
-		promoted = true
-	}
-
-	// Rule 3: High confidence boost (+1 level if confidence > 0.9)
-	if combinedConfidence > 0.9 && finalSeverity < domain.SeverityCritical {
-		finalSeverity++
-		promoted = true
-	}
-
-	// FIX ISSUE-08: Cap maximum promotion at +2 levels from original severity.
-	// This prevents Low severity from jumping to Critical on aggregate signals alone.
-	maxSeverity := baseSeverity + 2
-	if maxSeverity > domain.SeverityCritical {
-		maxSeverity = domain.SeverityCritical
-	}
-	if finalSeverity > maxSeverity {
-		finalSeverity = maxSeverity
-	}
-
-	return finalSeverity, promoted
+	return baseSeverity, false
 }
 
 // extractTacticsFromTechniques extracts MITRE tactics from technique IDs.

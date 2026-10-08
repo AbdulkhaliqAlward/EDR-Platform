@@ -6,8 +6,8 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -22,10 +22,10 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/edr-platform/win-agent/internal/actiongate"
 	"github.com/edr-platform/win-agent/internal/config"
 	"github.com/edr-platform/win-agent/internal/logging"
 	"github.com/edr-platform/win-agent/internal/scanner"
@@ -36,36 +36,36 @@ import (
 type CommandType string
 
 const (
-	CmdTerminateProcess CommandType = "TERMINATE_PROCESS"
-	CmdQuarantineFile   CommandType = "QUARANTINE_FILE"
-	CmdIsolateNetwork   CommandType = "ISOLATE_NETWORK"
-	CmdUnisolateNetwork CommandType = "UNISOLATE_NETWORK"
-	CmdCollectForensics CommandType = "COLLECT_FORENSICS"
-	CmdUpdateConfig     CommandType = "UPDATE_CONFIG"
-	CmdUpdateAgent      CommandType = "UPDATE_AGENT"
-	CmdRestartService   CommandType = "RESTART_SERVICE"
-	CmdAdjustRate       CommandType = "ADJUST_RATE"
-	CmdRunCommand       CommandType = "RUN_CMD"
-	CmdRestart          CommandType = "RESTART"  // Machine reboot
-	CmdShutdown         CommandType = "SHUTDOWN" // Machine shutdown
-	CmdBlockIP          CommandType = "BLOCK_IP"
-	CmdUnblockIP        CommandType = "UNBLOCK_IP"
-	CmdBlockDomain      CommandType = "BLOCK_DOMAIN"
-	CmdUnblockDomain    CommandType = "UNBLOCK_DOMAIN"
-	CmdUpdateSignatures CommandType = "UPDATE_SIGNATURES"
+	CmdTerminateProcess      CommandType = "TERMINATE_PROCESS"
+	CmdQuarantineFile        CommandType = "QUARANTINE_FILE"
+	CmdIsolateNetwork        CommandType = "ISOLATE_NETWORK"
+	CmdUnisolateNetwork      CommandType = "UNISOLATE_NETWORK"
+	CmdCollectForensics      CommandType = "COLLECT_FORENSICS"
+	CmdUpdateConfig          CommandType = "UPDATE_CONFIG"
+	CmdUpdateAgent           CommandType = "UPDATE_AGENT"
+	CmdRestartService        CommandType = "RESTART_SERVICE"
+	CmdAdjustRate            CommandType = "ADJUST_RATE"
+	CmdRunCommand            CommandType = "RUN_CMD"
+	CmdRestart               CommandType = "RESTART"  // Machine reboot
+	CmdShutdown              CommandType = "SHUTDOWN" // Machine shutdown
+	CmdBlockIP               CommandType = "BLOCK_IP"
+	CmdUnblockIP             CommandType = "UNBLOCK_IP"
+	CmdBlockDomain           CommandType = "BLOCK_DOMAIN"
+	CmdUnblockDomain         CommandType = "UNBLOCK_DOMAIN"
+	CmdUpdateSignatures      CommandType = "UPDATE_SIGNATURES"
 	CmdRestoreQuarantineFile CommandType = "RESTORE_QUARANTINE_FILE"
 	CmdDeleteQuarantineFile  CommandType = "DELETE_QUARANTINE_FILE"
 	CmdUninstallAgent        CommandType = "UNINSTALL_AGENT"
 
 	// Post-isolation triage commands
-	CmdPostIsolationTriage  CommandType = "POST_ISOLATION_TRIAGE"
-	CmdProcessTreeSnapshot  CommandType = "PROCESS_TREE_SNAPSHOT"
-	CmdPersistenceScan      CommandType = "PERSISTENCE_SCAN"
-	CmdLsassAccessAudit     CommandType = "LSASS_ACCESS_AUDIT"
-	CmdFilesystemTimeline   CommandType = "FILESYSTEM_TIMELINE"
-	CmdNetworkLastSeen      CommandType = "NETWORK_LAST_SEEN"
-	CmdAgentIntegrityCheck  CommandType = "AGENT_INTEGRITY_CHECK"
-	CmdMemoryDump           CommandType = "MEMORY_DUMP"
+	CmdPostIsolationTriage CommandType = "POST_ISOLATION_TRIAGE"
+	CmdProcessTreeSnapshot CommandType = "PROCESS_TREE_SNAPSHOT"
+	CmdPersistenceScan     CommandType = "PERSISTENCE_SCAN"
+	CmdLsassAccessAudit    CommandType = "LSASS_ACCESS_AUDIT"
+	CmdFilesystemTimeline  CommandType = "FILESYSTEM_TIMELINE"
+	CmdNetworkLastSeen     CommandType = "NETWORK_LAST_SEEN"
+	CmdAgentIntegrityCheck CommandType = "AGENT_INTEGRITY_CHECK"
+	CmdMemoryDump          CommandType = "MEMORY_DUMP"
 )
 
 // =============================================================================
@@ -74,7 +74,7 @@ const (
 
 // Win32 process access rights for R4 safe termination.
 const (
-	_PROCESS_TERMINATE                = 0x0001
+	_PROCESS_TERMINATE                 = 0x0001
 	_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 )
 
@@ -121,11 +121,12 @@ var allowedDiagnostics = map[string]bool{
 //
 // SECURITY NOTES
 // ─────────────────────────────────────────────────────────────────────────────
-// • powershell: allowed for USB-scan / event-log / registry queries.
-//   The runCommand handler additionally BLOCKS -File and -EncodedCommand so
-//   scripts cannot be loaded from disk or a base64-encoded blob.
-// • cmd: allowed for simple remediation steps (attrib, del, etc.).
-// • sc / net / reg / wmic: read-only administrative queries for diagnostics.
+//   - powershell: allowed for USB-scan / event-log / registry queries.
+//     The runCommand handler additionally BLOCKS -File and -EncodedCommand so
+//     scripts cannot be loaded from disk or a base64-encoded blob.
+//   - cmd: allowed for simple remediation steps (attrib, del, etc.).
+//   - sc / net / reg / wmic: read-only administrative queries for diagnostics.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 var playbookAllowedCommands = map[string]bool{
 	// All interactive-diagnostic commands are also available from playbooks.
@@ -323,6 +324,15 @@ func (h *Handler) SetUninstallHook(fn func(reason string) error) {
 // Execute processes a command and returns the result.
 func (h *Handler) Execute(ctx context.Context, cmd *Command) *Result {
 	start := time.Now()
+	// Forensic reads retain their parallelism. Mutations, including scripted
+	// actions and local prevention routed here, share one endpoint action gate.
+	if !isReadOnlyCommand(cmd.Type) {
+		release, err := actiongate.Default.Acquire(ctx)
+		if err != nil {
+			return &Result{CommandID: cmd.ID, Status: "TIMEOUT", Error: err.Error(), Duration: time.Since(start), Timestamp: time.Now()}
+		}
+		defer release()
+	}
 
 	h.logger.Infof("Executing command: type=%s id=%s", cmd.Type, cmd.ID)
 
@@ -437,138 +447,23 @@ func (h *Handler) Execute(ctx context.Context, cmd *Command) *Result {
 	return result
 }
 
+func isReadOnlyCommand(kind CommandType) bool {
+	switch kind {
+	case CmdCollectForensics, CmdPostIsolationTriage, CmdProcessTreeSnapshot,
+		CmdPersistenceScan, CmdLsassAccessAudit, CmdFilesystemTimeline,
+		CmdNetworkLastSeen, CmdAgentIntegrityCheck:
+		return true
+	default:
+		return false
+	}
+}
+
 // truncateOutput shortens a string for log output.
 func truncateOutput(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-// terminateProcess kills a process by PID using native Win32 APIs.
-//
-// R4 FIX: Uses OpenProcess + TerminateProcess via syscall instead of shelling
-// out to taskkill. Resolves the process name via QueryFullProcessImageNameW
-// and checks against the critical system process list to prevent BSODs.
-//
-// When kill_tree=true in parameters, all descendant processes are terminated
-// (children first) using the same safety checks.
-func (h *Handler) terminateProcess(_ context.Context, params map[string]string) (string, error) {
-	pidStr := params["pid"]
-	if pidStr == "" {
-		return "", fmt.Errorf("pid parameter is required")
-	}
-
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil || pid <= 0 {
-		return "", fmt.Errorf("invalid PID: %s (must be a positive integer)", pidStr)
-	}
-
-	killTree := strings.EqualFold(params["kill_tree"], "true") || strings.EqualFold(params["killTree"], "true")
-	var order []uint32
-	if killTree {
-		var errTree error
-		order, errTree = processTreePostOrder(uint32(pid))
-		if errTree != nil {
-			return "", errTree
-		}
-	} else {
-		order = []uint32{uint32(pid)}
-	}
-
-	var killed []string
-	for _, p := range order {
-		msg, err := h.terminateOnePID(int(p))
-		if err != nil {
-			h.logger.Warnf("[C2] terminate PID %d: %v", p, err)
-			continue
-		}
-		killed = append(killed, fmt.Sprintf("%d", p))
-		h.logger.Infof("[C2] %s", msg)
-	}
-	if len(killed) == 0 {
-		return "", fmt.Errorf("no processes terminated (target may be protected or already exited)")
-	}
-	return fmt.Sprintf("Terminated PIDs: %s (kill_tree=%v)", strings.Join(killed, ","), killTree), nil
-}
-
-func (h *Handler) terminateOnePID(pid int) (string, error) {
-	// Block PIDs 0 and 4 (System Idle, System kernel).
-	if pid == 0 || pid == 4 {
-		return "", fmt.Errorf("cannot terminate critical system process (PID %d)", pid)
-	}
-
-	// Prevent killing the EDR agent's own process.
-	if pid == os.Getpid() {
-		return "", fmt.Errorf("cannot terminate the EDR agent's own process (PID %d)", pid)
-	}
-
-	// Resolve process name via Win32 API (no shelling out).
-	processName, nameErr := getProcessNameByPID(pid)
-	if nameErr != nil {
-		h.logger.Warnf("[C2] Could not resolve name for PID %d: %v — termination blocked", pid, nameErr)
-		return "", fmt.Errorf("cannot resolve process name for PID %d (process may not exist): %w", pid, nameErr)
-	}
-
-	// Check against critical system process list.
-	if criticalSystemProcesses[strings.ToLower(processName)] {
-		return "", fmt.Errorf("BLOCKED: cannot terminate critical system process %q (PID %d) — would cause BSOD", processName, pid)
-	}
-
-	// Open process with TERMINATE access right.
-	handle, err := syscall.OpenProcess(_PROCESS_TERMINATE, false, uint32(pid))
-	if err != nil {
-		return "", fmt.Errorf("OpenProcess failed for PID %d (%s): %w", pid, processName, err)
-	}
-	defer syscall.CloseHandle(handle)
-
-	// Terminate via Win32 API (exit code 1).
-	if err := win32TerminateProcess(handle); err != nil {
-		return "", fmt.Errorf("TerminateProcess failed for PID %d (%s): %w", pid, processName, err)
-	}
-
-	return fmt.Sprintf("Process terminated via Win32 API: PID=%d Name=%s", pid, processName), nil
-}
-
-// getProcessNameByPID resolves a PID to its executable name using the Win32
-// QueryFullProcessImageNameW API. This is injection-safe — no shell invocation.
-func getProcessNameByPID(pid int) (string, error) {
-	handle, err := syscall.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
-		return "", fmt.Errorf("OpenProcess(QUERY): %w", err)
-	}
-	defer syscall.CloseHandle(handle)
-
-	var buf [512]uint16
-	size := uint32(len(buf))
-
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	queryProc := kernel32.NewProc("QueryFullProcessImageNameW")
-
-	r1, _, e1 := queryProc.Call(
-		uintptr(handle),
-		0, // dwFlags = 0 → Win32 path format
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(unsafe.Pointer(&size)),
-	)
-	if r1 == 0 {
-		return "", fmt.Errorf("QueryFullProcessImageNameW: %v", e1)
-	}
-
-	fullPath := syscall.UTF16ToString(buf[:size])
-	return filepath.Base(fullPath), nil
-}
-
-// win32TerminateProcess calls the Win32 TerminateProcess API on an open handle.
-func win32TerminateProcess(handle syscall.Handle) error {
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	proc := kernel32.NewProc("TerminateProcess")
-
-	r1, _, e1 := proc.Call(uintptr(handle), 1) // exit code = 1
-	if r1 == 0 {
-		return fmt.Errorf("TerminateProcess: %v", e1)
-	}
-	return nil
 }
 
 // quarantineFile moves a file to quarantine.
@@ -807,6 +702,18 @@ func (h *Handler) isolateNetwork(ctx context.Context, params map[string]string) 
 	hostname, grpcPort, err := splitHostPort(serverAddr)
 	if err != nil {
 		return "", fmt.Errorf("invalid server_address %q: %w", serverAddr, err)
+	}
+
+	// ── 1b. Idempotency: already isolated towards the same C2 ───────────────
+	// Rebuilding the rules deletes the C2 ALLOW rules while the block-all
+	// policy is active; Windows Filtering Platform re-authorises live flows
+	// on filter changes, which drops this very connection (the result is
+	// lost and the server waits for a timeout). Nothing needs to change.
+	if h.isIsolated && strings.EqualFold(h.isolationHostname, hostname) && h.isolationPort == grpcPort {
+		if ip, rerr := h.resolveC2IP(hostname); rerr != nil || ip == h.isolationCurrentIP {
+			return fmt.Sprintf("Network already ISOLATED — C2 %s:%s remains allowed; no change", h.isolationCurrentIP, grpcPort), nil
+		}
+		// The C2 address changed: rebuild the rules for the new address.
 	}
 
 	// ── 2. Just-In-Time DNS resolution ──────────────────────────────────────
@@ -2056,13 +1963,13 @@ func (h *Handler) updateAgent(ctx context.Context, params map[string]string) (st
 //
 // Sequence:
 //
-//	0. Grace period (5s) — lets SendCommandResult ACK reach the server before the stream dies
-//	1. Disable SCM recovery (sc failure … actions= //)
-//	2. sc stop + wait for process death (loop-based, not fixed timeout)
-//	3. Rename old → .old, copy patch → dest
-//	4. sc start
-//	5. Re-enable SCM recovery
-//	6. Self-delete the script
+//  0. Grace period (5s) — lets SendCommandResult ACK reach the server before the stream dies
+//  1. Disable SCM recovery (sc failure … actions= //)
+//  2. sc stop + wait for process death (loop-based, not fixed timeout)
+//  3. Rename old → .old, copy patch → dest
+//  4. sc start
+//  5. Re-enable SCM recovery
+//  6. Self-delete the script
 func writeAgentPatchApplyScript(scriptPath, dstExe, patchExe string) error {
 	var b strings.Builder
 	b.WriteString("@echo off\r\n")
@@ -2321,7 +2228,6 @@ func (h *Handler) adjustRate(ctx context.Context, params map[string]string) (str
 	return fmt.Sprintf("Rate adjusted: batch_size=%s interval=%s", batchSize, interval), nil
 }
 
-
 // parseCommandLine splits a command string into tokens while respecting
 // double-quoted strings.  Unlike strings.Fields it does not split inside
 // quoted regions, so a command like:
@@ -2355,6 +2261,7 @@ func parseCommandLine(cmd string) []string {
 	}
 	return tokens
 }
+
 // ejectUSBDrivesNative enumerates removable drives via wmic and calls
 // mountvol /D for each one.  It never returns an error so the playbook step
 // always succeeds — if no USB is present it simply says so.
@@ -2411,9 +2318,9 @@ func ejectUSBDrivesNative(ctx context.Context, log *logging.Logger) (string, err
 //
 // R5 FIX: The previous implementation passed raw user input to cmd.exe /C,
 // which was a catastrophic RCE vulnerability.  This version:
-//   1. Parses the command into executable + arguments (no shell interpretation)
-//   2. Validates the executable against a hardcoded whitelist of safe diagnostics
-//   3. Invokes exec.Command directly (no cmd.exe, no shell interpolation)
+//  1. Parses the command into executable + arguments (no shell interpretation)
+//  2. Validates the executable against a hardcoded whitelist of safe diagnostics
+//  3. Invokes exec.Command directly (no cmd.exe, no shell interpolation)
 //
 // AUTHORIZATION TIERS (see runCmdTier) — set only by the server:
 //   - diagnostic (default): strict allowedDiagnostics list.
@@ -2437,7 +2344,6 @@ func (h *Handler) runCommand(ctx context.Context, params map[string]string) (str
 	if strings.EqualFold(cmdStr, "__EJECT_USB__") {
 		return ejectUSBDrivesNative(ctx, h.logger)
 	}
-
 
 	// Parse into executable + arguments respecting double-quoted tokens.
 	// strings.Fields naively splits on whitespace and would shred:

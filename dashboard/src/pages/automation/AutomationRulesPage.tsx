@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertContextPanel } from '../../components/automation/AlertContextPanel';
 import { UserAssistant } from '../../components/automation/UserAssistant';
 import { Settings, TrendingUp, Clock, AlertTriangle, Plus, Activity, Power, X, CheckCircle, Trash2, Zap, Target } from 'lucide-react';
-import { automationApi } from '../../api/client';
+import { automationApi, authApi, type ResponsePlaybook } from '../../api/client';
 import { apiErrorMessage } from '../../api/apiError';
+import { useAutomationSettings } from '../../hooks/useAutomationSettings';
 
 interface AutomationRule {
   id: string;
@@ -18,7 +19,7 @@ interface AutomationRule {
   lastExecution?: string;       // only set when DB has an actual last_execution
   matchesCurrentAlert?: boolean;
   playbookId?: string;
-  triggerConditions?: any;
+  triggerConditions?: unknown;
 }
 
 // Structured trigger conditions. This is exactly the shape evaluated by the
@@ -27,6 +28,9 @@ interface AutomationRule {
 interface TriggerConditions {
   severity?: string[];
   rule_patterns?: string[];
+  rule_ids?: string[];
+  mitre_techniques?: string[];
+  logic_operator?: 'AND' | 'OR';
   min_risk_score?: number;
 }
 
@@ -49,8 +53,11 @@ const parseConditions = (raw: unknown): TriggerConditions | null => {
   const out: TriggerConditions = {};
   if (isStringArray(tc.severity)) out.severity = tc.severity.filter((s): s is string => typeof s === 'string');
   if (isStringArray(tc.rule_patterns)) out.rule_patterns = tc.rule_patterns.filter((p): p is string => typeof p === 'string' && p !== '');
+  if (isStringArray(tc.rule_ids)) out.rule_ids = tc.rule_ids.filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+  if (isStringArray(tc.mitre_techniques)) out.mitre_techniques = tc.mitre_techniques.filter((p): p is string => typeof p === 'string' && p.trim() !== '');
+  out.logic_operator = typeof tc.logic_operator === 'string' && tc.logic_operator.toUpperCase() === 'OR' ? 'OR' : 'AND';
   if (typeof tc.min_risk_score === 'number' && tc.min_risk_score > 0) out.min_risk_score = tc.min_risk_score;
-  const hasAny = (out.severity?.length || 0) > 0 || (out.rule_patterns?.length || 0) > 0 || !!out.min_risk_score;
+  const hasAny = (out.severity?.length || 0) > 0 || (out.rule_patterns?.length || 0) > 0 || (out.rule_ids?.length || 0) > 0 || (out.mitre_techniques?.length || 0) > 0 || !!out.min_risk_score;
   return hasAny ? out : null;
 };
 
@@ -58,9 +65,13 @@ const describeConditions = (c: TriggerConditions): string => {
   const parts: string[] = [];
   if (c.severity?.length) parts.push(`Severity is ${c.severity.join(' or ')}`);
   if (c.rule_patterns?.length) parts.push(`Rule name contains ${c.rule_patterns.map(p => `"${p}"`).join(' or ')}`);
+  if (c.rule_ids?.length) parts.push(`Sigma rule ID is ${c.rule_ids.join(' or ')}`);
+  if (c.mitre_techniques?.length) parts.push(`MITRE technique is ${c.mitre_techniques.join(' or ')} (including sub-techniques)`);
   if (c.min_risk_score) parts.push(`Risk score is at least ${c.min_risk_score}`);
-  return parts.join('  AND  ');
+  return parts.join(`  ${c.logic_operator || 'AND'}  `);
 };
+
+const splitValues = (value: string): string[] => [...new Set(value.split(/[\s,]+/).map(v => v.trim()).filter(Boolean))];
 
 const legacyConditionText = (tc: unknown): string => {
   if (tc && typeof tc === 'object') {
@@ -80,6 +91,8 @@ interface AlertContext {
     title: string;
     description?: string;
     riskScore?: number;
+    ruleId?: string;
+    mitreTechniques?: string[];
   };
   timestamp: string;
 }
@@ -89,6 +102,11 @@ export function AutomationRulesPage() {
   const [alertContext, setAlertContext] = useState<AlertContext | null>(null);
   const [rules, setRules] = useState<AutomationRule[]>([]);
   const [loading, setLoading] = useState(true);
+  const { settings, loading: settingsLoading, error: settingsError, setCached, refresh } = useAutomationSettings();
+  const [switchReason, setSwitchReason] = useState('');
+  const [switchSaving, setSwitchSaving] = useState(false);
+  const [switchError, setSwitchError] = useState('');
+  const canChangeSettings = authApi.hasRole(['admin']);
 
   // Modal State
   const [isCreatingRule, setIsCreatingRule] = useState(false);
@@ -97,51 +115,36 @@ export function AutomationRulesPage() {
   const [condPatterns, setCondPatterns] = useState<string[]>([]);
   const [patternInput, setPatternInput] = useState('');
   const [condMinRisk, setCondMinRisk] = useState('');
+  const [condRuleIDs, setCondRuleIDs] = useState('');
+  const [condTechniques, setCondTechniques] = useState('');
+  const [condLogic, setCondLogic] = useState<'AND' | 'OR'>('AND');
   const [editingLegacyCondition, setEditingLegacyCondition] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [playbooks, setPlaybooks] = useState<any[]>([]);
+  const [playbooks, setPlaybooks] = useState<ResponsePlaybook[]>([]);
   const [selectedPlaybookId, setSelectedPlaybookId] = useState('');
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [autoExecute, setAutoExecute] = useState(true);
   const [rulePriority, setRulePriority] = useState('5');
   const [ruleCooldown, setRuleCooldown] = useState('30');
 
-  useEffect(() => {
-    // Extract alert context from navigation state
-    const state = location.state as any;
-    if (state?.alertId && state?.alertDetails) {
-      setAlertContext({
-        alertId: state.alertId,
-        alertDetails: state.alertDetails,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    // Fetch automation rules and playbooks
-    fetchRules();
-    fetchPlaybooks();
-  }, [location.state]);
-
-  const fetchPlaybooks = async () => {
+  const fetchPlaybooks = useCallback(async () => {
     try {
       const res = await automationApi.listPlaybooks();
-      let pbs = res.playbooks || [];
+      const pbs = res.playbooks || [];
       
       setPlaybooks(pbs);
-      if (pbs.length > 0 && !selectedPlaybookId) {
-        setSelectedPlaybookId(pbs[0].id);
-      }
+      if (pbs.length > 0) setSelectedPlaybookId(current => current || pbs[0].id);
     } catch (error) {
       console.error('Failed to fetch playbooks:', error);
     }
-  };
+  }, []);
 
-  const fetchRules = async () => {
+  const fetchRules = useCallback(async () => {
     try {
       setLoading(true);
       const res = await automationApi.listRules();
       
-      let formattedRules: AutomationRule[] = (res.rules || []).map((r: any) => ({
+      const formattedRules: AutomationRule[] = (res.rules || []).map(r => ({
         id: r.id,
         name: r.name,
         description: r.description,
@@ -163,7 +166,23 @@ export function AutomationRulesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    // Extract alert context from navigation state
+    const state = location.state as AlertContext | null;
+    if (state?.alertId && state?.alertDetails) {
+      setAlertContext({
+        alertId: state.alertId,
+        alertDetails: state.alertDetails,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Fetch automation rules and playbooks
+    fetchRules();
+    fetchPlaybooks();
+  }, [location.state, fetchRules, fetchPlaybooks]);
 
   const handleSuggestionAction = (action: string) => {
     console.log('Suggestion action:', action);
@@ -187,7 +206,7 @@ export function AutomationRulesPage() {
   };
 
 
-  const handleRuleToggle = async (rule: any) => {
+  const handleRuleToggle = async (rule: AutomationRule) => {
     // Optimistic UI update
     setRules(prev => prev.map(r =>
       r.id === rule.id ? { ...r, enabled: !r.enabled } : r
@@ -213,6 +232,9 @@ export function AutomationRulesPage() {
     setCondPatterns([]);
     setPatternInput('');
     setCondMinRisk('');
+    setCondRuleIDs('');
+    setCondTechniques('');
+    setCondLogic('AND');
     setEditingLegacyCondition(null);
   };
 
@@ -226,6 +248,8 @@ export function AutomationRulesPage() {
     if (alertContext?.alertDetails?.ruleName) {
       setNewRuleName(`Response Rule for: ${alertContext.alertDetails.ruleName}`);
       setCondPatterns([alertContext.alertDetails.ruleName]);
+      setCondRuleIDs(alertContext.alertDetails.ruleId || '');
+      setCondTechniques((alertContext.alertDetails.mitreTechniques || []).join(', '));
       const sev = String(alertContext.alertDetails.severity || '').toLowerCase();
       if (SEVERITY_VALUES.has(sev)) setCondSeverities([sev]);
     } else {
@@ -243,6 +267,9 @@ export function AutomationRulesPage() {
       setCondSeverities(parsed.severity || []);
       setCondPatterns(parsed.rule_patterns || []);
       setCondMinRisk(parsed.min_risk_score ? String(parsed.min_risk_score) : '');
+      setCondRuleIDs((parsed.rule_ids || []).join(', '));
+      setCondTechniques((parsed.mitre_techniques || []).join(', '));
+      setCondLogic(parsed.logic_operator || 'AND');
     } else if (rule.triggerConditions) {
       setEditingLegacyCondition(legacyConditionText(rule.triggerConditions));
     }
@@ -278,7 +305,19 @@ export function AutomationRulesPage() {
     const pending = patternInput.trim();
     if (pending && !patterns.some(x => x.toLowerCase() === pending.toLowerCase())) patterns.push(pending);
 
-    const conditions: TriggerConditions = {};
+    const conditions: TriggerConditions = { logic_operator: condLogic };
+    const ruleIDs = splitValues(condRuleIDs).map(v => v.toLowerCase());
+    const techniques = splitValues(condTechniques).map(v => v.toUpperCase());
+    if (ruleIDs.length > 100 || ruleIDs.some(id => id.length > 128)) {
+      alert('Use at most 100 Sigma rule IDs, each at most 128 characters.');
+      return;
+    }
+    if (techniques.length > 50 || techniques.some(t => !/^T\d{4}(\.\d{3})?$/.test(t))) {
+      alert('Use at most 50 MITRE techniques, such as T1059 or T1059.001.');
+      return;
+    }
+    if (ruleIDs.length) conditions.rule_ids = ruleIDs;
+    if (techniques.length) conditions.mitre_techniques = techniques;
     if (condSeverities.length > 0) conditions.severity = condSeverities;
     if (patterns.length > 0) conditions.rule_patterns = patterns;
     if (condMinRisk.trim() !== '') {
@@ -290,8 +329,8 @@ export function AutomationRulesPage() {
       conditions.min_risk_score = n;
     }
     // An empty condition set would match every alert, so require at least one.
-    if (!conditions.severity && !conditions.rule_patterns && !conditions.min_risk_score) {
-      alert("Add at least one condition (severity, rule name, or minimum risk score).");
+    if (!conditions.severity && !conditions.rule_patterns && !conditions.min_risk_score && !conditions.rule_ids && !conditions.mitre_techniques) {
+      alert('Add at least one trigger condition.');
       return;
     }
     const priority = Number(rulePriority);
@@ -398,6 +437,36 @@ export function AutomationRulesPage() {
         />
       )}
 
+      <section className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-5 space-y-3" aria-label="Server automated response">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-semibold text-slate-900 dark:text-white">Server automated response</h2>
+            <p className="text-sm text-slate-500">
+              {settingsLoading ? 'Loading server state…' : settingsError ? 'Server state unavailable.' : settings?.enabled ? 'Enabled — matching automatic rules can start playbooks.' : 'Disabled — automatic playbooks will not start.'}
+            </p>
+          </div>
+          {settingsError && <button type="button" onClick={() => refresh()} className="text-sm text-blue-600">Retry</button>}
+          {canChangeSettings && <button type="button" role="switch" aria-checked={settings?.enabled || false}
+            disabled={!settings || settingsError || settings.locked || switchSaving || !switchReason.trim()}
+            onClick={async () => {
+              if (!settings) return;
+              setSwitchSaving(true); setSwitchError('');
+              try {
+                const next = await automationApi.updateSettings(!settings.enabled, switchReason.trim());
+                setCached(next); setSwitchReason('');
+              } catch (err) { setSwitchError(apiErrorMessage(err, 'Failed to change automated response.')); }
+              finally { setSwitchSaving(false); }
+            }} className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold disabled:opacity-50">
+            {switchSaving ? 'Saving…' : settings?.enabled ? 'Disable automated response' : 'Enable automated response'}
+          </button>}
+        </div>
+        {settings?.locked && <p className="text-sm text-amber-600">Disabled by server configuration. An administrator must change the server setting before this switch can enable automation.</p>}
+        {canChangeSettings && !settings?.locked && <input aria-label="Reason for automation setting change" value={switchReason} onChange={e => setSwitchReason(e.target.value)} maxLength={500} placeholder="Reason for change (recorded in the audit log)" className="w-full border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm bg-transparent" />}
+        {!canChangeSettings && <p className="text-xs text-slate-500">Only administrators can change this setting.</p>}
+        {switchError && <p role="alert" className="text-sm text-rose-600">{switchError}</p>}
+        <p className="text-xs text-slate-500">Disabling prevents new automated runs. An action already dispatched can finish. Manual response and agent-local prevention remain available.</p>
+      </section>
+
       {/* User Assistant */}
       <UserAssistant
         alertContext={alertContext || undefined}
@@ -415,7 +484,7 @@ export function AutomationRulesPage() {
           </p>
           <p className="text-xs text-amber-700 dark:text-amber-400 mt-2 flex items-center gap-1.5">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-            Automatic execution is not enabled on the server yet: rules are saved, but playbooks must currently be run from the Playbooks page.
+            {settingsError ? 'Server automation state is unavailable. Check the server before relying on automatic response.' : settings?.enabled ? 'Enabled rules marked Auto Execute run on matching new alerts, subject to cooldowns and containment guardrails.' : 'Server automated response is disabled. Rules remain saved and manual playbook runs remain available.'}
           </p>
         </div>
 
@@ -469,7 +538,7 @@ export function AutomationRulesPage() {
 
                       {/* Linked Playbook */}
                       {rule.playbookId && (() => {
-                        const pb = playbooks.find((p: any) => p.id === rule.playbookId);
+                        const pb = playbooks.find(p => p.id === rule.playbookId);
                         return pb ? (
                           <div className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 dark:bg-blue-900/20 rounded-md text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800/50">
                             <Activity className="w-3.5 h-3.5" />
@@ -490,7 +559,7 @@ export function AutomationRulesPage() {
                     </div>
 
                     {/* Trigger Conditions */}
-                    {rule.triggerConditions && (
+                    {!!rule.triggerConditions && (
                       <div className="text-xs bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-3 font-mono text-slate-600 dark:text-slate-400 w-full overflow-hidden">
                         <div className="font-sans font-bold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
                            <Target className="w-4 h-4 text-blue-500" />
@@ -593,7 +662,7 @@ export function AutomationRulesPage() {
                   Trigger When <span className="text-rose-500">*</span>
                 </label>
                 <p className="text-xs text-slate-500 mb-3">
-                  Set one or more conditions. An alert must match <span className="font-semibold">all</span> of the conditions you set.
+                  Set one or more conditions. Values within each list match any listed value; combine condition groups below.
                 </p>
 
                 {editingLegacyCondition && (
@@ -667,6 +736,26 @@ export function AutomationRulesPage() {
                     <p className="text-[11px] text-slate-400 mt-1">Case-insensitive; matches part of the rule name.</p>
                   </div>
 
+                  <div>
+                    <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Combine condition groups
+                      <select value={condLogic} onChange={e => setCondLogic(e.target.value as 'AND' | 'OR')} className="block mt-1 border rounded-lg px-3 py-2 bg-white dark:bg-slate-950">
+                        <option value="AND">All groups (AND)</option><option value="OR">Any group (OR)</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">Exact Sigma rule IDs
+                      <textarea value={condRuleIDs} onChange={e => setCondRuleIDs(e.target.value)} placeholder="Comma or space separated rule IDs" className="block w-full mt-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm" />
+                    </label>
+                    <p className="text-[11px] text-slate-500 mt-1">Explicitly opting a detection into automatic containment permits its response even below High severity. Review the detection first.</p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-600 dark:text-slate-400">MITRE techniques
+                      <input value={condTechniques} onChange={e => setCondTechniques(e.target.value)} placeholder="T1059, T1486, T1059.001" className="block w-full mt-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm" />
+                    </label>
+                  </div>
+                  <p className="text-xs text-amber-600">Automatic containment requires AND groups and either exact Sigma rule IDs or severity restricted to High/Critical. A risk score or technique alone is insufficient.</p>
+
                   {/* Minimum risk score */}
                   <div>
                     <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">
@@ -683,7 +772,9 @@ export function AutomationRulesPage() {
 
                   {/* Live summary */}
                   {(() => {
-                    const preview: TriggerConditions = {};
+                    const preview: TriggerConditions = { logic_operator: condLogic };
+                    if (splitValues(condRuleIDs).length) preview.rule_ids = splitValues(condRuleIDs);
+                    if (splitValues(condTechniques).length) preview.mitre_techniques = splitValues(condTechniques).map(t => t.toUpperCase());
                     if (condSeverities.length) preview.severity = condSeverities;
                     const pats = [...condPatterns];
                     if (patternInput.trim() && !pats.some(x => x.toLowerCase() === patternInput.trim().toLowerCase())) pats.push(patternInput.trim());

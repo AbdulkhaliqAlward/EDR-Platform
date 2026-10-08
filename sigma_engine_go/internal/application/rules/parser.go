@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -117,14 +118,30 @@ func (p *RuleParser) ParseFile(path string) (*domain.SigmaRule, error) {
 		return nil, fmt.Errorf("file %s exceeds maximum size (%d bytes)", path, DefaultMaxRuleSize)
 	}
 
-	// Use buffered reader (64KB default)
-	reader := bufio.NewReaderSize(file, DefaultBufferSize)
+	return p.parseReader(file)
+}
+
+// ParseContent uses the same parser and size limit as disk loading.
+func (p *RuleParser) ParseContent(content string) (*domain.SigmaRule, error) {
+	if len(content) > DefaultMaxRuleSize {
+		return nil, fmt.Errorf("rule exceeds maximum size (%d bytes)", DefaultMaxRuleSize)
+	}
+	return p.parseReader(strings.NewReader(content))
+}
+
+func (p *RuleParser) parseReader(input io.Reader) (*domain.SigmaRule, error) {
+	reader := bufio.NewReaderSize(input, DefaultBufferSize)
 
 	// Parse YAML
 	var yamlRule yamlRule
 	decoder := yaml.NewDecoder(reader)
 	if err := decoder.Decode(&yamlRule); err != nil {
 		return nil, fmt.Errorf("yaml parsing failed: %w", err)
+	}
+
+	var extra interface{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("rule content must contain one YAML document")
 	}
 
 	// Validate

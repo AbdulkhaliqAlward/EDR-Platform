@@ -2,12 +2,15 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/database"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/logger"
 	"github.com/gorilla/mux"
@@ -17,6 +20,40 @@ import (
 type RuleHandler struct {
 	repo        database.RuleRepository
 	auditLogger *database.AuditLogger
+	runtime     RuleRuntime
+}
+
+// RuleRuntime validates and activates edits in the running detector.
+type RuleRuntime interface {
+	Validate(*database.Rule) error
+	Refresh(context.Context) error
+	Test(*database.Rule, map[string]interface{}) ([]*domain.DetectionResult, error)
+}
+
+func (h *RuleHandler) validate(w http.ResponseWriter, row *database.Rule) bool {
+	if h.runtime == nil {
+		writeError(w, 503, "Rule runtime unavailable")
+		return false
+	}
+	if err := h.runtime.Validate(row); err != nil {
+		writeError(w, 400, err.Error())
+		return false
+	}
+	return true
+}
+func (h *RuleHandler) activate(w http.ResponseWriter, r *http.Request) bool {
+	if h.runtime == nil {
+		writeError(w, 503, "Rule stored; runtime activation unavailable")
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	if err := h.runtime.Refresh(ctx); err != nil {
+		logger.Errorf("Rule runtime activation failed: %v", err)
+		writeError(w, 503, "Rule stored; runtime activation pending retry")
+		return false
+	}
+	return true
 }
 
 // NewRuleHandler creates a new rule handler.
@@ -200,6 +237,9 @@ func (h *RuleHandler) CreateRule(w http.ResponseWriter, r *http.Request) {
 		rule.Status = "stable"
 	}
 
+	if !h.validate(w, rule) {
+		return
+	}
 	created, err := h.repo.Create(ctx, rule)
 	if err != nil {
 		logger.Errorf("Failed to create rule: %v", err)
@@ -212,6 +252,9 @@ func (h *RuleHandler) CreateRule(w http.ResponseWriter, r *http.Request) {
 		_ = h.auditLogger.Log(ctx, "create_rule", "Rule", rule.ID, username, userID, ip, "success", "Created custom rule: "+rule.Title)
 	}
 
+	if !h.activate(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusCreated, toRuleResponse(created))
 }
 
@@ -264,6 +307,9 @@ func (h *RuleHandler) UpdateRule(w http.ResponseWriter, r *http.Request) {
 	existing.Status = req.Status
 	existing.Tags = req.Tags
 
+	if !h.validate(w, existing) {
+		return
+	}
 	updated, err := h.repo.Update(ctx, ruleID, existing)
 	if err != nil {
 		logger.Errorf("Failed to update rule: %v", err)
@@ -276,6 +322,9 @@ func (h *RuleHandler) UpdateRule(w http.ResponseWriter, r *http.Request) {
 		_ = h.auditLogger.Log(ctx, "update_rule", "Rule", ruleID, username, userID, ip, "success", "Updated rule: "+existing.Title)
 	}
 
+	if !h.activate(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, toRuleResponse(updated))
 }
 
@@ -303,6 +352,9 @@ func (h *RuleHandler) DeleteRule(w http.ResponseWriter, r *http.Request) {
 		_ = h.auditLogger.Log(ctx, "delete_rule", "Rule", ruleID, username, userID, ip, "success", "Deleted rule")
 	}
 
+	if !h.activate(w, r) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -319,6 +371,9 @@ func (h *RuleHandler) EnableRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.validate(w, existing) {
+		return
+	}
 	if err := h.repo.Enable(ctx, ruleID); err != nil {
 		logger.Errorf("Failed to enable rule: %v", err)
 		writeError(w, http.StatusInternalServerError, "Failed to enable rule")
@@ -330,6 +385,9 @@ func (h *RuleHandler) EnableRule(w http.ResponseWriter, r *http.Request) {
 		_ = h.auditLogger.Log(ctx, "enable_rule", "Rule", ruleID, username, userID, ip, "success", "Enabled rule")
 	}
 
+	if !h.activate(w, r) {
+		return
+	}
 	existing.Enabled = true
 	writeJSON(w, http.StatusOK, toRuleResponse(existing))
 }
@@ -358,6 +416,9 @@ func (h *RuleHandler) DisableRule(w http.ResponseWriter, r *http.Request) {
 		_ = h.auditLogger.Log(ctx, "disable_rule", "Rule", ruleID, username, userID, ip, "success", "Disabled rule")
 	}
 
+	if !h.activate(w, r) {
+		return
+	}
 	existing.Enabled = false
 	writeJSON(w, http.StatusOK, toRuleResponse(existing))
 }
@@ -394,6 +455,11 @@ func (h *RuleHandler) BulkImportRules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, ruleReq := range req.Rules {
+		if ruleReq == nil {
+			response.Failed++
+			response.Errors = append(response.Errors, "Missing rule")
+			continue
+		}
 		rule := &database.Rule{
 			ID:          ruleReq.ID,
 			Title:       ruleReq.Title,
@@ -403,11 +469,26 @@ func (h *RuleHandler) BulkImportRules(w http.ResponseWriter, r *http.Request) {
 			Category:    ruleReq.Category,
 			Product:     ruleReq.Product,
 			Status:      ruleReq.Status,
+			Tags:        ruleReq.Tags,
 			Enabled:     true,
 			Source:      "imported",
 			Version:     1,
 		}
 
+		if rule.Status == "" {
+			rule.Status = "stable"
+		}
+		var validation error
+		if h.runtime == nil {
+			validation = fmt.Errorf("rule runtime unavailable")
+		} else {
+			validation = h.runtime.Validate(rule)
+		}
+		if validation != nil {
+			response.Failed++
+			response.Errors = append(response.Errors, rule.ID+": "+validation.Error())
+			continue
+		}
 		if _, err := h.repo.Create(ctx, rule); err != nil {
 			response.Failed++
 			response.Errors = append(response.Errors, ruleReq.ID+": "+err.Error())
@@ -421,6 +502,9 @@ func (h *RuleHandler) BulkImportRules(w http.ResponseWriter, r *http.Request) {
 		_ = h.auditLogger.Log(ctx, "bulk_import_rules", "Rule", "", username, userID, ip, "success", strconv.Itoa(response.Imported)+" rules imported successfully")
 	}
 
+	if response.Imported > 0 && !h.activate(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -454,19 +538,17 @@ func (h *RuleHandler) TestRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Implement actual rule testing against event
-	// For now, return a placeholder response
-	response := TestRuleResponse{
-		Matched: false,
-		Details: map[string]interface{}{
-			"rule_id":   ruleID,
-			"evaluated": true,
-			"note":      "Rule testing implementation pending",
-		},
+	if h.runtime == nil {
+		writeError(w, 503, "Rule runtime unavailable")
+		return
 	}
+	matches, err := h.runtime.Test(existing, req.Event)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, TestRuleResponse{Matched: len(matches) > 0, Details: map[string]interface{}{"rule_id": ruleID, "evaluated": true, "matches": matches}})
 
-	writeJSON(w, http.StatusOK, response)
-	_ = ctx // Unused for now
 }
 
 // toRuleResponse converts a database rule to API response.

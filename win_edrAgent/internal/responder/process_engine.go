@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -52,13 +51,20 @@ type ProcessRuleActionConf struct {
 
 // ProcessEngine executes local process auto-response decisions using a rule pack.
 type ProcessEngine struct {
-	logger          *logging.Logger
-	enabled         bool
-	preventionMode  string
-	rules           []ProcessRule
-	criticalNames   map[string]struct{}
-	lastMatch       map[string]time.Time
-	mu              sync.Mutex
+	logger         *logging.Logger
+	enabled        bool
+	preventionMode string
+	rules          []ProcessRule
+	criticalNames  map[string]struct{}
+	lastMatch      map[string]time.Time
+	mu             sync.Mutex
+	terminate      func(context.Context, map[string]string) (string, error)
+}
+
+// SetTerminator wires the identity-checked command implementation before use.
+// Local prevention never falls back to PID-only taskkill.
+func (e *ProcessEngine) SetTerminator(fn func(context.Context, map[string]string) (string, error)) {
+	e.terminate = fn
 }
 
 // NewProcessEngine loads and validates a process rule pack from disk.
@@ -68,15 +74,15 @@ func NewProcessEngine(logger *logging.Logger, rulesPath, preventionMode string, 
 		enabled:        enabled,
 		preventionMode: strings.ToLower(strings.TrimSpace(preventionMode)),
 		criticalNames: map[string]struct{}{
-			"system":       {},
-			"smss.exe":     {},
-			"csrss.exe":    {},
-			"wininit.exe":  {},
-			"winlogon.exe": {},
-			"services.exe": {},
-			"lsass.exe":    {},
-			"svchost.exe":  {},
-			"dwm.exe":      {},
+			"system":        {},
+			"smss.exe":      {},
+			"csrss.exe":     {},
+			"wininit.exe":   {},
+			"winlogon.exe":  {},
+			"services.exe":  {},
+			"lsass.exe":     {},
+			"svchost.exe":   {},
+			"dwm.exe":       {},
 			"edr-agent.exe": {},
 			"agent.exe":     {},
 		},
@@ -103,6 +109,9 @@ func NewProcessEngine(logger *logging.Logger, rulesPath, preventionMode string, 
 		}
 		if strings.TrimSpace(r.Action) == "" {
 			r.Action = "terminate"
+		}
+		if !strings.EqualFold(strings.TrimSpace(r.Action), "terminate") {
+			return nil, fmt.Errorf("unsupported process response action %q in rule %s", r.Action, r.ID)
 		}
 		if r.Response.CooldownSeconds <= 0 {
 			r.Response.CooldownSeconds = 60
@@ -191,7 +200,7 @@ func (e *ProcessEngine) EvaluateAndAct(ctx context.Context, base map[string]inte
 			}))
 			return evt, true
 		}
-		out, err := terminatePID(ctx, pid, rule.Response.KillTree)
+		out, err := e.terminateMeasured(ctx, pid, base, rule.Response.KillTree)
 		if err != nil {
 			evt := event.NewEvent(event.EventTypeProcess, event.SeverityHigh, mergeProcessResponseData(base, map[string]interface{}{
 				"action":             "auto_terminate_failed",
@@ -247,10 +256,23 @@ func matchesRule(m ProcessRuleMatch, base map[string]interface{}) bool {
 }
 
 func (e *ProcessEngine) inCooldown(rule ProcessRule, base map[string]interface{}) bool {
-	key := strings.ToLower(fmt.Sprintf("%s|%v|%v|%v", rule.ID, base["name"], base["parent_name"], base["command_line"]))
+	key := fmt.Sprintf("%s|%v|%v", rule.ID, base["pid"], base["process_start_time"])
 	now := time.Now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if len(e.lastMatch) >= 4096 {
+		for key, at := range e.lastMatch {
+			if now.Sub(at) > time.Hour {
+				delete(e.lastMatch, key)
+			}
+		}
+		if len(e.lastMatch) >= 4096 {
+			for key := range e.lastMatch {
+				delete(e.lastMatch, key)
+				break
+			}
+		}
+	}
 	last, ok := e.lastMatch[key]
 	if ok && now.Sub(last) < time.Duration(rule.Response.CooldownSeconds)*time.Second {
 		return true
@@ -259,13 +281,22 @@ func (e *ProcessEngine) inCooldown(rule ProcessRule, base map[string]interface{}
 	return false
 }
 
-func terminatePID(ctx context.Context, pid uint32, killTree bool) (string, error) {
-	args := []string{"/PID", fmt.Sprintf("%d", pid), "/F"}
-	if killTree {
-		args = append(args, "/T")
+func (e *ProcessEngine) terminateMeasured(ctx context.Context, pid uint32, base map[string]interface{}, killTree bool) (string, error) {
+	image, _ := base["executable"].(string)
+	started, _ := base["process_start_time"].(string)
+	if pid <= 4 || strings.TrimSpace(image) == "" || strings.TrimSpace(started) == "" {
+		return "", fmt.Errorf("local termination requires a measured process image and creation time")
 	}
-	out, err := exec.CommandContext(ctx, "taskkill", args...).CombinedOutput()
-	return string(out), err
+	if _, err := time.Parse(time.RFC3339Nano, started); err != nil {
+		return "", fmt.Errorf("invalid measured process creation time: %w", err)
+	}
+	if e.terminate == nil {
+		return "", fmt.Errorf("identity-checked local terminator is unavailable")
+	}
+	return e.terminate(ctx, map[string]string{
+		"pid": fmt.Sprint(pid), "kill_tree": fmt.Sprint(killTree),
+		"process_path": image, "process_started_at": started,
+	})
 }
 
 func toSeverity(s string) event.Severity {

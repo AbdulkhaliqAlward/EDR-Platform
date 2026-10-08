@@ -12,6 +12,10 @@ import { apiErrorMessage } from '../../api/apiError';
 
 const POLL_MS = 2000;
 
+// Identity / attribution values bound from the alert: shown, not edited
+// (they protect against terminating a reused PID).
+const READONLY_PARAMS = new Set(['process_path', 'process_started_at']);
+
 const stepIcon = (status: string) => {
     switch (status) {
         case 'success': return <CheckCircle className="w-4 h-4 text-emerald-500" />;
@@ -49,6 +53,8 @@ export function PlaybookRunPanel({ playbookId, alertId, agentId, onStarted, onFi
     const [reason, setReason] = useState('');
     const [starting, setStarting] = useState(false);
     const [execution, setExecution] = useState<PlaybookExecution | null>(null);
+    const [priorRuns, setPriorRuns] = useState<PlaybookExecution[]>([]);
+    const [activeOnHost, setActiveOnHost] = useState<PlaybookExecution[]>([]);
     const onFinishedRef = useRef(onFinished);
     onFinishedRef.current = onFinished;
 
@@ -74,6 +80,24 @@ export function PlaybookRunPanel({ playbookId, alertId, agentId, onStarted, onFi
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
     }, [playbookId, alertId, agentId, hasTarget]);
+
+    // Coordination context: what already ran for this alert, and whether a
+    // response is executing on the endpoint now (a new run will queue).
+    const planAgent = plan?.agent_id;
+    useEffect(() => {
+        let cancelled = false;
+        if (alertId) {
+            automationApi.listExecutions({ alert_id: alertId, limit: 5 })
+                .then(list => { if (!cancelled) setPriorRuns(list); })
+                .catch(() => { /* optional context */ });
+        }
+        if (planAgent) {
+            automationApi.listExecutions({ agent_id: planAgent, status: 'pending,running', limit: 5 })
+                .then(list => { if (!cancelled) setActiveOnHost(list); })
+                .catch(() => { /* optional context */ });
+        }
+        return () => { cancelled = true; };
+    }, [alertId, planAgent]);
 
     // Track the run until it reaches a terminal status.
     const executionId = execution?.id;
@@ -169,6 +193,23 @@ export function PlaybookRunPanel({ playbookId, alertId, agentId, onStarted, onFi
                 </div>
             )}
 
+            {!execution && priorRuns.length > 0 && (
+                <div className="rounded-lg border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50 dark:bg-indigo-900/10 p-3 text-xs text-indigo-800 dark:text-indigo-300 space-y-1">
+                    <div className="font-semibold">Responses already run for this alert:</div>
+                    {priorRuns.map(r => (
+                        <div key={r.id}>
+                            {r.trigger_source === 'automation' ? 'Automated' : `Manual (${r.created_by_username || 'analyst'})`} · {r.playbook_name} · <strong>{r.status === 'pending' ? 'queued' : r.status}</strong> · {new Date(r.started_at).toLocaleString()}
+                        </div>
+                    ))}
+                    <div className="text-indigo-600/80 dark:text-indigo-400/80">Steps whose goal is already met (e.g. the host is isolated, the process has exited) succeed without acting again.</div>
+                </div>
+            )}
+            {!execution && activeOnHost.length > 0 && (
+                <div className="rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/10 p-3 text-xs text-amber-800 dark:text-amber-300">
+                    A response is executing on this endpoint now ({activeOnHost[0].playbook_name}). A new run is queued and starts when it finishes — runs never interleave on one host.
+                </div>
+            )}
+
             <div className="space-y-2">
                 {steps.map(step => {
                     const params = step.params || {};
@@ -182,12 +223,29 @@ export function PlaybookRunPanel({ playbookId, alertId, agentId, onStarted, onFi
                                 {step.script_name && <span className="text-xs text-indigo-600 dark:text-indigo-400 font-mono truncate">{step.script_name}</span>}
                                 {step.on_failure === 'continue' && <span className="ml-auto text-[10px] uppercase font-bold text-slate-400">continue on failure</span>}
                             </div>
-                            {Object.keys(params).length > 0 && (
+                            {step.type === 'terminate_process' && (
+                                <div className="mt-2 pl-6 flex items-center gap-2 text-xs">
+                                    <span className="w-24 shrink-0 text-slate-500">Scope</span>
+                                    {editable ? (
+                                        <select
+                                            value={overrides[step.index]?.kill_tree ?? params.kill_tree ?? 'false'}
+                                            onChange={e => setOverride(step.index, 'kill_tree', e.target.value)}
+                                            className="flex-1 min-w-0 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-slate-800 dark:text-slate-200 focus:ring-1 focus:ring-indigo-500 outline-none"
+                                        >
+                                            <option value="false">This process only</option>
+                                            <option value="true">Process tree — the process and every process it started</option>
+                                        </select>
+                                    ) : (
+                                        <span className="text-slate-700 dark:text-slate-300">{params.kill_tree === 'true' ? 'Process tree' : 'This process only'}</span>
+                                    )}
+                                </div>
+                            )}
+                            {Object.keys(params).filter(k => !(step.type === 'terminate_process' && k === 'kill_tree')).length > 0 && (
                                 <div className="mt-2 grid grid-cols-1 gap-1.5 pl-6">
-                                    {Object.entries(params).map(([key, value]) => (
+                                    {Object.entries(params).filter(([key]) => !(step.type === 'terminate_process' && key === 'kill_tree')).map(([key, value]) => (
                                         <label key={key} className="flex items-center gap-2 text-xs">
                                             <span className="w-24 shrink-0 text-slate-500 font-mono">{key}</span>
-                                            {editable ? (
+                                            {editable && !READONLY_PARAMS.has(key) ? (
                                                 <input
                                                     type="text"
                                                     value={overrides[step.index]?.[key] ?? value}
@@ -230,7 +288,9 @@ export function PlaybookRunPanel({ playbookId, alertId, agentId, onStarted, onFi
             {execution && !finished && (
                 <div className="flex items-center gap-2 text-sm text-indigo-600 dark:text-indigo-400">
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Running on the endpoint — step {Math.min(execution.commands_executed + 1, execution.commands_total)} of {execution.commands_total}
+                    {execution.status === 'pending'
+                        ? 'Queued — waiting for another response on this endpoint to finish'
+                        : `Running on the endpoint — step ${Math.min(execution.commands_executed + 1, execution.commands_total)} of ${execution.commands_total}`}
                 </div>
             )}
 

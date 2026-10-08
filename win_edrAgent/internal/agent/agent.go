@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/edr-platform/win-agent/internal/collectors"
 	"github.com/edr-platform/win-agent/internal/command"
 	"github.com/edr-platform/win-agent/internal/config"
 	"github.com/edr-platform/win-agent/internal/enrollment"
@@ -63,6 +64,72 @@ type Agent struct {
 	// configUpdateFn is an optional hook registered by the C2 command handler
 	// so it can trigger UpdateConfig() without a direct import cycle.
 	configUpdateFn func(newCfg *config.Config) error
+
+	// rateLimiter caps high-volume, low-value telemetry (file, image-load,
+	// network) before batching; detection-critical types are never limited.
+	rateLimiter *collectors.RateLimiter
+
+	// dropSources are counters of events lost anywhere in the pipeline
+	// (collector queues, rate limiting, full buffers), summed into the
+	// heartbeat so the server sees telemetry loss.
+	dropMu      sync.Mutex
+	dropSources map[string]func() uint64
+}
+
+// rateLimitExempt are detection-critical event types: they are never
+// rate-limited (loss would create blind spots for process/script rules).
+var rateLimitExempt = map[event.EventType]bool{
+	event.EventTypeProcess:       true,
+	event.EventTypeProcessAccess: true,
+	event.EventTypeAuth:          true,
+	event.EventTypeDriver:        true,
+	event.EventTypeRegistry:      true,
+	event.EventTypePowerShell:    true,
+}
+
+// RegisterDropSource adds a named counter of lost events to the heartbeat
+// metric and the periodic health log.
+func (a *Agent) RegisterDropSource(name string, fn func() uint64) {
+	if fn == nil {
+		return
+	}
+	a.dropMu.Lock()
+	if a.dropSources == nil {
+		a.dropSources = map[string]func() uint64{}
+	}
+	a.dropSources[name] = fn
+	a.dropMu.Unlock()
+}
+
+// droppedBreakdown returns every loss counter by source.
+func (a *Agent) droppedBreakdown() map[string]uint64 {
+	out := map[string]uint64{"buffer_full": a.eventsDropped.Load()}
+	if a.rateLimiter != nil {
+		out["rate_limited"] = a.rateLimiter.DroppedCount()
+	}
+	a.dropMu.Lock()
+	for name, fn := range a.dropSources {
+		out[name] = fn()
+	}
+	a.dropMu.Unlock()
+	return out
+}
+
+// totalDropped is the heartbeat "events dropped" metric.
+func (a *Agent) totalDropped() uint64 {
+	var n uint64
+	for _, v := range a.droppedBreakdown() {
+		n += v
+	}
+	return n
+}
+
+// admit applies rate limiting to non-critical telemetry.
+func (a *Agent) admit(evt *event.Event) bool {
+	if a.rateLimiter == nil || evt == nil || rateLimitExempt[evt.Type] || eventHasAutonomousResponse(evt) {
+		return true
+	}
+	return a.rateLimiter.Allow(evt.Type, evt.Severity)
 }
 
 // New creates a new Agent instance.
@@ -106,6 +173,7 @@ func New(cfg *config.Config, logger *logging.Logger) (*Agent, error) {
 		commandHandler: cmdHandler,
 		diskQueue:      diskQueue,
 		heartbeat:      grpcclient.NewHeartbeat(cfg, logger),
+		rateLimiter:    collectors.NewRateLimiter(cfg.Filtering.RateLimit, logger),
 	}
 
 	return a, nil
@@ -165,7 +233,7 @@ func (a *Agent) Start(ctx context.Context) error {
 		func() uint64 { return a.eventsTotal.Load() },
 		func() uint64 { return a.eventsSent.Load() },
 		func() int { return a.diskQueue.FileCount() },
-		func() uint64 { return a.eventsDropped.Load() },
+		a.totalDropped,
 	)
 
 	// Register config update handler — when the server pushes a new config
@@ -458,6 +526,9 @@ func (a *Agent) UpdateConfig(newCfg *config.Config) error {
 
 	// 4. Reset batcher with new parameters (non-blocking — batcher is goroutine-safe).
 	a.batcher.Reconfigure(newCfg.Agent.BatchSize, newCfg.Agent.BatchInterval, newCfg.Agent.Compression)
+	if a.rateLimiter != nil {
+		a.rateLimiter.UpdateLimits(newCfg.Filtering.RateLimit)
+	}
 
 	a.logger.Info("[HotReload] Batcher reconfigured — new policy active without service restart")
 	return nil
@@ -602,6 +673,9 @@ func (a *Agent) runBatcher() {
 				return
 			}
 
+			if !a.admit(evt) {
+				continue
+			}
 			if batch := a.batcher.Add(evt); batch != nil {
 				a.processBatch(batch)
 			} else if eventHasAutonomousResponse(evt) {
@@ -1004,9 +1078,10 @@ func (a *Agent) reportHealth() {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
-	a.logger.Infof("Health: events=%d sent=%d goroutines=%d mem=%dMB",
+	a.logger.Infof("Health: events=%d sent=%d dropped=%v goroutines=%d mem=%dMB",
 		a.eventsTotal.Load(),
 		a.eventsSent.Load(),
+		a.droppedBreakdown(),
 		runtime.NumGoroutine(),
 		memStats.Alloc/1024/1024,
 	)

@@ -40,35 +40,35 @@ import (
 // because they are managed by protected system processes.
 var trustedPipes = map[string]bool{
 	// Windows core infrastructure
-	"lsass":                      true,
-	"ntsvcs":                     true,
-	"scerpc":                     true,
-	"wkssvc":                     true,
-	"srvsvc":                     true,
-	"samr":                       true,
-	"netlogon":                   true,
-	"browser":                    true,
+	"lsass":    true,
+	"ntsvcs":   true,
+	"scerpc":   true,
+	"wkssvc":   true,
+	"srvsvc":   true,
+	"samr":     true,
+	"netlogon": true,
+	"browser":  true,
 
 	// COM / RPC infrastructure (extremely noisy)
-	"epmapper":                   true,
-	"LSM_API_service":            true,
-	"InitShutdown":               true,
+	"epmapper":        true,
+	"LSM_API_service": true,
+	"InitShutdown":    true,
 
 	// Print spooler
-	"spoolss":                    true,
+	"spoolss": true,
 
 	// Windows Update / BITS
-	"DAV RPC SERVICE":            true,
+	"DAV RPC SERVICE": true,
 }
 
 // Pipe name prefixes that indicate OS plumbing (not attack activity).
 var trustedPipePrefixes = []string{
-	"PIPE_EVENTROOT\\",         // Windows Event system
-	"MsFteWds",                 // Windows Search indexer
-	"atsvc",                    // Task scheduler
-	"trkwks",                   // Distributed Link Tracking
-	"W32TIME",                  // Windows Time
-	"winspool\\",               // Print spooler
+	"PIPE_EVENTROOT\\", // Windows Event system
+	"MsFteWds",         // Windows Search indexer
+	"atsvc",            // Task scheduler
+	"trkwks",           // Distributed Link Tracking
+	"W32TIME",          // Windows Time
+	"winspool\\",       // Print spooler
 }
 
 // =====================================================================
@@ -78,18 +78,18 @@ var trustedPipePrefixes = []string{
 // Known C2 framework default pipe patterns.
 // If a pipe matches ANY of these, the event is promoted to Medium severity.
 var suspiciousPipePatterns = []string{
-	"msagent_",       // Cobalt Strike default
-	"MSSE-",          // Cobalt Strike named pipe variant
-	"postex_",        // Cobalt Strike post-exploitation
-	"status_",        // Cobalt Strike alternate
-	"mojo.",          // Chrome/Electron abuse
-	"crashpad_",      // Chrome/Electron abuse
-	"PSHost.",        // PowerShell remoting
-	"PSEXESVC",       // PsExec lateral movement
-	"RemCom_",        // RemCom (open-source PsExec alternative)
-	"csexec",         // CsExec lateral movement tool
-	"gruntsvc",       // Covenant C2 framework
-	"demoagent_",     // Sliver C2 default
+	"msagent_",   // Cobalt Strike default
+	"MSSE-",      // Cobalt Strike named pipe variant
+	"postex_",    // Cobalt Strike post-exploitation
+	"status_",    // Cobalt Strike alternate
+	"mojo.",      // Chrome/Electron abuse
+	"crashpad_",  // Chrome/Electron abuse
+	"PSHost.",    // PowerShell remoting
+	"PSEXESVC",   // PsExec lateral movement
+	"RemCom_",    // RemCom (open-source PsExec alternative)
+	"csexec",     // CsExec lateral movement tool
+	"gruntsvc",   // Covenant C2 framework
+	"demoagent_", // Sliver C2 default
 }
 
 // PipeCollector handles named pipe event processing.
@@ -179,8 +179,7 @@ func goPipeEvent(evt *C.ParsedPipeEvent) {
 
 	// 3. Skip agent's own processes
 	processName := baseName(getImagePath(pid))
-	processNameLow := strings.ToLower(processName)
-	if isSelfOrChildProcess(processNameLow, "") {
+	if isSelfPID(pid) {
 		return
 	}
 
@@ -213,8 +212,8 @@ func goPipeEvent(evt *C.ParsedPipeEvent) {
 			"pid":          pid,
 			"process_name": processName,
 			// Sigma-required fields (match Sysmon EventID 17/18)
-			"PipeName":     `\\.\pipe\` + pipeName,
-			"Image":        processPath,
+			"PipeName": `\\.\pipe\` + pipeName,
+			"Image":    processPath,
 		}
 		if processPath != "" {
 			data["process_path"] = processPath

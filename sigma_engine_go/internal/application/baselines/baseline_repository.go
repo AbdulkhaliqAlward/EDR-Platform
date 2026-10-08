@@ -1,459 +1,328 @@
-// Package baselines implements the UEBA (User and Entity Behavior Analytics)
-// behavioral baselining subsystem.
-//
-// Architecture overview:
-//
-//	┌─────────────┐   process event   ┌───────────────────┐
-//	│  EventLoop  │──────────────────▶│ BaselineAggregator│
-//	└─────────────┘                   └───────────────────┘
-//	                                           │ UPSERT (background)
-//	                                           ▼
-//	                                  ┌─────────────────┐
-//	                                  │ process_baselines│ (PostgreSQL)
-//	                                  └─────────────────┘
-//	                                           ▲ read (cached)
-//	┌─────────────────┐                        │
-//	│  DefaultRiskScorer│──BaselineProvider────┘
-//	└─────────────────┘
-//
-// The aggregator runs in the same goroutine as hydrateLineageCache()
-// (fire-and-forget update), so scoring latency is unaffected.
 package baselines
 
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// =============================================================================
-// Domain types
-// =============================================================================
+// Behavioral baseline model (UEBA, statistical — no machine learning)
+//
+// The unit of observation is the number of times a process started on a host
+// within one clock hour (UTC), keyed to the EVENT time. For a given process
+// and hour-of-day h, the baseline is computed over the host's "active slots":
+// the past days (within the retention window, excluding the current hour) in
+// which the host reported any process start at hour h. Days the host was off
+// do not count; days it was on but the process did not run count as zero.
+//
+//	mean   = Σ count / active_slots
+//	stddev = sqrt(Σ count² / active_slots − mean²)
+//
+// This is a proper per-hour rate distribution, comparable with the observed
+// count of the current hour.
 
-// ProcessBaseline is the full statistical profile for a (agent, process, hour) triple.
-// This mirrors the schema of the process_baselines table.
+const (
+	// BaselineWindowDays is the history used for baselines (and retained).
+	BaselineWindowDays = 14
+)
+
+// ProcessBaseline is the computed baseline for (agent, process, hour-of-day).
 type ProcessBaseline struct {
-	ID                    string    `json:"id"`
-	AgentID               string    `json:"agent_id"`
-	ProcessName           string    `json:"process_name"`
-	ProcessPath           string    `json:"process_path,omitempty"`
-	HourOfDay             int       `json:"hour_of_day"` // 0–23 UTC
-	AvgExecutionsPerHour  float64   `json:"avg_executions_per_hour"`
-	MaxExecutionsPerHour  int       `json:"max_executions_per_hour"`
-	MinExecutionsPerHour  int       `json:"min_executions_per_hour"`
-	StddevExecutions      float64   `json:"stddev_executions"`
-	ObservationDays       int       `json:"observation_days"`
-	TypicalSigStatus      string    `json:"typical_signature_status,omitempty"`
-	TypicalIntegrityLevel string    `json:"typical_integrity_level,omitempty"`
-	TypicallyElevated     bool      `json:"typically_elevated"`
-	CommonParents         []string  `json:"common_parents,omitempty"`
-	ConfidenceScore       float64   `json:"confidence_score"`
-	LastObservedAt        time.Time `json:"last_observed_at,omitempty"`
-	BaselineWindowDays    int       `json:"baseline_window_days"`
+	AgentID     string `json:"agent_id"`
+	ProcessName string `json:"process_name"`
+	HourOfDay   int    `json:"hour_of_day"` // 0–23 UTC
+
+	// HostActiveSlots: past same-hour slots in which the host was active.
+	HostActiveSlots int `json:"host_active_slots"`
+	// PresentSlots: of those, slots in which this process ran.
+	PresentSlots int `json:"present_slots"`
+	// AvgExecutionsPerHour / StddevExecutions: per-slot rate (zeros included).
+	AvgExecutionsPerHour float64 `json:"avg_executions_per_hour"`
+	StddevExecutions     float64 `json:"stddev_executions"`
+	// FirstSeenAt: first hour this process ran on the host (any hour).
+	FirstSeenAt *time.Time `json:"first_seen_at,omitempty"`
+	// HostObservedDays: distinct days with any activity from the host.
+	HostObservedDays int `json:"host_observed_days"`
+	// ConfidenceScore = min(HostActiveSlots / BaselineWindowDays, 1).
+	ConfidenceScore float64 `json:"confidence_score"`
 }
 
-// AggregationInput is the minimal information extracted from a process event
-// needed to update the behavioral baseline.
+// AggregationInput is one observed process start.
 type AggregationInput struct {
-	AgentID        string
-	ProcessName    string
-	ProcessPath    string
-	SigStatus      string
-	IntegrityLevel string
-	IsElevated     bool
-	ParentName     string
-	ObservedAt     time.Time
+	AgentID     string
+	ProcessName string
+	ObservedAt  time.Time // event time (UTC)
 }
 
-// =============================================================================
-// BaselineRepository Interface
-// =============================================================================
+// HourlyCount is a batched increment of one (agent, process, hour) bucket.
+type HourlyCount struct {
+	AgentID     string
+	ProcessName string
+	Hour        time.Time // truncated to the hour, UTC
+	Count       int
+}
 
-// BaselineRepository defines the data access contract for process baselines.
-// The production implementation targets PostgreSQL; tests use InMemoryBaselineRepository.
+// BaselineRepository persists hourly counts and computes baselines.
 type BaselineRepository interface {
-	// Upsert atomically creates or updates the baseline for the given
-	// (agent, process, hour) triple using an exponential moving average.
-	Upsert(ctx context.Context, in AggregationInput) error
-
-	// GetBaseline retrieves the baseline for a specific agent/process/hour.
-	// Returns nil (no error) when no baseline exists yet.
-	GetBaseline(ctx context.Context, agentID, processName string, hourOfDay int) (*ProcessBaseline, error)
-
-	// GetAllForAgent returns all hourly baselines for a given agent+process pair.
-	// Used for dashboard analytics.
-	GetAllForAgent(ctx context.Context, agentID, processName string) ([]*ProcessBaseline, error)
+	AddCounts(ctx context.Context, counts []HourlyCount) error
+	// GetBaseline computes the baseline for hour-of-day hourOfDay using
+	// history strictly before `before` (normally the current event's hour).
+	GetBaseline(ctx context.Context, agentID, processName string, hourOfDay int, before time.Time) (*ProcessBaseline, error)
+	Prune(ctx context.Context, olderThan time.Time) (int64, error)
 }
 
-// =============================================================================
-// PostgresBaselineRepository
-// =============================================================================
+// BatchCountRepository makes uncertain database commits safe to retry.
+type BatchCountRepository interface {
+	AddBatchCounts(context.Context, string, []HourlyCount) error
+}
 
-// PostgresBaselineRepository is the production implementation backed by PostgreSQL.
+// RecentCountRepository restores observed rates after a service restart.
+// It is optional for custom repositories; reads run at startup, outside scoring.
+type RecentCountRepository interface {
+	RecentCounts(ctx context.Context, from, through time.Time, limit int) ([]HourlyCount, error)
+}
+
+func (r *PostgresBaselineRepository) RecentCounts(ctx context.Context, from, through time.Time, limit int) ([]HourlyCount, error) {
+	rows, err := r.pool.Query(ctx, `SELECT agent_id, process_name, hour_bucket, executions
+		FROM process_activity_hourly WHERE hour_bucket >= $1 AND hour_bucket <= $2
+		ORDER BY hour_bucket DESC, agent_id, process_name LIMIT $3`, from.UTC(), through.UTC(), limit+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]HourlyCount, 0)
+	for rows.Next() {
+		var c HourlyCount
+		if err := rows.Scan(&c.AgentID, &c.ProcessName, &c.Hour, &c.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) > limit {
+		return nil, fmt.Errorf("recent baseline counts exceed the %d bucket capacity", limit)
+	}
+	return out, nil
+}
+
+func (r *InMemoryBaselineRepository) RecentCounts(_ context.Context, from, through time.Time, limit int) ([]HourlyCount, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []HourlyCount
+	for k, n := range r.counts {
+		if !k.hour.Before(from) && !k.hour.After(through) {
+			out = append(out, HourlyCount{k.agent, k.process, k.hour, n})
+			if len(out) > limit {
+				return nil, fmt.Errorf("recent baseline counts exceed capacity")
+			}
+		}
+	}
+	return out, nil
+}
+
+func finishBaseline(b *ProcessBaseline, sum, sumSq float64) {
+	if b.HostActiveSlots > 0 {
+		n := float64(b.HostActiveSlots)
+		b.AvgExecutionsPerHour = sum / n
+		v := sumSq/n - b.AvgExecutionsPerHour*b.AvgExecutionsPerHour
+		b.StddevExecutions = math.Sqrt(math.Max(v, 0))
+	}
+	b.ConfidenceScore = math.Min(float64(b.HostActiveSlots)/BaselineWindowDays, 1)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PostgreSQL implementation (table process_activity_hourly, migration 019)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PostgresBaselineRepository stores hourly counts in PostgreSQL.
 type PostgresBaselineRepository struct {
 	pool *pgxpool.Pool
 }
 
-// NewPostgresBaselineRepository creates a new PostgreSQL baseline repository.
+// NewPostgresBaselineRepository creates the repository.
 func NewPostgresBaselineRepository(pool *pgxpool.Pool) *PostgresBaselineRepository {
 	return &PostgresBaselineRepository{pool: pool}
 }
 
-// Upsert inserts or updates the behavioral baseline using an exponential moving
-// average (EMA) over the rolling 14-day window.
-//
-// EMA formula for avg:    new_avg = 0.9 * old_avg + 0.1 * 1.0  (one execution observed)
-// Confidence formula:     1 - exp(-observation_days / 7)
-//
-// The ON CONFLICT clause targets the unique index on (agent_id, process_name, hour_of_day).
-func (r *PostgresBaselineRepository) Upsert(ctx context.Context, in AggregationInput) error {
-	hourOfDay := in.ObservedAt.UTC().Hour()
-
-	parentJSON := fmt.Sprintf(`[%q]`, in.ParentName)
-	if in.ParentName == "" {
-		parentJSON = `[]`
-	}
-
-	query := `
-		INSERT INTO process_baselines (
-			agent_id, process_name, process_path,
-			hour_of_day,
-			avg_executions_per_hour,
-			max_executions_per_hour, min_executions_per_hour,
-			stddev_executions,
-			observation_days,
-			typical_signature_status, typical_integrity_level,
-			typically_elevated,
-			common_parents,
-			confidence_score,
-			last_observed_at,
-			baseline_window_days
-		) VALUES (
-			$1, $2, $3,
-			$4,
-			1.0,
-			1, 1, 0.0,
-			1,
-			$5, $6,
-			$7,
-			$8::jsonb,
-			0.14,
-			$9,
-			14
-		)
-		ON CONFLICT (agent_id, process_name, hour_of_day)
-		DO UPDATE SET
-			-- Exponential moving average: smoothing factor α=0.10
-			avg_executions_per_hour = ROUND(
-				(0.90 * process_baselines.avg_executions_per_hour + 0.10 * 1.0)::numeric, 4
-			),
-			max_executions_per_hour = GREATEST(
-				process_baselines.max_executions_per_hour, 1
-			),
-			min_executions_per_hour = LEAST(
-				process_baselines.min_executions_per_hour, 1
-			),
-			-- Exponentially Weighted Moving Variance (EWMV)
-			-- Formula: σ_new = √((1-α)×σ²_old + α×(x - μ_new)²)
-			-- where μ_new = (1-α)×μ_old + α×x, α=0.10, x=1.0
-			-- Reference: Roberts (1959) EWMA control charts, ISO 7870-6
-			stddev_executions = ROUND(
-				SQRT(GREATEST(
-					0.90 * POWER(process_baselines.stddev_executions, 2)
-					+ 0.10 * POWER(
-						1.0 - (0.90 * process_baselines.avg_executions_per_hour + 0.10 * 1.0),
-						2
-					),
-					0.000001
-				))::numeric, 4
-			),
-			observation_days = LEAST(
-				process_baselines.observation_days +
-				CASE
-					WHEN DATE(COALESCE(process_baselines.last_observed_at, TO_TIMESTAMP(0))) < DATE($9)
-					THEN 1
-					ELSE 0
-				END,
-				14
-			),
-			-- Confidence: 1 - exp(-days/7), capped to 0.99
-			confidence_score = ROUND(
-				LEAST(1.0 - EXP(-(
-					process_baselines.observation_days +
-					CASE
-						WHEN DATE(COALESCE(process_baselines.last_observed_at, TO_TIMESTAMP(0))) < DATE($9)
-						THEN 1.0
-						ELSE 0.0
-					END
-				) / 7.0), 0.99)::numeric, 2
-			),
-			typical_signature_status  = COALESCE(NULLIF($5, ''), process_baselines.typical_signature_status),
-			typical_integrity_level   = COALESCE(NULLIF($6, ''), process_baselines.typical_integrity_level),
-			typically_elevated        = $7,
-			-- Merge parent into existing JSON array (deduplicated, capped at 5 entries)
-			common_parents = (
-				SELECT jsonb_agg(DISTINCT p) 
-				FROM (
-					SELECT jsonb_array_elements_text(process_baselines.common_parents) AS p
-					UNION SELECT $8a
-					LIMIT 5
-				) t
-				WHERE p IS NOT NULL AND p <> ''
-			),
-			last_observed_at  = $9,
-			process_path      = COALESCE(NULLIF($3, ''), process_baselines.process_path)`
-
-	// Use a simplified parent merge (avoid complex sub-query parameterization issues)
-	simpleQuery := `
-		INSERT INTO process_baselines (
-			agent_id, process_name, process_path,
-			hour_of_day,
-			avg_executions_per_hour,
-			max_executions_per_hour, min_executions_per_hour,
-			stddev_executions,
-			observation_days,
-			typical_signature_status, typical_integrity_level,
-			typically_elevated,
-			common_parents,
-			confidence_score,
-			last_observed_at,
-			baseline_window_days
-		) VALUES (
-			$1, $2, $3,
-			$4,
-			1.0,
-			1, 1, 0.0,
-			1,
-			$5, $6, $7,
-			$8::jsonb,
-			0.14,
-			$9,
-			14
-		)
-		ON CONFLICT (agent_id, process_name, hour_of_day)
-		DO UPDATE SET
-			avg_executions_per_hour = ROUND(
-				(0.90 * process_baselines.avg_executions_per_hour + 0.10 * 1.0)::numeric, 4
-			),
-			-- EWMV: σ_new = √((1-α)×σ²_old + α×(x - μ_new)²)
-			-- Reference: Roberts (1959) EWMA control charts, ISO 7870-6
-			stddev_executions = ROUND(
-				SQRT(GREATEST(
-					0.90 * POWER(process_baselines.stddev_executions, 2)
-					+ 0.10 * POWER(
-						1.0 - (0.90 * process_baselines.avg_executions_per_hour + 0.10 * 1.0),
-						2
-					),
-					0.000001
-				))::numeric, 4
-			),
-			observation_days = LEAST(
-				process_baselines.observation_days +
-				CASE
-					WHEN DATE(COALESCE(process_baselines.last_observed_at, TO_TIMESTAMP(0))) < DATE($9)
-					THEN 1
-					ELSE 0
-				END,
-				14
-			),
-			confidence_score = ROUND(
-				LEAST(1.0 - EXP(-(
-					process_baselines.observation_days +
-					CASE
-						WHEN DATE(COALESCE(process_baselines.last_observed_at, TO_TIMESTAMP(0))) < DATE($9)
-						THEN 1.0
-						ELSE 0.0
-					END
-				) / 7.0), 0.99)::numeric, 2
-			),
-			typical_signature_status  = COALESCE(NULLIF($5, ''), process_baselines.typical_signature_status),
-			typical_integrity_level   = COALESCE(NULLIF($6, ''), process_baselines.typical_integrity_level),
-			typically_elevated        = $7,
-			last_observed_at          = $9,
-			process_path              = COALESCE(NULLIF($3, ''), process_baselines.process_path)`
-
-	_ = query // suppress unused warning; using simpleQuery for now
-
-	_, err := r.pool.Exec(ctx, simpleQuery,
-		in.AgentID, in.ProcessName, in.ProcessPath,
-		hourOfDay,
-		in.SigStatus, in.IntegrityLevel, in.IsElevated,
-		parentJSON,
-		in.ObservedAt.UTC(),
-	)
-	if err != nil {
-		return fmt.Errorf("baseline upsert (%s/%s/h%d): %w", in.AgentID, in.ProcessName, hourOfDay, err)
-	}
-	return nil
+// AddCounts adds the batched increments (one statement per bucket, in one
+// transaction).
+func (r *PostgresBaselineRepository) AddCounts(ctx context.Context, counts []HourlyCount) error {
+	return r.AddBatchCounts(ctx, uuid.NewString(), counts)
 }
 
-// GetBaseline retrieves the baseline for a specific (agent, process, hour).
-// Returns nil, nil if no rows are found.
-func (r *PostgresBaselineRepository) GetBaseline(
-	ctx context.Context, agentID, processName string, hourOfDay int,
-) (*ProcessBaseline, error) {
-	query := `
-		SELECT
-			id, agent_id, process_name, COALESCE(process_path, ''),
-			hour_of_day,
-			avg_executions_per_hour, max_executions_per_hour,
-			min_executions_per_hour, COALESCE(stddev_executions, 0),
-			observation_days,
-			COALESCE(typical_signature_status, ''),
-			COALESCE(typical_integrity_level, ''),
-			COALESCE(typically_elevated, false),
-			confidence_score,
-			COALESCE(last_observed_at, NOW()),
-			baseline_window_days
-		FROM process_baselines
-		WHERE agent_id = $1 AND process_name = $2 AND hour_of_day = $3`
-
-	row := r.pool.QueryRow(ctx, query, agentID, processName, hourOfDay)
-	b := &ProcessBaseline{}
-	err := row.Scan(
-		&b.ID, &b.AgentID, &b.ProcessName, &b.ProcessPath,
-		&b.HourOfDay,
-		&b.AvgExecutionsPerHour, &b.MaxExecutionsPerHour,
-		&b.MinExecutionsPerHour, &b.StddevExecutions,
-		&b.ObservationDays,
-		&b.TypicalSigStatus, &b.TypicalIntegrityLevel, &b.TypicallyElevated,
-		&b.ConfidenceScore,
-		&b.LastObservedAt, &b.BaselineWindowDays,
-	)
-	if err != nil {
-		// pgx returns a specific error for no rows
-		if err.Error() == "no rows in result set" {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("GetBaseline scan: %w", err)
+func (r *PostgresBaselineRepository) AddBatchCounts(ctx context.Context, batchID string, counts []HourlyCount) error {
+	if len(counts) == 0 {
+		return nil
 	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `INSERT INTO baseline_count_batches(id) VALUES($1::uuid) ON CONFLICT DO NOTHING`, batchID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return tx.Commit(ctx)
+	}
+	for _, c := range counts {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO process_activity_hourly (agent_id, process_name, hour_bucket, executions)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (agent_id, process_name, hour_bucket)
+			DO UPDATE SET executions = process_activity_hourly.executions + EXCLUDED.executions`,
+			c.AgentID, c.ProcessName, c.Hour.UTC(), c.Count); err != nil {
+			return fmt.Errorf("baseline add count (%s/%s): %w", c.AgentID, c.ProcessName, err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// GetBaseline computes the baseline from the hourly counts.
+func (r *PostgresBaselineRepository) GetBaseline(ctx context.Context, agentID, processName string, hourOfDay int, before time.Time) (*ProcessBaseline, error) {
+	cutoff := before.UTC().Truncate(time.Hour)
+	from := cutoff.Add(-BaselineWindowDays * 24 * time.Hour)
+	b := &ProcessBaseline{AgentID: agentID, ProcessName: processName, HourOfDay: hourOfDay}
+	var sum, sumSq float64
+	err := r.pool.QueryRow(ctx, `
+		WITH slots AS (
+			SELECT DISTINCT hour_bucket FROM process_activity_hourly
+			WHERE agent_id = $1 AND hour_bucket >= $3 AND hour_bucket < $4
+			  AND EXTRACT(HOUR FROM hour_bucket AT TIME ZONE 'UTC') = $5
+		), proc AS (
+			SELECT p.executions FROM process_activity_hourly p
+			JOIN slots s ON s.hour_bucket = p.hour_bucket
+			WHERE p.agent_id = $1 AND p.process_name = $2
+		)
+		SELECT
+			(SELECT count(*) FROM slots),
+			(SELECT count(*) FROM proc),
+			COALESCE((SELECT sum(executions)::float8 FROM proc), 0),
+			COALESCE((SELECT sum(executions::float8 * executions) FROM proc), 0),
+			(SELECT min(hour_bucket) FROM process_activity_hourly WHERE agent_id = $1 AND process_name = $2 AND hour_bucket < $4),
+			(SELECT count(DISTINCT date_trunc('day', hour_bucket)) FROM process_activity_hourly
+			  WHERE agent_id = $1 AND hour_bucket >= $3 AND hour_bucket < $4)`,
+		agentID, processName, from, cutoff, hourOfDay,
+	).Scan(&b.HostActiveSlots, &b.PresentSlots, &sum, &sumSq, &b.FirstSeenAt, &b.HostObservedDays)
+	if err != nil {
+		return nil, fmt.Errorf("baseline query (%s/%s/h%d): %w", agentID, processName, hourOfDay, err)
+	}
+	finishBaseline(b, sum, sumSq)
 	return b, nil
 }
 
-// GetAllForAgent returns all hourly baselines for an agent+process pair.
-func (r *PostgresBaselineRepository) GetAllForAgent(
-	ctx context.Context, agentID, processName string,
-) ([]*ProcessBaseline, error) {
-	query := `
-		SELECT
-			id, agent_id, process_name, COALESCE(process_path, ''),
-			hour_of_day,
-			avg_executions_per_hour, max_executions_per_hour,
-			min_executions_per_hour, COALESCE(stddev_executions, 0),
-			observation_days,
-			COALESCE(typical_signature_status, ''),
-			COALESCE(typical_integrity_level, ''),
-			COALESCE(typically_elevated, false),
-			confidence_score,
-			COALESCE(last_observed_at, NOW()),
-			baseline_window_days
-		FROM process_baselines
-		WHERE agent_id = $1 AND process_name = $2
-		ORDER BY hour_of_day`
-
-	rows, err := r.pool.Query(ctx, query, agentID, processName)
+// Prune deletes buckets older than the retention window.
+func (r *PostgresBaselineRepository) Prune(ctx context.Context, olderThan time.Time) (int64, error) {
+	if _, err := r.pool.Exec(ctx, `DELETE FROM baseline_count_batches WHERE created_at < $1`, time.Now().UTC().Add(-30*24*time.Hour)); err != nil {
+		return 0, err
+	}
+	tag, err := r.pool.Exec(ctx, `DELETE FROM process_activity_hourly WHERE hour_bucket < $1`, olderThan.UTC())
 	if err != nil {
-		return nil, fmt.Errorf("GetAllForAgent: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
-
-	var result []*ProcessBaseline
-	for rows.Next() {
-		b := &ProcessBaseline{}
-		if err := rows.Scan(
-			&b.ID, &b.AgentID, &b.ProcessName, &b.ProcessPath,
-			&b.HourOfDay,
-			&b.AvgExecutionsPerHour, &b.MaxExecutionsPerHour,
-			&b.MinExecutionsPerHour, &b.StddevExecutions,
-			&b.ObservationDays,
-			&b.TypicalSigStatus, &b.TypicalIntegrityLevel, &b.TypicallyElevated,
-			&b.ConfidenceScore,
-			&b.LastObservedAt, &b.BaselineWindowDays,
-		); err != nil {
-			return nil, err
-		}
-		result = append(result, b)
-	}
-	return result, nil
+	return tag.RowsAffected(), nil
 }
 
-// =============================================================================
-// InMemoryBaselineRepository (for unit tests)
-// =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+// In-memory implementation (tests and DB-less operation)
+// ─────────────────────────────────────────────────────────────────────────────
 
-// inMemoryKey is the unique key for in-memory baseline storage.
-type inMemoryKey struct {
-	agentID, processName string
-	hourOfDay            int
+type bucketKey struct {
+	agent, process string
+	hour           time.Time
 }
 
-// InMemoryBaselineRepository is a simple in-memory implementation for testing.
+// InMemoryBaselineRepository keeps hourly counts in memory.
 type InMemoryBaselineRepository struct {
-	records map[inMemoryKey]*ProcessBaseline
+	mu     sync.Mutex
+	counts map[bucketKey]int
 }
 
-// NewInMemoryBaselineRepository creates a new in-memory baseline repository.
+// NewInMemoryBaselineRepository creates an empty repository.
 func NewInMemoryBaselineRepository() *InMemoryBaselineRepository {
-	return &InMemoryBaselineRepository{
-		records: make(map[inMemoryKey]*ProcessBaseline),
-	}
+	return &InMemoryBaselineRepository{counts: map[bucketKey]int{}}
 }
 
-// Upsert stores or updates the baseline in memory using a simple counter.
-func (r *InMemoryBaselineRepository) Upsert(ctx context.Context, in AggregationInput) error {
-	key := inMemoryKey{in.AgentID, in.ProcessName, in.ObservedAt.UTC().Hour()}
-	if existing, ok := r.records[key]; ok {
-		existing.AvgExecutionsPerHour = 0.90*existing.AvgExecutionsPerHour + 0.10*1.0
-		existing.ObservationDays = min(existing.ObservationDays+1, 14)
-		existing.LastObservedAt = in.ObservedAt
-	} else {
-		r.records[key] = &ProcessBaseline{
-			AgentID:              in.AgentID,
-			ProcessName:          in.ProcessName,
-			ProcessPath:          in.ProcessPath,
-			HourOfDay:            in.ObservedAt.UTC().Hour(),
-			AvgExecutionsPerHour: 1.0,
-			ObservationDays:      1,
-			ConfidenceScore:      0.14,
-			LastObservedAt:       in.ObservedAt,
-			BaselineWindowDays:   14,
-		}
+// AddCounts implements BaselineRepository.
+func (r *InMemoryBaselineRepository) AddCounts(_ context.Context, counts []HourlyCount) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range counts {
+		r.counts[bucketKey{c.AgentID, strings.ToLower(c.ProcessName), c.Hour.UTC().Truncate(time.Hour)}] += c.Count
 	}
 	return nil
 }
 
-// SetBaseline is a test helper to inject a known baseline.
-func (r *InMemoryBaselineRepository) SetBaseline(b *ProcessBaseline) {
-	key := inMemoryKey{b.AgentID, b.ProcessName, b.HourOfDay}
-	r.records[key] = b
-}
-
-// GetBaseline retrieves the in-memory baseline.
-func (r *InMemoryBaselineRepository) GetBaseline(_ context.Context, agentID, processName string, hourOfDay int) (*ProcessBaseline, error) {
-	key := inMemoryKey{agentID, processName, hourOfDay}
-	if b, ok := r.records[key]; ok {
-		return b, nil
-	}
-	return nil, nil
-}
-
-// GetAllForAgent returns all baselines for an agent+process pair.
-func (r *InMemoryBaselineRepository) GetAllForAgent(_ context.Context, agentID, processName string) ([]*ProcessBaseline, error) {
-	var result []*ProcessBaseline
-	for k, v := range r.records {
-		if k.agentID == agentID && k.processName == processName {
-			result = append(result, v)
+// GetBaseline implements BaselineRepository.
+func (r *InMemoryBaselineRepository) GetBaseline(_ context.Context, agentID, processName string, hourOfDay int, before time.Time) (*ProcessBaseline, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cutoff := before.UTC().Truncate(time.Hour)
+	from := cutoff.Add(-BaselineWindowDays * 24 * time.Hour)
+	proc := strings.ToLower(processName)
+	b := &ProcessBaseline{AgentID: agentID, ProcessName: processName, HourOfDay: hourOfDay}
+	slots := map[time.Time]bool{}
+	days := map[time.Time]bool{}
+	var sum, sumSq float64
+	for k, n := range r.counts {
+		if k.agent != agentID {
+			continue
+		}
+		if k.process == proc && k.hour.Before(cutoff) && (b.FirstSeenAt == nil || k.hour.Before(*b.FirstSeenAt)) {
+			h := k.hour
+			b.FirstSeenAt = &h
+		}
+		if k.hour.Before(from) || !k.hour.Before(cutoff) {
+			continue
+		}
+		days[k.hour.Truncate(24*time.Hour)] = true
+		if k.hour.Hour() == hourOfDay {
+			slots[k.hour] = true
+			if k.process == proc {
+				b.PresentSlots++
+				sum += float64(n)
+				sumSq += float64(n) * float64(n)
+			}
 		}
 	}
-	return result, nil
+	b.HostActiveSlots = len(slots)
+	b.HostObservedDays = len(days)
+	finishBaseline(b, sum, sumSq)
+	return b, nil
 }
 
-// min is a Go 1.20 generic alternative for older stdlib compatibility.
-func min(a, b int) int {
-	if a < b {
-		return a
+// Prune implements BaselineRepository.
+func (r *InMemoryBaselineRepository) Prune(_ context.Context, olderThan time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for k := range r.counts {
+		if k.hour.Before(olderThan) {
+			delete(r.counts, k)
+			n++
+		}
 	}
-	return b
+	return n, nil
+}
+
+// Buckets returns the stored buckets (test helper), sorted by hour.
+func (r *InMemoryBaselineRepository) Buckets() []HourlyCount {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]HourlyCount, 0, len(r.counts))
+	for k, n := range r.counts {
+		out = append(out, HourlyCount{AgentID: k.agent, ProcessName: k.process, Hour: k.hour, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Hour.Before(out[j].Hour) })
+	return out
 }

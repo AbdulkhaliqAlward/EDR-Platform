@@ -63,7 +63,7 @@ func (c *ETWCollector) handleFileIo(pid uint32, opcode uint8, filePath string) {
 	if procName == "" {
 		procName = "unknown"
 	}
-	if isSelfOrChildProcess(strings.ToLower(procName), "") {
+	if isSelfPID(pid) {
 		return
 	}
 

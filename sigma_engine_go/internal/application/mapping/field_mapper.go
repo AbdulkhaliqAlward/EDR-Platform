@@ -191,6 +191,16 @@ func (fm *FieldMapper) initializeAgentMappings() {
 		// Pipe fields
 		"PipeName": "data.pipe_name",
 
+		// PowerShell Script Block Logging (Sigma ps_script, EventID 4104) and
+		// Module Logging (ps_module, EventID 4103)
+		"ScriptBlockText": "data.script_block_text",
+		"ScriptBlockId":   "data.script_block_id",
+		"Path":            "data.script_path",
+		"MessageNumber":   "data.message_number",
+		"MessageTotal":    "data.message_total",
+		"Payload":         "data.payload",
+		"ContextInfo":     "data.context_info",
+
 		// Process Access fields (Sigma process_access / Sysmon EventID 10)
 		"SourceImage":     "data.source_process_path",
 		"TargetImage":     "data.target_process_path",

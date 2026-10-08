@@ -37,34 +37,34 @@ import (
 
 // DNS record type code → human-readable string (RFC 1035 + extensions).
 var dnsTypeMap = map[uint32]string{
-	1:     "A",
-	2:     "NS",
-	5:     "CNAME",
-	6:     "SOA",
-	12:    "PTR",
-	15:    "MX",
-	16:    "TXT",
-	28:    "AAAA",
-	33:    "SRV",
-	35:    "NAPTR",
-	43:    "DS",
-	46:    "RRSIG",
-	47:    "NSEC",
-	48:    "DNSKEY",
-	52:    "TLSA",
-	65:    "HTTPS",
-	255:   "ANY",
+	1:   "A",
+	2:   "NS",
+	5:   "CNAME",
+	6:   "SOA",
+	12:  "PTR",
+	15:  "MX",
+	16:  "TXT",
+	28:  "AAAA",
+	33:  "SRV",
+	35:  "NAPTR",
+	43:  "DS",
+	46:  "RRSIG",
+	47:  "NSEC",
+	48:  "DNSKEY",
+	52:  "TLSA",
+	65:  "HTTPS",
+	255: "ANY",
 }
 
 // DNS response status → human-readable string (RFC 1035).
 var dnsStatusMap = map[uint32]string{
-	0:    "NOERROR",
-	1:    "FORMERR",
-	2:    "SERVFAIL",
-	3:    "NXDOMAIN",
-	4:    "NOTIMP",
-	5:    "REFUSED",
-	9:    "NOTAUTH",
+	0: "NOERROR",
+	1: "FORMERR",
+	2: "SERVFAIL",
+	3: "NXDOMAIN",
+	4: "NOTIMP",
+	5: "REFUSED",
+	9: "NOTAUTH",
 }
 
 // Domains that produce extreme noise with zero security signal.
@@ -72,16 +72,16 @@ var dnsStatusMap = map[uint32]string{
 // that fires on EVERY Windows system continuously.
 var trustedDNSDomains = map[string]bool{
 	"wpad":                            true,
-	"localhost":                        true,
-	"isatap":                           true,
-	"_ldap._tcp":                       true,
-	"dns.msftncsi.com":                 true,
-	"www.msftconnecttest.com":          true,
-	"msftconnecttest.com":              true,
-	"settings-win.data.microsoft.com":  true,
-	"watson.microsoft.com":             true,
-	"v10.events.data.microsoft.com":    true,
-	"self.events.data.microsoft.com":   true,
+	"localhost":                       true,
+	"isatap":                          true,
+	"_ldap._tcp":                      true,
+	"dns.msftncsi.com":                true,
+	"www.msftconnecttest.com":         true,
+	"msftconnecttest.com":             true,
+	"settings-win.data.microsoft.com": true,
+	"watson.microsoft.com":            true,
+	"v10.events.data.microsoft.com":   true,
+	"self.events.data.microsoft.com":  true,
 }
 
 // =====================================================================
@@ -236,8 +236,7 @@ func goDnsEvent(evt *C.ParsedDnsEvent) {
 	}
 
 	// Skip DNS queries from the agent's own processes
-	processNameLow := strings.ToLower(processName)
-	if isSelfOrChildProcess(processNameLow, "") {
+	if isSelfPID(pid) {
 		return
 	}
 
@@ -273,9 +272,9 @@ func goDnsEvent(evt *C.ParsedDnsEvent) {
 			"pid":           pid,
 			"process_name":  processName,
 			// Sigma-required fields (field names match Sysmon EventID 22)
-			"QueryName":     queryNameLow,
-			"QueryStatus":   queryStatus,
-			"QueryResults":  queryResults,
+			"QueryName":    queryNameLow,
+			"QueryStatus":  queryStatus,
+			"QueryResults": queryResults,
 		}
 		if len(answers) > 0 {
 			data["answers"] = answers

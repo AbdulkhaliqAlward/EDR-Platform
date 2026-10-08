@@ -29,7 +29,8 @@ func TestIsAgentSelfEvent_ParentExecutableFullPath(t *testing.T) {
 	}
 }
 
-func TestIsAgentSelfEvent_ParentNameOnly(t *testing.T) {
+func TestIsAgentSelfEvent_ParentNameOnlyIsNotTrusted(t *testing.T) {
+	// A name alone is attacker-controllable: never suppress on it.
 	e := mustEvent(t, map[string]interface{}{
 		"event_type": "process",
 		"data": map[string]interface{}{
@@ -37,8 +38,21 @@ func TestIsAgentSelfEvent_ParentNameOnly(t *testing.T) {
 			"parent_name": "edr-agent.exe",
 		},
 	})
-	if !isAgentSelfEvent(e) {
-		t.Fatal("expected event with agent parent_name to be flagged as self")
+	if isAgentSelfEvent(e) {
+		t.Fatal("parent name alone must not mark an event as agent activity")
+	}
+}
+
+func TestIsAgentSelfEvent_LookalikePathIsNotTrusted(t *testing.T) {
+	e := mustEvent(t, map[string]interface{}{
+		"event_type": "process",
+		"data": map[string]interface{}{
+			"name":              "powershell.exe",
+			"parent_executable": "C:" + string(rune(92)) + "Users" + string(rune(92)) + "bob" + string(rune(92)) + "edr-agent.exe",
+		},
+	})
+	if isAgentSelfEvent(e) {
+		t.Fatal("a look-alike agent binary outside the install directory must not be trusted")
 	}
 }
 

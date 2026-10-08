@@ -222,6 +222,8 @@ export interface ScoreBreakdown {
     ueba_bonus: number;
     ueba_discount: number;
     ueba_signal: 'anomaly' | 'normal' | 'none' | string;
+    /** Why the UEBA signal was given (baseline evidence). */
+    ueba_reason?: string;
     interaction_bonus: number; // Cross-dimensional signal convergence bonus
     user_role_weight?: number;
     device_criticality_weight?: number;
@@ -273,6 +275,7 @@ export interface ContextSnapshot {
         strongest_score?: number;
     };
     related_rules?: string[];
+    related_rule_ids?: string[];
 }
 
 export type ForensicCollection = {
@@ -371,6 +374,7 @@ export interface Alert {
     // Aggregation / promotion metadata (server-side correlation engine)
     match_count?: number;
     related_rules?: string[];
+    related_rule_ids?: string[];
     combined_confidence?: number;
     severity_promoted?: boolean;
     original_severity?: string;
@@ -781,6 +785,10 @@ export interface EventSearchRequestBody {
 }
 
 export const eventsApi = {
+	preventionActivity: async (params: { from: string; through: string; cursor_ingested_at?: string; cursor_id?: string; limit?: number }) => {
+		const response = await connectionApi.get<{ data: (CmEventSummary & { ingested_at: string })[] }>('/api/v1/events/prevention-activity', { params });
+		return response.data.data;
+	},
     search: async (body: EventSearchRequestBody) => {
         const response = await connectionApi.post<{
             data: CmEventSummary[];
@@ -1137,6 +1145,8 @@ export interface BoundPlaybookStep {
     script_id?: string;
     script_name?: string;
     errors?: string[];
+    /** Containment action (kill, quarantine, isolate, script). */
+    destructive?: boolean;
     status: 'pending' | 'running' | 'success' | 'failed' | 'skipped' | string;
     command_id?: string;
     error?: string;
@@ -1149,6 +1159,8 @@ export interface PlaybookRunPlan {
     playbook_id: string;
     playbook_name: string;
     alert_id?: string;
+    alert_title?: string;
+    alert_severity?: string;
     agent_id: string;
     agent_hostname?: string;
     agent_online: boolean;
@@ -1165,6 +1177,10 @@ export interface PlaybookExecution {
     playbook_name: string;
     rule_id?: string;
     agent_id: string;
+    agent_hostname?: string;
+    alert_title?: string;
+    alert_severity?: string;
+    /** pending = queued behind another response on the same endpoint. */
     status: 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled' | string;
     trigger_source: string;
     created_by_username: string;
@@ -1202,7 +1218,82 @@ export interface PlaybookInput {
 export const isExecutionFinished = (status: string) =>
     status === 'completed' || status === 'partial' || status === 'failed' || status === 'cancelled';
 
+/** Platform-wide automated-response switch (GET/PUT /automation/settings). */
+export interface AutomationSettings {
+    /** Effective: automation rules may run playbooks. */
+    enabled: boolean;
+    /** The operator choice stored on the server. */
+    configured: boolean;
+    /** Forced off by server configuration (AUTOMATION_AUTO_EXECUTE=false). */
+    locked: boolean;
+    updated_by?: string;
+    updated_at?: string;
+}
+
+export interface ExceptionCondition {
+    field: string;
+    op: 'equals' | 'startswith' | 'endswith' | 'contains';
+    value: string;
+}
+
+/** Analyst-approved false-positive suppression applied by the sigma engine. */
+export interface DetectionException {
+    id: string;
+    name: string;
+    rule_id: string;
+    rule_title: string;
+    agent_id: string;
+    hostname: string;
+    conditions: ExceptionCondition[];
+    reason: string;
+    enabled: boolean;
+    expires_at?: string;
+    source_alert_id?: string;
+    created_by: string;
+    created_at: string;
+    updated_at: string;
+    hit_count: number;
+    last_hit_at?: string;
+}
+
+export interface DetectionExceptionInput {
+    name: string;
+    rule_id?: string;
+    rule_title?: string;
+    agent_id?: string;
+    conditions: ExceptionCondition[];
+    reason: string;
+    expires_at?: string;
+    source_alert_id?: string;
+}
+
+export const detectionExceptionsApi = {
+    list: async (): Promise<DetectionException[]> => {
+        const response = await connectionApi.get<{ data: DetectionException[] | null }>('/api/v1/detection-exceptions');
+        return response.data.data || [];
+    },
+    create: async (input: DetectionExceptionInput): Promise<DetectionException> => {
+        const response = await connectionApi.post<{ data: DetectionException }>('/api/v1/detection-exceptions', input);
+        return response.data.data;
+    },
+    update: async (id: string, patch: { enabled?: boolean; expires_at?: string; clear_expiry?: boolean; reason?: string }) => {
+        const response = await connectionApi.patch<{ data: DetectionException }>(`/api/v1/detection-exceptions/${id}`, patch);
+        return response.data.data;
+    },
+    delete: async (id: string) => {
+        await connectionApi.delete(`/api/v1/detection-exceptions/${id}`);
+    },
+};
+
 export const automationApi = {
+    getSettings: async (): Promise<AutomationSettings> => {
+        const response = await connectionApi.get<{ data: AutomationSettings }>('/api/v1/automation/settings');
+        return response.data.data;
+    },
+    updateSettings: async (enabled: boolean, reason: string): Promise<AutomationSettings> => {
+        const response = await connectionApi.put<{ data: AutomationSettings }>('/api/v1/automation/settings', { enabled, reason });
+        return response.data.data;
+    },
     listPlaybooks: async () => {
         const response = await connectionApi.get<{ data: ResponsePlaybook[], total: number }>('/api/v1/automation/playbooks');
         return { playbooks: response.data.data, total: response.data.total };
@@ -1244,7 +1335,12 @@ export const automationApi = {
         const response = await connectionApi.get<{ data: PlaybookExecution }>(`/api/v1/automation/executions/${id}`);
         return response.data.data;
     },
-    listExecutions: async (filter: { alert_id?: string; playbook_id?: string; agent_id?: string; limit?: number } = {}) => {
+    listExecutions: async (filter: {
+        alert_id?: string; playbook_id?: string; agent_id?: string; limit?: number; offset?: number;
+        /** RFC 3339: only runs changed after this instant (oldest change first). */
+        updated_since?: string; updated_until?: string; trigger?: 'manual' | 'automation'; status?: string;
+        cursor_updated_at?: string; cursor_id?: string;
+    } = {}) => {
         const response = await connectionApi.get<{ data: PlaybookExecution[] | null; total: number }>('/api/v1/automation/executions', { params: filter });
         return response.data.data || [];
     },

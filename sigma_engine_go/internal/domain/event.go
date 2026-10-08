@@ -521,6 +521,12 @@ func (e *LogEvent) inferCategory() EventCategory {
 			return EventCategoryProcessAccess
 		case "wmi":
 			return EventCategoryWMIEvent
+		case "powershell":
+			// Agent PowerShell telemetry from the Operational log.
+			if e.actionOf() == "module" {
+				return EventCategoryPsModule
+			}
+			return EventCategoryPsScript
 		case "clipboard":
 			// Clipboard telemetry is not file activity; evaluating it against
 			// file_event rules would produce spurious matches.

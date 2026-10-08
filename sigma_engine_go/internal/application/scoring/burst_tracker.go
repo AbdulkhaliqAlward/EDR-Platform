@@ -31,6 +31,13 @@ type BurstTracker interface {
 
 	// Reset removes the counter for (agentID, category). Used for testing.
 	Reset(ctx context.Context, agentID, category string) error
+
+	// DistinctRules records that ruleID fired on the agent and returns how
+	// many DIFFERENT rules fired on it within the sliding window. Distinct
+	// detections in a short window indicate attack progression; one rule
+	// repeating indicates a recurring (often benign, automated) pattern and
+	// must not raise the score.
+	DistinctRules(ctx context.Context, agentID, ruleID string) (int64, error)
 }
 
 // =============================================================================
@@ -136,9 +143,10 @@ type inMemoryBurstEntry struct {
 // It mirrors the tumbling-window semantics of RedisBurstTracker.
 // Used in unit tests that do not require a real Redis connection.
 type InMemoryBurstTracker struct {
-	mu      sync.Mutex
-	entries map[string]*inMemoryBurstEntry
-	ttl     time.Duration
+	mu       sync.Mutex
+	entries  map[string]*inMemoryBurstEntry
+	distinct map[string]map[string]time.Time // agent → rule → last seen
+	ttl      time.Duration
 }
 
 // NewInMemoryBurstTracker creates a new in-memory burst tracker with the given TTL.
@@ -192,4 +200,50 @@ func (bt *InMemoryBurstTracker) Reset(_ context.Context, agentID, category strin
 	delete(bt.entries, key)
 	bt.mu.Unlock()
 	return nil
+}
+
+// ─── Distinct-rule sliding window ────────────────────────────────────────────
+
+func distinctKey(agentID string) string {
+	return fmt.Sprintf("%s:distinct:%s", burstKeyPrefix, agentID)
+}
+
+// DistinctRules implements BurstTracker with a Redis sorted set per agent
+// (member = rule ID, score = last-seen unix ms), trimmed to the window.
+func (bt *RedisBurstTracker) DistinctRules(ctx context.Context, agentID, ruleID string) (int64, error) {
+	key := distinctKey(agentID)
+	now := time.Now()
+	cutoff := now.Add(-bt.ttl).UnixMilli()
+	pipe := bt.client.TxPipeline()
+	pipe.ZAdd(ctx, key, redis.Z{Score: float64(now.UnixMilli()), Member: strings.ToLower(ruleID)})
+	pipe.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("(%d", cutoff))
+	card := pipe.ZCard(ctx, key)
+	pipe.Expire(ctx, key, bt.ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, fmt.Errorf("burst distinct key=%s: %w", key, err)
+	}
+	return card.Val(), nil
+}
+
+// DistinctRules implements BurstTracker in memory.
+func (bt *InMemoryBurstTracker) DistinctRules(_ context.Context, agentID, ruleID string) (int64, error) {
+	now := time.Now()
+	key := distinctKey(agentID)
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	if bt.distinct == nil {
+		bt.distinct = make(map[string]map[string]time.Time)
+	}
+	set := bt.distinct[key]
+	if set == nil {
+		set = make(map[string]time.Time)
+		bt.distinct[key] = set
+	}
+	set[strings.ToLower(ruleID)] = now
+	for r, seen := range set {
+		if now.Sub(seen) > bt.ttl {
+			delete(set, r)
+		}
+	}
+	return int64(len(set)), nil
 }

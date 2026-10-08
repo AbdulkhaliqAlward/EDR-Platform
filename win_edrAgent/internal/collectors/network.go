@@ -363,7 +363,7 @@ func (c *NetworkCollector) processConnection(protocol, localIP string, localPort
 	}
 
 	// Skip agent's own processes
-	if isSelfOrChildProcess(strings.ToLower(processName), "") {
+	if isSelfPID(pid) {
 		return
 	}
 

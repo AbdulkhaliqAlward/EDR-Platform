@@ -37,6 +37,10 @@ func compileRule(rule *domain.SigmaRule) (*compiledRule, error) {
 	if len(rule.Detection.Selections) == 0 {
 		return nil, fmt.Errorf("rule has no selections")
 	}
+	// Initialize derived values before concurrent workers can read this rule.
+	rule.Severity()
+	rule.MITRETechniques()
+	rule.IndexKey()
 
 	cr := &compiledRule{
 		rule:       rule,

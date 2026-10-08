@@ -8,6 +8,7 @@ import (
 
 	"github.com/edr-platform/win-agent/internal/edrhosts"
 	"github.com/edr-platform/win-agent/internal/logging"
+	"github.com/edr-platform/win-agent/internal/pslogging"
 )
 
 // OfflineRevertHostArtifacts reverts the host-level changes the agent may have
@@ -42,6 +43,12 @@ func OfflineRevertHostArtifacts(logger *logging.Logger) {
 		logger.Warnf("[UNINSTALL] Removing EDR_BLOCK_IP_* rules failed: %v: %s", err, trim(string(out), 300))
 	}
 	logger.Info("[UNINSTALL] EDR firewall rules removed")
+
+	// ── 2b. PowerShell Script Block Logging policy ─────────────────────────
+	// Only values the agent itself created are removed (GPO/admin settings
+	// are left as they were).
+	pslogging.RevertScriptBlockLogging()
+	logger.Info("[UNINSTALL] PowerShell logging policy reverted (agent-created values only)")
 
 	// ── 3. Hosts file: C2 mapping + domain sinkhole blocks ──────────────────
 	if data, err := os.ReadFile(edrhosts.Path); err != nil {

@@ -87,8 +87,18 @@ type DefaultRiskScorer struct {
 	matrix           *SuspicionMatrix
 	baselineProvider baselines.BaselineProvider
 	contextProvider  ContextPolicyProvider
+	observed         ObservedCounter
 	cfg              RiskScoringConfig
 }
+
+// ObservedCounter reports how many times a process started on an agent in
+// the hour of `at` (implemented by baselines.BaselineAggregator).
+type ObservedCounter interface {
+	CurrentCount(agentID, processName string, at time.Time) int
+}
+
+// SetObservedCounter wires the current-hour execution counts used by UEBA.
+func (rs *DefaultRiskScorer) SetObservedCounter(c ObservedCounter) { rs.observed = c }
 
 // NewDefaultRiskScorer constructs the production risk scorer.
 // baselineProvider may be baselines.NoopBaselineProvider{} for graceful degradation.
@@ -182,8 +192,10 @@ func (rs *DefaultRiskScorer) Score(ctx context.Context, input ScoringInput) (*Sc
 	privilegeBonus := computePrivilegeBonus(input.Event.RawData, rs.cfg.Privilege)
 
 	// ── Step 4: Temporal Burst Bonus ─────────────────────────────────────────
-	ruleCategory := categoryKey(primary.Rule)
-	burstCount, burstErr := rs.burstTracker.IncrAndGet(ctx, input.AgentID, ruleCategory)
+	// Distinct detections on this host within the window indicate attack
+	// progression. One rule repeating (often a recurring benign task) does
+	// not count — counting repeats amplified noisy false positives.
+	burstCount, burstErr := rs.burstTracker.DistinctRules(ctx, input.AgentID, primary.Rule.ID)
 	if burstErr != nil {
 		burstErr = fmt.Errorf("burst tracker: %w", burstErr)
 	}
@@ -194,6 +206,15 @@ func (rs *DefaultRiskScorer) Score(ctx context.Context, input ScoringInput) (*Sc
 	executable := extractString(input.Event.RawData, "executable")
 	fpDiscount := computeFPDiscount(sigStatus, executable, rs.cfg.FalsePositive)
 	fpRisk := computeFPRisk(sigStatus, executable, rs.cfg.FalsePositive)
+	// Dual-use system binaries (LOLBins: powershell, rundll32, mshta, ...)
+	// are Microsoft-signed by definition and are exactly what many rules
+	// target; their signature says nothing about benign use.
+	if isDualUseBinary(executable) {
+		fpDiscount = 0
+		if fpRisk > rs.cfg.FalsePositive.RiskUnknownOrMissingSig {
+			fpRisk = rs.cfg.FalsePositive.RiskUnknownOrMissingSig
+		}
+	}
 	// Lineage override: a Microsoft-signed binary spawned by a suspicious
 	// parent (e.g. powershell.exe from winword.exe) is an attack, not a FP.
 	// Cap FP risk at 0.25 when lineage suspicion is critical so the FP risk
@@ -210,8 +231,11 @@ func (rs *DefaultRiskScorer) Score(ctx context.Context, input ScoringInput) (*Sc
 	// has ≥ 0.30 confidence (≈3 days of observations) to avoid false signals
 	// on brand-new agents.
 	processName := extractString(input.Event.RawData, "name")
-	hourOfDay := time.Now().UTC().Hour()
-	uebaBonus, uebaDiscount, uebaSignal, uebaErr := rs.computeUEBA(ctx, input.AgentID, processName, hourOfDay, int(burstCount))
+	eventAt := baselines.EventTime(input.Event.RawData)
+	if eventAt.IsZero() {
+		eventAt = time.Now().UTC()
+	}
+	uebaBonus, uebaDiscount, uebaSignal, uebaReason, uebaErr := rs.computeUEBA(ctx, input.AgentID, processName, eventAt)
 	if uebaErr != nil {
 		uebaErr = fmt.Errorf("ueba baseline: %w", uebaErr)
 	}
@@ -256,6 +280,7 @@ func (rs *DefaultRiskScorer) Score(ctx context.Context, input ScoringInput) (*Sc
 		UEBABonus:               uebaBonus,
 		UEBADiscount:            uebaDiscount,
 		UEBASignal:              uebaSignal,
+		UEBAReason:              uebaReason,
 		InteractionBonus:        interactionBonus,
 		UserRoleWeight:          contextFactors.UserRoleWeight,
 		DeviceCriticalityWeight: contextFactors.DeviceCriticalityWeight,
@@ -315,85 +340,62 @@ const (
 	UEBASignalNormal  = "normal"  // process running within its expected baseline
 )
 
-// computeUEBA queries the baseline provider and computes:
-//   - uebaBonus (positive, applied for anomalous behavior): +15
-//   - uebaDiscount (positive value, subtracted from score): +10
-//   - uebaSignal: "anomaly", "normal", or "none"
-//
-// observedCount is the actual number of executions recorded in the current
-// scoring window (from the burst tracker). This replaces the previous
-// hardcoded value of 1.0 which caused the Z-score to always be negative
-// for frequently-running processes (e.g. svchost.exe).
+// UEBA history requirements before any signal is produced: enough days of
+// host activity and enough same-hour slots for a meaningful distribution.
+const (
+	uebaMinHostDays  = 7
+	uebaSpikeMinRuns = 5
+)
+
+// computeUEBA compares the process with this host's baseline for the event's
+// hour-of-day:
+//   - anomaly: first time the process ever ran on the host, never ran at this
+//     hour before, or the current-hour count exceeds mean + Zσ (and at least
+//     uebaSpikeMinRuns, so tiny counts never qualify);
+//   - normal:  the process routinely runs at this hour (present in at least
+//     NormalAvgThreshold of the host's active slots) within mean + 1σ;
+//   - none:    not enough history (learning) or no clear signal.
 func (rs *DefaultRiskScorer) computeUEBA(
 	ctx context.Context,
 	agentID, processName string,
-	hourOfDay int,
-	observedCount int,
-) (bonus int, discount int, signal string, err error) {
-	if rs.baselineProvider == nil || processName == "" {
-		return 0, 0, UEBASignalNone, nil
+	at time.Time,
+) (bonus, discount int, signal, reason string, err error) {
+	if rs.baselineProvider == nil || processName == "" || agentID == "" {
+		return 0, 0, UEBASignalNone, "", nil
 	}
-
-	baseline, err := rs.baselineProvider.Lookup(ctx, agentID, processName, hourOfDay)
-	if err != nil {
-		return 0, 0, UEBASignalNone, err
+	b, err := rs.baselineProvider.Lookup(ctx, agentID, processName, at)
+	if err != nil || b == nil {
+		return 0, 0, UEBASignalNone, "", err
 	}
-
-	// No baseline yet → process is too new to profile; no signal
-	if baseline == nil {
-		return 0, 0, UEBASignalNone, nil
+	if b.HostObservedDays < uebaMinHostDays || b.ConfidenceScore < rs.cfg.UEBA.ConfidenceGate {
+		return 0, 0, UEBASignalNone, fmt.Sprintf("baseline learning (%d day(s) of host history)", b.HostObservedDays), nil
 	}
-
-	// Confidence gate: require ≥ configured threshold (default 0.30)
-	// below this threshold the EMA hasn't converged and would produce noise
-	if baseline.ConfidenceScore < rs.cfg.UEBA.ConfidenceGate {
-		return 0, 0, UEBASignalNone, nil
+	hourStart := at.UTC().Truncate(time.Hour)
+	if b.FirstSeenAt == nil || !b.FirstSeenAt.Before(hourStart) {
+		return rs.cfg.UEBA.AnomalyBonus, 0, UEBASignalAnomaly,
+			fmt.Sprintf("first time %s has run on this host (%d days observed)", processName, b.HostObservedDays), nil
 	}
-
-	avg := baseline.AvgExecutionsPerHour
-	stddev := baseline.StddevExecutions
-
-	// ── Anomaly detection (industry-standard Z-score method) ─────────────────
-	// Case A: Process has NEVER run at this hour — strongest anomaly signal.
-	// ObservationDays==0 or near-zero avg indicates no historical precedent.
-	if baseline.ObservationDays == 0 || avg < rs.cfg.UEBA.FirstSeenHourAvgFloor {
-		return rs.cfg.UEBA.AnomalyBonus, 0, UEBASignalAnomaly, nil
+	if b.PresentSlots == 0 {
+		return rs.cfg.UEBA.AnomalyBonus, 0, UEBASignalAnomaly,
+			fmt.Sprintf("%s never ran at %02d:00 UTC on this host in %d active days", processName, b.HourOfDay, b.HostActiveSlots), nil
 	}
-
-	// Case B: Z-score based anomaly detection.
-	// Industry standard: Z-score > 3.0 indicates a statistically significant
-	// deviation (99.7th percentile under normal distribution).
-	//
-	// Z = (observed - expected) / stddev
-	// observed = actual execution count in the current burst window (not 1.0).
-	// Using burstCount (the real observed rate) prevents the sign inversion that
-	// made high-frequency processes (svchost, explorer) impossible to flag.
-	// Reference: NIST SP 800-92 (Guide to Computer Security Log Management)
-	observed := math.Max(1.0, float64(observedCount))
-	if stddev > 0 {
-		zScore := (observed - avg) / stddev
-		if zScore > rs.cfg.UEBA.ZScoreAnomalyThreshold && !math.IsInf(zScore, 1) {
-			return rs.cfg.UEBA.AnomalyBonus, 0, UEBASignalAnomaly, nil
+	observed := 1
+	if rs.observed != nil {
+		if n := rs.observed.CurrentCount(agentID, processName, at); n > observed {
+			observed = n
 		}
 	}
-
-	// ── Normalcy check ───────────────────────────────────────────────────────
-	// Process is within its expected frequency range — grant discount.
-	// Industry standard: within 1σ of the mean is considered normal behavior.
-	// Reference: Behavioral Analytics baseline methodology (UEBA frameworks)
-	if stddev == 0 {
-		// Zero variance means perfectly consistent — if avg >= 0.5, this
-		// process routinely runs at this hour.
-		if avg >= rs.cfg.UEBA.NormalAvgThreshold {
-			return 0, rs.cfg.UEBA.NormalDiscount, UEBASignalNormal, nil
-		}
-	} else {
-		if math.Abs(observed-avg) <= stddev {
-			return 0, rs.cfg.UEBA.NormalDiscount, UEBASignalNormal, nil
-		}
+	mean, sd := b.AvgExecutionsPerHour, b.StddevExecutions
+	if observed >= uebaSpikeMinRuns && float64(observed) > mean+rs.cfg.UEBA.ZScoreAnomalyThreshold*sd && float64(observed) > 2*mean {
+		return rs.cfg.UEBA.AnomalyBonus, 0, UEBASignalAnomaly,
+			fmt.Sprintf("%d runs this hour vs. typical %.1f ± %.1f", observed, mean, sd), nil
 	}
-
-	return 0, 0, UEBASignalNone, nil
+	presence := float64(b.PresentSlots) / float64(b.HostActiveSlots)
+	if presence >= rs.cfg.UEBA.NormalAvgThreshold && float64(observed) <= mean+math.Max(sd, 1) {
+		return 0, rs.cfg.UEBA.NormalDiscount, UEBASignalNormal,
+			fmt.Sprintf("%s routinely runs at this hour (%d of %d days)", processName, b.PresentSlots, b.HostActiveSlots), nil
+	}
+	return 0, 0, UEBASignalNone, "", nil
 }
 
 // =============================================================================
@@ -483,7 +485,11 @@ func computePrivilegeBonus(eventData map[string]interface{}, cfg PrivilegeConfig
 	// Integrity level signals
 	switch integrityLevel {
 	case "system":
-		bonus += cfg.BonusIntegritySys // rare for non-service processes
+		// A SYSTEM token always carries System integrity: the same fact
+		// must not be scored twice.
+		if !strings.HasPrefix(userSID, "S-1-5-18") {
+			bonus += cfg.BonusIntegritySys
+		}
 	case "high":
 		if isElevated {
 			bonus += cfg.BonusHighElevated // elevated admin doing something suspicious
@@ -906,4 +912,34 @@ func buildContextSnapshot(
 	snap.RelatedRules = input.MatchResult.RelatedRuleTitles()
 
 	return snap
+}
+
+// dualUseBinaries are Windows binaries routinely abused for execution or
+// proxying (LOLBAS). A valid Microsoft signature on them is no evidence of
+// benign use, so they receive no signature-based false-positive discount.
+var dualUseBinaries = map[string]bool{
+	"powershell.exe": true, "pwsh.exe": true, "powershell_ise.exe": true, "cmd.exe": true,
+	"wscript.exe": true, "cscript.exe": true, "mshta.exe": true, "rundll32.exe": true,
+	"regsvr32.exe": true, "msiexec.exe": true, "certutil.exe": true, "bitsadmin.exe": true,
+	"wmic.exe": true, "msbuild.exe": true, "installutil.exe": true, "regasm.exe": true,
+	"regsvcs.exe": true, "cmstp.exe": true, "msxsl.exe": true, "odbcconf.exe": true,
+	"forfiles.exe": true, "pcalua.exe": true, "schtasks.exe": true, "sc.exe": true,
+	"reg.exe": true, "net.exe": true, "net1.exe": true, "netsh.exe": true,
+	"vssadmin.exe": true, "wevtutil.exe": true, "bcdedit.exe": true, "wbadmin.exe": true,
+	"curl.exe": true, "ftp.exe": true, "hh.exe": true, "control.exe": true,
+	"mavinject.exe": true, "msdt.exe": true, "esentutl.exe": true, "expand.exe": true,
+	"extrac32.exe": true, "makecab.exe": true, "diskshadow.exe": true, "ntdsutil.exe": true,
+	"procdump.exe": true, "psexec.exe": true, "at.exe": true, "atbroker.exe": true,
+	"bash.exe": true, "wsl.exe": true, "dnscmd.exe": true, "findstr.exe": true,
+}
+
+func isDualUseBinary(executable string) bool {
+	if executable == "" {
+		return false
+	}
+	name := strings.ToLower(executable)
+	if i := strings.LastIndexAny(name, `\/`); i >= 0 {
+		name = name[i+1:]
+	}
+	return dualUseBinaries[name]
 }

@@ -22,6 +22,7 @@ const (
 	EventTypePipe          EventType = "pipe"
 	EventTypeProcessAccess EventType = "process_access"
 	EventTypeWMI           EventType = "wmi"
+	EventTypePowerShell    EventType = "powershell" // Script Block / Module logging (Microsoft-Windows-PowerShell/Operational)
 	EventTypeClipboard     EventType = "clipboard"
 	EventTypeVulnerability EventType = "vulnerability_finding"
 	EventTypeSoftwareInventory EventType = "software_inventory"

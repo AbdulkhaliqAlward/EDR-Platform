@@ -1,3 +1,4 @@
+import { ResponseActivityBell } from '../components/automation/ResponseActivityBell';
 import {
     Fragment,
     memo,
@@ -619,6 +620,7 @@ export const PlatformAppShell = memo(function PlatformAppShell({ children }: { c
 
                     <div className="flex items-center gap-1 sm:gap-2 ml-auto shrink-0">
                         <EngineHealthChip />
+                        {authApi.isAuthenticated() && <ResponseActivityBell />}
                         {user && (
                             <span className="hidden lg:inline max-w-[160px] truncate text-xs text-white/90" title={user.username}>
                                 {user.username}

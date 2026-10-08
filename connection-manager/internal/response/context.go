@@ -12,9 +12,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/pkg/commandtypes"
+	"github.com/google/uuid"
 )
 
 // AlertVars is the flat variable set extracted from an alert, keyed by the
@@ -24,7 +26,7 @@ type AlertVars map[string]string
 // VariableNames lists the documented alert variables (for the UI).
 var VariableNames = []string{
 	"id", "agent_id", "rule_id", "rule_title", "severity", "risk_score", "category", "hostname",
-	"process_name", "pid", "process_path", "command_line", "parent_process_path", "user",
+	"process_name", "pid", "process_started_at", "process_path", "command_line", "parent_process_path", "user",
 	"file_path", "sha256", "destination_ip", "destination_port", "source_ip", "domain", "registry_key",
 }
 
@@ -69,7 +71,13 @@ func scalar(v any) string {
 // NormalizeAgentID strips the "agent-" certificate prefix used in some places.
 func NormalizeAgentID(id string) string {
 	id = strings.TrimSpace(id)
-	return strings.TrimPrefix(strings.TrimPrefix(id, "agent-"), "AGENT-")
+	if strings.HasPrefix(strings.ToLower(id), "agent-") {
+		id = id[len("agent-"):]
+	}
+	if parsed, err := uuid.Parse(id); err == nil {
+		return parsed.String()
+	}
+	return id
 }
 
 // BuildAlertVars extracts template variables from a Sigma alert: alert
@@ -114,6 +122,9 @@ func BuildAlertVars(a *repository.SigmaAlertRecord) AlertVars {
 		v["process_name"] = path.Base(strings.ReplaceAll(v["process_path"], `\`, "/"))
 	}
 	v["pid"] = first(d("pid"), m("ProcessId"))
+	// Only a measured process creation time is a reliable PID identity.
+	// Collector delivery timestamps may be later than the actual start.
+	v["process_started_at"] = d("process_start_time")
 	v["command_line"] = first(d("command_line"), m("CommandLine"))
 	v["parent_process_path"] = first(d("parent_executable"), m("ParentImage"))
 	v["user"] = first(d("user_name"), m("User"))
@@ -220,10 +231,13 @@ var Actions = []Action{
 	{Type: "unisolate_network", Label: "Restore network access", Group: "Containment",
 		Description: "Remove network isolation."},
 	{Type: "terminate_process", Label: "Terminate process", Group: "Containment", Destructive: true,
-		Description: "Kill the alert's process (and optionally its tree).",
+		Description: "Kill the alert's process, or the process and every process it started (tree). " +
+			"The agent verifies the image path before killing, so a reused PID is never terminated.",
 		Params: []actionParam{
 			{Key: "pid", Label: "Process ID", Required: true, AlertVar: "pid", Kind: "pid"},
-			{Key: "kill_tree", Label: "Kill process tree (true/false)", Kind: "bool"},
+			{Key: "process_path", Label: "Expected image path (identity check)", AlertVar: "process_path", Kind: "path"},
+			{Key: "kill_tree", Label: "Scope", Kind: "kill_mode"},
+			{Key: "process_started_at", Label: "Target start time", AlertVar: "process_started_at", Kind: "time"},
 		}},
 	{Type: "quarantine_file", Label: "Quarantine file", Group: "Containment", Destructive: true,
 		Description: "Move the file into the agent's quarantine.",
@@ -316,9 +330,14 @@ func validateParam(p actionParam, val string) error {
 		if n, err := strconv.Atoi(val); err != nil || n <= 0 {
 			return fmt.Errorf("%s must be a positive whole number (got %q)", p.Label, val)
 		}
-	case "bool":
+	case "bool", "kill_mode":
+		// kill_mode: "true" = process tree, "false" = the process only.
 		if !strings.EqualFold(val, "true") && !strings.EqualFold(val, "false") {
 			return fmt.Errorf("%s must be true or false", p.Label)
+		}
+	case "time":
+		if _, err := time.Parse(time.RFC3339Nano, val); err != nil {
+			return fmt.Errorf("%s must be an RFC 3339 timestamp (got %q)", p.Label, val)
 		}
 	case "path":
 		if len(val) > 1024 {

@@ -13,12 +13,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/edr-platform/sigma-engine/internal/analytics"
 	"github.com/edr-platform/sigma-engine/internal/application/alert"
 	"github.com/edr-platform/sigma-engine/internal/application/baselines"
 	"github.com/edr-platform/sigma-engine/internal/application/detection"
 	"github.com/edr-platform/sigma-engine/internal/application/mapping"
 	"github.com/edr-platform/sigma-engine/internal/application/rules"
-	"github.com/edr-platform/sigma-engine/internal/analytics"
+	"github.com/edr-platform/sigma-engine/internal/application/rulesync"
 	"github.com/edr-platform/sigma-engine/internal/application/scoring"
 	"github.com/edr-platform/sigma-engine/internal/automation"
 	"github.com/edr-platform/sigma-engine/internal/domain"
@@ -189,6 +190,7 @@ func main() {
 	apiCfg.Address = ":" + strconv.Itoa(apiPort)
 
 	var apiServer *handlers.Server
+	var ruleRuntime *rulesync.Runtime
 	var ruleRepo database.RuleRepository
 	var alertRepo database.AlertRepository
 	var auditLogger *database.AuditLogger
@@ -203,18 +205,40 @@ func main() {
 			logger.Fatalf("Failed to run database migrations: %v", err)
 		}
 
+		// Analyst-managed detection exceptions (false-positive suppression),
+		// refreshed every 30s; matches they hide are counted per exception.
+		exceptionMgr := detection.NewExceptionManager(database.NewExceptionRepository(dbPool.Pool()), 30*time.Second)
+		exceptionMgr.Start(ctx)
+		detectionEngine.SetExceptionManager(exceptionMgr)
+		logger.Info("Detection exceptions enabled (detection_exceptions)")
+
 		ruleRepo = database.NewPostgresRuleRepository(dbPool.Pool())
 		alertRepo = database.NewPostgresAlertRepository(dbPool.Pool())
 		auditLogger = database.NewAuditLogger(dbPool.Pool())
 		defer dbPool.Close()
+		defer exceptionMgr.Stop()
 
 		// Auto-seed rules from disk into the database (idempotent UPSERT)
 		if ruleIndex != nil && len(ruleIndex.Rules) > 0 {
 			seedRulesToDB(ctx, dbPool.Pool(), ruleIndex)
 		}
 	}
+	if ruleRepo != nil {
+		ruleRuntime = rulesync.New(ruleRepo, detectionEngine, &rules.QualityFilter{MinLevel: cfg.Rules.MinLevel, AllowedStatus: cfg.Rules.AllowedStatus, SkipExperimental: cfg.Rules.SkipExperimentalEnabled()}, cfg.Rules.ProductWhitelist)
+		refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err := ruleRuntime.Refresh(refreshCtx)
+		cancel()
+		if err != nil {
+			logger.Warnf("Initial rule DB refresh failed; disk snapshot retained: %v", err)
+		}
+		ruleRuntime.Start(ctx)
+	}
+
 	apiServer = handlers.NewServer(apiCfg, ruleRepo, alertRepo, auditLogger, cfg.RiskScoring.RiskLevels)
 
+	if ruleRuntime != nil {
+		apiServer.SetRuleRuntime(ruleRuntime)
+	}
 	automationNotifier := automation.NewNotificationManager()
 	automationPlaybooks := automation.NewPlaybookManager(automationNotifier)
 	automationEscalations := automation.NewEscalationManager(automationNotifier)
@@ -271,14 +295,17 @@ func main() {
 	}
 
 	// BaselineRepository + Cache: requires PostgreSQL (graceful noop when unavailable).
-	// The BaselineCache adds a 30-min in-process TTL layer to avoid DB hits per alert.
+	// The BaselineCache adds a 10-minute in-process TTL layer to avoid DB hits per alert.
 	var baselineProvider baselines.BaselineProvider
 	var baselineAggregator *baselines.BaselineAggregator
 	if dbPool != nil {
 		baselineRepo := baselines.NewPostgresBaselineRepository(dbPool.Pool())
-		baselineProvider = baselines.NewBaselineCache(baselineRepo, 0) // 0 → default 30-min TTL
+		cache := baselines.NewBaselineCache(baselineRepo, 0)
+		defer cache.Stop()
+		baselineProvider = cache
 		baselineAggregator = baselines.NewBaselineAggregator(baselineRepo, 0, 0)
 		baselineAggregator.Start(ctx)
+		defer baselineAggregator.Stop()
 		logger.Info("Behavioral baseline aggregator started (UEBA active)")
 	} else {
 		baselineProvider = baselines.NoopBaselineProvider{}
@@ -288,6 +315,9 @@ func main() {
 	// RiskScorer: always constructed — uses the available lineage + burst + baseline impls.
 	// All scoring constants are centrally controlled via cfg.RiskScoring (config.yaml).
 	riskScorer := scoring.NewDefaultRiskScorerWithConfig(lineageCache, burstTracker, baselineProvider, cfg.RiskScoring)
+	if baselineAggregator != nil {
+		riskScorer.SetObservedCounter(baselineAggregator)
+	}
 	if dbPool != nil {
 		riskScorer.SetContextPolicyProvider(scoring.NewPostgresContextPolicyProviderWithConfig(
 			dbPool.Pool(),
@@ -435,7 +465,7 @@ func loadRules(ctx context.Context, cfg *config.Config) (*rules.RuleIndex, error
 
 // seedRulesToDB converts loaded Sigma rules from disk and upserts them into
 // the PostgreSQL sigma_rules table so the dashboard can query them.
-// Uses individual UPSERT queries for reliability (pgx SendBatch aborts on first error).
+// Existing rows are preserved so restarts do not overwrite analyst edits.
 func seedRulesToDB(ctx context.Context, pool *pgxpool.Pool, ruleIndex *rules.RuleIndex) {
 	logger.Infof("Seeding %d rules into database...", len(ruleIndex.Rules))
 
@@ -446,17 +476,7 @@ func seedRulesToDB(ctx context.Context, pool *pgxpool.Pool, ruleIndex *rules.Rul
 			mitre_tactics, mitre_techniques, tags, "references",
 			version, source
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-		ON CONFLICT (id) DO UPDATE SET
-			title = EXCLUDED.title,
-			description = EXCLUDED.description,
-			content = EXCLUDED.content,
-			severity = EXCLUDED.severity,
-			product = EXCLUDED.product,
-			category = EXCLUDED.category,
-			service = EXCLUDED.service,
-			mitre_tactics = EXCLUDED.mitre_tactics,
-			mitre_techniques = EXCLUDED.mitre_techniques,
-			tags = EXCLUDED.tags`
+		ON CONFLICT (id) DO NOTHING`
 
 	var inserted int64
 	var errCount int64

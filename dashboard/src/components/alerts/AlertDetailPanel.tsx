@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
     Check, Clock, CheckCircle, XCircle, AlertTriangle,
-    TrendingUp, Info, ChevronDown, ChevronUp, Shield, Play, Settings
+    TrendingUp, Info, ChevronDown, ChevronUp, Shield, Play, Settings, ShieldOff, History
 } from 'lucide-react';
 import { Modal } from '../';
 import { useNavigate } from 'react-router-dom';
@@ -14,6 +14,10 @@ import { getRiskScoreStyle, json_safe, severityColors, statusColors } from './al
 import { authApi } from '../../api/client';
 import type { Alert } from '../../api/client';
 import { RunPlaybookModal } from '../automation/RunPlaybookModal';
+import { AlertResponseHistory } from '../automation/AlertResponseHistory';
+import { AlertEvidencePanel } from './AlertEvidencePanel';
+import { CreateExceptionModal } from './CreateExceptionModal';
+import { useAutomationSettings } from '../../hooks/useAutomationSettings';
 
 interface AlertDetailPanelProps {
     alert: Alert | null;
@@ -35,6 +39,9 @@ export function AlertDetailPanel({
     const [activeTab, setActiveTab] = useState<TabId>('summary');
     const [showRawJson, setShowRawJson] = useState(false);
     const [runPlaybookOpen, setRunPlaybookOpen] = useState(false);
+    const [exceptionOpen, setExceptionOpen] = useState(false);
+    const [historyKey, setHistoryKey] = useState(0);
+    const { settings: automation } = useAutomationSettings();
     const navigate = useNavigate();
 
     const handleNavigateWithContext = (path: string) => {
@@ -45,6 +52,8 @@ export function AlertDetailPanel({
                 alertDetails: {
                     severity: alert.severity,
                     ruleName: alert.rule_title,
+                    ruleId: alert.related_rule_ids?.length === 1 ? alert.related_rule_ids[0] : alert.rule_id,
+                    mitreTechniques: alert.mitre_techniques,
                     agentId: alert.agent_id,
                     title: alert.rule_title,
                     description: alert.human_summary,
@@ -120,6 +129,9 @@ export function AlertDetailPanel({
                             );
                         })()}
 
+                        {/* What ran / triggered the detection */}
+                        <AlertEvidencePanel alert={alert} />
+
                         {/* Risk Score hero */}
                         {alert.risk_score !== undefined && (
                             <div className={`rounded-xl p-4 flex items-center gap-4 ${alert.risk_score >= 90
@@ -164,7 +176,8 @@ export function AlertDetailPanel({
                             </div>
                             <div>
                                 <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Severity</label>
-                                <p className="mt-0.5"><span className={`badge text-[11px] font-bold ${severityColors[alert.severity]}`}>{alert.severity.toUpperCase()}</span></p>
+                                <p className="mt-0.5" title="Severity is the Sigma rule level assigned by the rule author; the risk score adds host context."><span className={`badge text-[11px] font-bold ${severityColors[alert.severity]}`}>{alert.severity.toUpperCase()}</span>
+                                    <span className="ml-1.5 text-[10px] text-slate-400">rule level</span></p>
                             </div>
                             <div>
                                 <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Status</label>
@@ -256,9 +269,9 @@ export function AlertDetailPanel({
                             </div>
                         )}
 
-                        {/* Automation Quick Links */}
-                        <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
-                            <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-3">Response Actions</label>
+                        {/* Response */}
+                        <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 space-y-3">
+                            <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block">Response Actions</label>
                             <div className="flex flex-wrap gap-3">
                                 <button
                                     onClick={() => setRunPlaybookOpen(true)}
@@ -267,13 +280,34 @@ export function AlertDetailPanel({
                                     <Play className="w-4 h-4 text-green-500" />
                                     Run Playbook
                                 </button>
-                                <button
-                                    onClick={() => handleNavigateWithContext('/itsm/automations')}
-                                    className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
-                                >
-                                    <Settings className="w-4 h-4 text-blue-500" />
-                                    Automation Rules
-                                </button>
+                                {automation?.enabled !== false && (
+                                    <button
+                                        onClick={() => handleNavigateWithContext('/itsm/automations')}
+                                        className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                                    >
+                                        <Settings className="w-4 h-4 text-blue-500" />
+                                        Automation Rules
+                                    </button>
+                                )}
+                                {authApi.canWriteAlerts() && alert.status !== 'false_positive' && (
+                                    <button
+                                        onClick={() => setExceptionOpen(true)}
+                                        className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                                        title="Mark as false positive and create a precise detection exception"
+                                    >
+                                        <ShieldOff className="w-4 h-4 text-amber-500" />
+                                        False Positive…
+                                    </button>
+                                )}
+                            </div>
+                            {automation && !automation.enabled && (
+                                <p className="text-xs text-slate-500">Automated response is turned off platform-wide{automation.locked ? ' by server configuration' : ''}; playbooks run only manually.</p>
+                            )}
+                            <div>
+                                <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold flex items-center gap-1.5 mb-2">
+                                    <History className="w-3.5 h-3.5" /> Response history
+                                </span>
+                                <AlertResponseHistory alertId={alert.id} refreshKey={historyKey} />
                             </div>
                         </div>
                     </div>
@@ -403,7 +437,7 @@ export function AlertDetailPanel({
                             </div>
                         )}
                         {/* Event IDs */}
-                        {(alert as Alert & { event_ids?: string[] }).event_ids?.length! > 0 && (
+                        {((alert as Alert & { event_ids?: string[] }).event_ids?.length || 0) > 0 && (
                             <div>
                                 <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Correlated Event IDs</label>
                                 <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
@@ -430,6 +464,10 @@ export function AlertDetailPanel({
                                 { key: 'name', label: 'Process Name' },
                                 { key: 'executable', label: 'Executable Path' },
                                 { key: 'command_line', label: 'Command Line' },
+                                { key: 'parent_command_line', label: 'Parent Command Line' },
+                                { key: 'original_file_name', label: 'Original File Name' },
+                                { key: 'sha256', label: 'SHA-256' },
+                                { key: 'process_start_time', label: 'Process Start Time' },
                                 { key: 'pid', label: 'PID' },
                                 { key: 'ppid', label: 'Parent PID' },
                                 { key: 'parent_name', label: 'Parent Name' },
@@ -439,7 +477,9 @@ export function AlertDetailPanel({
                                 { key: 'integrity_level', label: 'Integrity Level' },
                                 { key: 'is_elevated', label: 'Elevated' },
                                 { key: 'signature_status', label: 'Signature Status' },
-                                { key: 'signature_issuer', label: 'Signature Issuer' },
+                                { key: 'signature_issuer', label: 'Signer' },
+                                { key: 'script_path', label: 'Script Path' },
+                                { key: 'channel', label: 'Event Log Channel' },
                                 { key: 'action', label: 'Action' },
                                 { key: 'event_type', label: 'Event Type' },
                                 { key: 'event_id', label: 'Event ID' },
@@ -558,12 +598,15 @@ export function AlertDetailPanel({
                                 </div>
                             </div>
                         )}
-                        {(alert as Alert & { related_rules?: string[] }).related_rules?.length! > 0 && (
+                        {((alert as Alert & { related_rules?: string[] }).related_rules?.length || 0) > 0 && (
                             <div>
                                 <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Related Rules Detected</label>
                                 <div className="space-y-1.5">
                                     {(alert as Alert & { related_rules?: string[] }).related_rules!.map((r, i) => (
                                         <div key={i} className="font-mono text-xs bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-3 py-1.5 rounded-lg">{r}</div>
+                                    ))}
+                                    {alert.related_rule_ids?.map(id => (
+                                        <div key={id} className="font-mono text-[10px] text-slate-400 px-3 break-all">{id}</div>
                                     ))}
                                 </div>
                             </div>
@@ -658,7 +701,13 @@ export function AlertDetailPanel({
                 )}
             </div>
             {runPlaybookOpen && (
-                <RunPlaybookModal key={alert.id} alert={alert} isOpen={runPlaybookOpen} onClose={() => setRunPlaybookOpen(false)} />
+                <RunPlaybookModal key={alert.id} alert={alert} isOpen={runPlaybookOpen}
+                    onClose={() => { setRunPlaybookOpen(false); setHistoryKey(k => k + 1); }} />
+            )}
+            {exceptionOpen && (
+                <CreateExceptionModal isOpen={exceptionOpen} alert={alert} updateAlertStatus={false}
+                    onClose={() => setExceptionOpen(false)}
+                    onCreated={(markedFP) => { if (markedFP) onStatusChange(alert.id, 'false_positive'); }} />
             )}
         </>
     );

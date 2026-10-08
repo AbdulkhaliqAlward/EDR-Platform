@@ -273,8 +273,8 @@ func main() {
 	// can use it for durable event storage when Kafka is unavailable.
 	ctx := context.Background()
 	var agentSvc service.AgentService
-	var certSvc service.CertificateService    // hoisted for renewal worker access
-	var crlCache *repository.CRLCache         // hoisted for interceptor injection
+	var certSvc service.CertificateService // hoisted for renewal worker access
+	var crlCache *repository.CRLCache      // hoisted for interceptor injection
 	var authSvc service.AuthService
 	var commandApprovalSvc service.CommandApprovalService
 	var enrollmentTokenRepo repository.EnrollmentTokenRepository
@@ -289,7 +289,7 @@ func main() {
 	var executionRepo repository.PlaybookExecutionRepository
 	var automationMetricsRepo repository.AutomationMetricsRepository
 	var agentPackageRepo repository.AgentPackageRepository
-	var auditLogger *audit.Logger               // non-blocking security event logger
+	var auditLogger *audit.Logger     // non-blocking security event logger
 	var dbPool *database.PostgresPool // scoped outside if-block for fallback access
 
 	dbPoolInst, dbErr := database.NewPostgresPool(ctx, &database.PostgresConfig{
@@ -677,6 +677,9 @@ func main() {
 		apiHandlers.SetSiemRepo(repository.NewPostgresSiemConnectorRepository(pool))
 		logger.Info("SIEM connectors API enabled (siem_connectors)")
 
+		apiHandlers.SetDetectionExceptionRepo(repository.NewDetectionExceptionRepository(pool))
+		logger.Info("Detection exceptions API enabled (detection_exceptions)")
+
 		scriptRepo := repository.NewPostgresResponseScriptRepository(pool)
 		apiHandlers.SetResponseScriptRepo(scriptRepo)
 		logger.Info("Response script library API enabled (response_scripts)")
@@ -714,6 +717,32 @@ func main() {
 
 		if commandRepo != nil {
 			pb := playbook.NewEngine(logger, incidentRepo, commandRepo, grpcServer.GetRegistry())
+			pb.SetAutomationGate(func(ctx context.Context) bool {
+				if respEngine == nil {
+					return false
+				}
+				st, err := respEngine.AutomationSettings(ctx)
+				return err == nil && st.Enabled
+			})
+			if respEngine != nil {
+				pb.SetEndpointGate(func(ctx context.Context, id string) (func(), error) {
+					release, err := respEngine.AcquireEndpoint(ctx, id)
+					if err != nil {
+						return nil, err
+					}
+					agentID, parseErr := uuid.Parse(id)
+					if parseErr != nil {
+						release()
+						return nil, parseErr
+					}
+					agent, err := agentSvc.GetByID(ctx, agentID)
+					if err != nil || agent == nil || !agent.IsIsolated {
+						release()
+						return nil, fmt.Errorf("post-isolation triage cancelled: isolation state is unavailable or restored")
+					}
+					return release, nil
+				})
+			}
 			grpcServer.SetPlaybookEngine(pb)
 			logger.Info("Post-isolation playbook engine enabled")
 		}

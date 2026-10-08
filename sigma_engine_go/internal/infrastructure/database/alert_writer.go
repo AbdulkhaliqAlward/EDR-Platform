@@ -31,9 +31,9 @@ func DefaultAlertWriterConfig() AlertWriterConfig {
 		// Low-latency defaults so alerts show up near real-time in the dashboard.
 		// Throughput is still protected by batching; the writer flushes at most every 100ms
 		// unless BatchSize is hit first.
-		BatchSize:           25,
-		FlushInterval:       100 * time.Millisecond,
-		MaxQueueSize:        10000,
+		BatchSize:     25,
+		FlushInterval: 100 * time.Millisecond,
+		MaxQueueSize:  10000,
 	}
 }
 
@@ -330,6 +330,7 @@ func (w *AlertWriter) convertToDBAlert(da *domain.Alert) *Alert {
 		FalsePositiveRisk:  &da.FalsePositiveRisk,
 		MatchCount:         &da.MatchCount,
 		RelatedRules:       da.RelatedRules,
+		RelatedRuleIDs:     da.RelatedRuleIDs,
 		CombinedConfidence: &da.CombinedConfidence,
 		SeverityPromoted:   &da.SeverityPromoted,
 		OriginalSeverity:   origSeverity,

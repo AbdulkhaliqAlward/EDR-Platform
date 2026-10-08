@@ -330,31 +330,86 @@ func TestRiskScorer_ScoreClamped0To100(t *testing.T) {
 	assert.GreaterOrEqual(t, out.RiskScore, 0, "Score must not be negative")
 }
 
-func TestRiskScorer_BurstBonus_AppliedForRepetition(t *testing.T) {
+func makeMatchResultForRule(t *testing.T, id string, severity domain.Severity) *domain.EventMatchResult {
+	t.Helper()
+	cat := "process_creation"
+	rule := &domain.SigmaRule{ID: id, Title: "Rule " + id, Level: severity.String()}
+	rule.LogSource.Category = &cat
+	mr := domain.NewEventMatchResult(&domain.LogEvent{RawData: map[string]interface{}{}})
+	mr.AddMatch(rule, 0.85, map[string]interface{}{"Image": "x.exe"}, []string{"selection"})
+	return mr
+}
+
+// One rule repeating is a recurring pattern (often an automated benign task):
+// it must not raise the score. Only distinct detections on a host count.
+func TestRiskScorer_BurstBonus_NotForRepetition(t *testing.T) {
 	burst := scoring.NewInMemoryBurstTracker(5 * time.Minute)
 	lineage := infracache.NewInMemoryLineageCache(5 * time.Minute)
 	scorer := scoring.NewDefaultRiskScorer(lineage, burst, baselines.NoopBaselineProvider{})
 	ctx := context.Background()
-
-	mr := makeMatchResult(t, domain.SeverityMedium)
 	event := &domain.LogEvent{RawData: map[string]interface{}{}}
-
-	// First call — no burst bonus
-	out1, err := scorer.Score(ctx, scoring.ScoringInput{MatchResult: mr, Event: event, AgentID: "a"})
-	require.NoError(t, err)
-	assert.Equal(t, 0, out1.Snapshot.ScoreBreakdown.BurstBonus)
-
-	// Fire 9 more times to push burst count > 3 (threshold for +10 bonus)
-	for i := 0; i < 9; i++ {
-		_, err = scorer.Score(ctx, scoring.ScoringInput{MatchResult: mr, Event: event, AgentID: "a"})
+	mr := makeMatchResult(t, domain.SeverityMedium)
+	var out *scoring.ScoringOutput
+	for i := 0; i < 10; i++ {
+		var err error
+		out, err = scorer.Score(ctx, scoring.ScoringInput{MatchResult: mr, Event: event, AgentID: "a"})
 		require.NoError(t, err)
 	}
+	assert.Equal(t, 0, out.Snapshot.ScoreBreakdown.BurstBonus, "the same rule 10 times is not a burst")
+}
 
-	// 10th call should see burst count = 10, triggering +20 bonus
-	out10, err := scorer.Score(ctx, scoring.ScoringInput{MatchResult: mr, Event: event, AgentID: "a"})
+func TestRiskScorer_BurstBonus_ForDistinctDetections(t *testing.T) {
+	burst := scoring.NewInMemoryBurstTracker(5 * time.Minute)
+	lineage := infracache.NewInMemoryLineageCache(5 * time.Minute)
+	scorer := scoring.NewDefaultRiskScorer(lineage, burst, baselines.NoopBaselineProvider{})
+	ctx := context.Background()
+	event := &domain.LogEvent{RawData: map[string]interface{}{}}
+	var out *scoring.ScoringOutput
+	for _, id := range []string{"r-a", "r-b", "r-c"} {
+		var err error
+		out, err = scorer.Score(ctx, scoring.ScoringInput{MatchResult: makeMatchResultForRule(t, id, domain.SeverityMedium), Event: event, AgentID: "a"})
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 10, out.Snapshot.ScoreBreakdown.BurstBonus, "3 distinct rules on one host in the window")
+
+	// Another host is independent.
+	other, err := scorer.Score(ctx, scoring.ScoringInput{MatchResult: makeMatchResultForRule(t, "r-a", domain.SeverityMedium), Event: event, AgentID: "b"})
 	require.NoError(t, err)
-	assert.Equal(t, 20, out10.Snapshot.ScoreBreakdown.BurstBonus,
-		"10 hits in window should give burst bonus of +20")
+	assert.Equal(t, 0, other.Snapshot.ScoreBreakdown.BurstBonus)
+}
+
+func TestRiskScorer_LOLBinGetsNoSignatureDiscount(t *testing.T) {
+	scorer, _ := makeScorerWithNoCache()
+	ctx := context.Background()
+	mk := func(exe string) *scoring.ScoringOutput {
+		out, err := scorer.Score(ctx, scoring.ScoringInput{
+			MatchResult: makeMatchResult(t, domain.SeverityMedium),
+			Event: &domain.LogEvent{RawData: map[string]interface{}{
+				"signature_status": "microsoft", "executable": exe,
+			}},
+			AgentID: "x",
+		})
+		require.NoError(t, err)
+		return out
+	}
+	lol := mk(`C:\Windows\System32\rundll32.exe`)
+	assert.Equal(t, 0, lol.Snapshot.ScoreBreakdown.FPDiscount, "a Microsoft signature on a LOLBin is not evidence of benign use")
+	normal := mk(`C:\Windows\System32\notepad.exe`)
+	assert.Greater(t, normal.Snapshot.ScoreBreakdown.FPDiscount, 0)
+}
+
+func TestRiskScorer_SystemTokenCountedOnce(t *testing.T) {
+	scorer, _ := makeScorerWithNoCache()
+	out, err := scorer.Score(context.Background(), scoring.ScoringInput{
+		MatchResult: makeMatchResult(t, domain.SeverityMedium),
+		Event: &domain.LogEvent{RawData: map[string]interface{}{
+			"user_sid": "S-1-5-18", "integrity_level": "System", "signature_status": "microsoft",
+			"executable": `C:\Windows\System32\svchost.exe`,
+		}},
+		AgentID: "x",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 20, out.Snapshot.ScoreBreakdown.PrivilegeBonus, "SYSTEM SID and System integrity are one fact")
 }
 
 func TestRiskScorer_LineageBonus_CriticalChain(t *testing.T) {
@@ -535,8 +590,11 @@ func TestScenario_LegitSysadminPowerShell(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("Legit sysadmin score: %d | breakdown: %+v", out.RiskScore, out.Snapshot.ScoreBreakdown)
 
-	assert.LessOrEqual(t, out.RiskScore, 55,
-		"Legitimate sysadmin PowerShell should score ≤ 55 (lower risk)")
+	// powershell.exe is a LOLBin: its Microsoft signature earns no discount,
+	// but an interactive, non-elevated run must stay below the "high" band.
+	// Routine use is lowered by UEBA normalcy and analyst exceptions instead.
+	assert.Equal(t, 0, out.Snapshot.ScoreBreakdown.FPDiscount)
+	assert.Less(t, out.RiskScore, 70, "legitimate sysadmin PowerShell must not reach the high band")
 }
 
 func TestRiskScorer_ContextFactors_AdjustFinalScore(t *testing.T) {
