@@ -55,6 +55,10 @@ services:
       # Out-of-band approval mailbox for manual endpoint commands (used only
       # when COMMAND_APPROVAL_ENABLED=true).
       EC2_EMAIL_VERIFY: "${EC2_EMAIL_VERIFY-}"
+      # Automated response (Sigma alert → automation rule → playbook) master
+      # switch. Default true: only rules explicitly marked auto_execute fire.
+      # "false" stops every automated run; manual runs still work.
+      AUTOMATION_AUTO_EXECUTE: "${AUTOMATION_AUTO_EXECUTE:-true}"
       # Master switch for admin-authored CUSTOM commands on agents. Default false.
       # When "true", an admin (not just any responder) may run an arbitrary
       # command on an endpoint — still gated by OTP approval (when EC2_EMAIL_VERIFY

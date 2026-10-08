@@ -13,6 +13,7 @@ import { ScoreBreakdownPanel } from './ScoreBreakdownPanel';
 import { getRiskScoreStyle, json_safe, severityColors, statusColors } from './alertsUtils';
 import { authApi } from '../../api/client';
 import type { Alert } from '../../api/client';
+import { RunPlaybookModal } from '../automation/RunPlaybookModal';
 
 interface AlertDetailPanelProps {
     alert: Alert | null;
@@ -33,6 +34,7 @@ export function AlertDetailPanel({
 }: AlertDetailPanelProps) {
     const [activeTab, setActiveTab] = useState<TabId>('summary');
     const [showRawJson, setShowRawJson] = useState(false);
+    const [runPlaybookOpen, setRunPlaybookOpen] = useState(false);
     const navigate = useNavigate();
 
     const handleNavigateWithContext = (path: string) => {
@@ -259,7 +261,7 @@ export function AlertDetailPanel({
                             <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-3">Response Actions</label>
                             <div className="flex flex-wrap gap-3">
                                 <button
-                                    onClick={() => handleNavigateWithContext('/itsm/playbooks')}
+                                    onClick={() => setRunPlaybookOpen(true)}
                                     className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
                                 >
                                     <Play className="w-4 h-4 text-green-500" />
@@ -655,6 +657,9 @@ export function AlertDetailPanel({
                     </div>
                 )}
             </div>
+            {runPlaybookOpen && (
+                <RunPlaybookModal key={alert.id} alert={alert} isOpen={runPlaybookOpen} onClose={() => setRunPlaybookOpen(false)} />
+            )}
         </>
     );
 

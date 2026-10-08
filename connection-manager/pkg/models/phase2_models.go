@@ -297,6 +297,29 @@ type PlaybookCommand struct {
 	Timeout      int                    `json:"timeout"`
 	Description  string                 `json:"description"`
 	OnFailure    string                 `json:"on_failure"` // "stop" or "continue"
+
+	// ScriptID references a response-library script (step type "run_script").
+	// The command line is loaded server-side at execution time, so a playbook
+	// never embeds free-text commands.
+	ScriptID string `json:"script_id,omitempty"`
+}
+
+// UnmarshalJSON accepts the legacy "params" key used by the seeded playbooks
+// (migrations 032–049) as well as "parameters".
+func (c *PlaybookCommand) UnmarshalJSON(b []byte) error {
+	type plain PlaybookCommand
+	var aux struct {
+		plain
+		Params map[string]interface{} `json:"params"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*c = PlaybookCommand(aux.plain)
+	if len(c.Parameters) == 0 && len(aux.Params) > 0 {
+		c.Parameters = aux.Params
+	}
+	return nil
 }
 
 // PlaybookFilter represents filter criteria for querying playbooks

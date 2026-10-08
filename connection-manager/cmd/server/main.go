@@ -29,6 +29,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/cache"
 	"github.com/edr-platform/connection-manager/internal/database"
 	"github.com/edr-platform/connection-manager/internal/repository"
+	"github.com/edr-platform/connection-manager/internal/response"
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/api"
 	"github.com/edr-platform/connection-manager/pkg/audit"
@@ -638,6 +639,7 @@ func main() {
 	}
 
 	// Wire UserRepository + RoleRepository into REST handlers for RBAC.
+	var respEngine *response.Engine
 	if dbPool != nil {
 		pool := dbPool.Pool()
 		apiHandlers.SetUserRepo(repository.NewPostgresUserRepository(pool))
@@ -675,8 +677,33 @@ func main() {
 		apiHandlers.SetSiemRepo(repository.NewPostgresSiemConnectorRepository(pool))
 		logger.Info("SIEM connectors API enabled (siem_connectors)")
 
-		apiHandlers.SetResponseScriptRepo(repository.NewPostgresResponseScriptRepository(pool))
+		scriptRepo := repository.NewPostgresResponseScriptRepository(pool)
+		apiHandlers.SetResponseScriptRepo(scriptRepo)
 		logger.Info("Response script library API enabled (response_scripts)")
+
+		// ── Server-side response engine ──────────────────────────────────
+		// Runs playbooks against real agents (manual runs from the dashboard
+		// and automated runs for new Sigma alerts matching automation rules).
+		if commandRepo != nil && playbookRepo != nil && automationRuleRepo != nil && agentSvc != nil {
+			respStore := repository.NewResponseEngineRepository(pool)
+			autoExecute := !envFalse("AUTOMATION_AUTO_EXECUTE")
+			respEngine = response.New(response.Config{
+				GRPCAddress:       c2GRPCAddress,
+				MaxConcurrentRuns: 4,
+				AutoExecute:       autoExecute,
+				PollInterval:      3 * time.Second,
+			}, logger, respStore, commandRepo, playbookRepo, automationRuleRepo, scriptRepo, agentSvc, grpcServer.GetRegistry())
+			apiHandlers.SetResponseEngine(respEngine, respStore, playbookRepo, automationRuleRepo)
+			if automationHandlers != nil {
+				automationHandlers.SetResponseSources(scriptRepo, respStore)
+			}
+			respEngine.StartTrigger()
+			if autoExecute {
+				logger.Info("[Response] Engine enabled (automated rule execution ON)")
+			} else {
+				logger.Warn("[Response] Engine enabled — AUTOMATION_AUTO_EXECUTE=false, automated runs are OFF")
+			}
+		}
 
 		malwareHashRepo := repository.NewPostgresMalwareHashRepository(pool)
 		apiHandlers.SetMalwareHashRepo(malwareHashRepo)
@@ -755,6 +782,12 @@ func main() {
 	// Shutdown REST API (HTTP) server first
 	if err := restAPIServer.Shutdown(shutdownCtx); err != nil {
 		logger.Warnf("REST API server shutdown error: %v", err)
+	}
+
+	// Stop the response engine before gRPC so in-flight steps can still
+	// receive their results; unfinished runs are failed on next start.
+	if respEngine != nil {
+		respEngine.Stop(10 * time.Second)
 	}
 
 	// Shutdown gRPC server
@@ -881,6 +914,12 @@ func grpcInsecure() bool {
 func envTrue(name string) bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
 	return v == "1" || v == "true"
+}
+
+// envFalse reports whether an on-by-default switch was explicitly turned off.
+func envFalse(name string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	return v == "0" || v == "false"
 }
 
 // staleAgentSweeper runs a periodic sweep to mark zombie agents as offline.

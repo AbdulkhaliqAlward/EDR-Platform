@@ -1,9 +1,14 @@
-import { useState, useEffect, useRef } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { AlertContextPanel } from '../../components/automation/AlertContextPanel';
 import { UserAssistant } from '../../components/automation/UserAssistant';
-import { Play, Shield, Clock, TrendingUp, AlertTriangle, Plus, Terminal, X, CheckCircle, Target, Trash2, Filter, Zap, ToggleRight, ChevronUp, ChevronDown } from 'lucide-react';
-import { automationApi, agentsApi } from '../../api/client';
+import { PlaybookRunPanel } from '../../components/automation/PlaybookRunPanel';
+import { apiErrorMessage } from '../../api/apiError';
+import { Play, Shield, Clock, TrendingUp, AlertTriangle, Plus, Terminal, X, Target, Trash2, Filter, Zap, ToggleRight, ChevronUp, ChevronDown, Pencil, History } from 'lucide-react';
+import {
+  automationApi, agentsApi, alertsApi,
+  type ResponseCatalog, type ResponseAction, type PlaybookSuggestion, type PlaybookExecution, type PlaybookInput,
+} from '../../api/client';
 
 // Windows event log channels available for collection.
 // These are the exact channel names accepted by wevtutil / Get-WinEvent.
@@ -17,78 +22,53 @@ const LOG_TYPE_OPTIONS = [
   { value: 'Microsoft-Windows-Windows Defender/Operational', label: 'Defender', desc: 'AV detections' },
 ];
 
-// Parameters required by each command type.
-// Fields with type:'checklist' render as checkbox grids, not text inputs.
-const COMMAND_PARAMS: Record<string, Array<{ key: string; label: string; placeholder: string; required: boolean; type?: string; defaultValue?: string }>> = {
-  terminate_process: [{ key: 'process_name', label: 'Process Name / PID', placeholder: 'e.g., vssadmin.exe  or  PID:1234', required: true  }],
-  quarantine_file:   [{ key: 'file_path',    label: 'File Path',    placeholder: 'e.g., C:\\Windows\\Temp\\malware.exe', required: true  }],
-  run_cmd:           [{ key: 'cmd',          label: 'Command',      placeholder: 'e.g., reg query HKLM\\...', required: false }],
-  collect_logs:      [{ key: 'log_types',    label: 'Log Channels', placeholder: '', required: false, type: 'checklist' }],
-  scan_file:         [{ key: 'file_path',    label: 'Path to Scan', placeholder: 'e.g., C:\\Windows\\Temp', required: true  }],
-  update_signatures: [{ key: 'url',          label: 'Signature URL', placeholder: 'https://...', required: false }],
-  collect_forensics: [
-    { key: 'log_types',   label: 'Log Channels', placeholder: '', required: false, type: 'checklist' },
-    { key: 'max_events',  label: 'Max Events',   placeholder: '500', required: false },
-  ],
-  filesystem_timeline: [{ key: 'window_hours', label: 'Time Window (hours)', placeholder: '24', required: false }],
-  // Legacy type aliases
-  process_terminate: [{ key: 'process_name', label: 'Process Name / PID', placeholder: 'e.g., vssadmin.exe  or  PID:1234', required: true  }],
-  yara_scan:         [{ key: 'file_path',    label: 'Path to Scan', placeholder: 'C:\\Windows\\Temp', required: true  }],
-};
-
-// Actions offered in the playbook builder. Every value here is handled by the
-// execution switch in confirmExecution and by mapCommandType on the server.
-const ACTION_OPTIONS: Array<{ value: string; label: string; group: string }> = [
-  { value: 'isolate_network',       label: 'Isolate host from network',   group: 'Containment' },
-  { value: 'unisolate_network',     label: 'Restore network access',      group: 'Containment' },
-  { value: 'terminate_process',     label: 'Terminate process',           group: 'Containment' },
-  { value: 'quarantine_file',       label: 'Quarantine file',             group: 'Containment' },
-  { value: 'scan_file',             label: 'Scan file / folder',          group: 'Investigation' },
-  { value: 'collect_logs',          label: 'Collect event logs',          group: 'Investigation' },
-  { value: 'collect_forensics',     label: 'Collect forensics package',   group: 'Investigation' },
-  { value: 'process_tree_snapshot', label: 'Process tree snapshot',       group: 'Investigation' },
-  { value: 'persistence_scan',      label: 'Persistence scan',            group: 'Investigation' },
-  { value: 'lsass_access_audit',    label: 'LSASS access audit',          group: 'Investigation' },
-  { value: 'network_last_seen',     label: 'Recent network connections',  group: 'Investigation' },
-  { value: 'filesystem_timeline',   label: 'Filesystem timeline',         group: 'Investigation' },
-  { value: 'memory_dump',           label: 'Memory dump',                 group: 'Investigation' },
-  { value: 'agent_integrity_check', label: 'Agent integrity check',       group: 'Validation' },
-  { value: 'update_signatures',     label: 'Update signatures',           group: 'Remediation' },
-  { value: 'run_cmd',               label: 'Run approved command',        group: 'Remediation' },
-];
 const ACTION_GROUPS = ['Containment', 'Investigation', 'Remediation', 'Validation'];
-const actionLabel = (type: string) => ACTION_OPTIONS.find(a => a.value === type)?.label || type;
 
-// Params the analyst normally supplies at run time (pre-filled from alert context).
-const RUN_TIME_PARAMS = new Set(['process_name', 'file_path']);
-// Numeric params that must be positive integers when set.
-const NUMERIC_PARAMS = new Set(['max_events', 'window_hours']);
+// Old step type names still found in stored playbooks (mirrors the server's
+// response.CanonicalType); saved back under the catalog name.
+const LEGACY_TYPES: Record<string, string> = {
+  process_terminate: 'terminate_process',
+  kill_process: 'terminate_process',
+  network_isolate: 'isolate_network',
+  isolate: 'isolate_network',
+  restore_network: 'unisolate_network',
+  unisolate: 'unisolate_network',
+  yara_scan: 'scan_file',
+  log_pull: 'collect_logs',
+  forensic_dump: 'collect_forensics',
+};
+const canonicalType = (t: string) => LEGACY_TYPES[t] || t;
+
+interface PlaybookStep {
+  type: string;
+  description: string;
+  timeout: number;
+  on_failure?: string;
+  script_id?: string;
+  params: Record<string, string>;
+}
+
+interface Playbook {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  commands: PlaybookStep[];
+  mitreTechniques: string[];
+  enabled: boolean;
+  createdAt: string;
+  severityFilter: string[];
+  rulePattern: string;
+}
 
 interface DraftStep {
   key: number;
   type: string;
   description: string;
   timeout: string;
+  onFailure: 'stop' | 'continue';
+  scriptId: string;
   params: Record<string, string>;
-}
-
-// Map API ResponsePlaybook to the component's Playbook interface
-interface Playbook {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  commands: Array<{
-    type: string;
-    description: string;
-    timeout: number;
-    params?: Record<string, string>;
-  }>;
-  mitreTechniques: string[];
-  enabled: boolean;
-  createdAt: string;
-  severityFilter?: string[];
-  rulePattern?: string;
 }
 
 interface AlertContext {
@@ -100,316 +80,257 @@ interface AlertContext {
     title: string;
     description?: string;
     riskScore?: number;
-    event_data?: any;
   };
   timestamp: string;
 }
 
+const toText = (v: unknown) => (v === undefined || v === null ? '' : String(v));
+
+// A step as stored by the server (seeded or API-created).
+interface StoredStep {
+  type?: string;
+  command_type?: string;
+  description?: string;
+  timeout?: number;
+  on_failure?: string;
+  script_id?: string;
+  params?: Record<string, unknown>;
+  parameters?: Record<string, unknown>;
+}
+
+const statusBadge: Record<string, string> = {
+  completed: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
+  partial: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  failed: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400',
+  running: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
+};
 
 export function PlaybooksPage() {
   const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const queryAlertId = searchParams.get('alert_id') || '';
+
   const [alertContext, setAlertContext] = useState<AlertContext | null>(null);
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
-  const [suggestions, setSuggestions] = useState<Playbook[]>([]);
+  const [suggestions, setSuggestions] = useState<PlaybookSuggestion[]>([]);
   const [loading, setLoading] = useState(true);
+  const [catalog, setCatalog] = useState<ResponseCatalog | null>(null);
+  const [agents, setAgents] = useState<{ id: string; hostname: string }[]>([]);
+  const [executions, setExecutions] = useState<PlaybookExecution[]>([]);
 
-  // Modal State
+  // Run modal
   const [selectedPlaybook, setSelectedPlaybook] = useState<Playbook | null>(null);
   const [agentIdInput, setAgentIdInput] = useState('');
-  const [isExecuting, setIsExecuting] = useState(false);
-  const [isCreatingPlaybook, setIsCreatingPlaybook] = useState(false);
-  const [viewPlaybook, setViewPlaybook] = useState<Playbook | null>(null);
-  const [newPlaybookName, setNewPlaybookName] = useState('');
-  const [newPlaybookDesc, setNewPlaybookDesc] = useState('');
-  const [isSavingPlaybook, setIsSavingPlaybook] = useState(false);
-  const [activeCommandIndex, setActiveCommandIndex] = useState<number>(-1);
-  const [executionComplete, setExecutionComplete] = useState(false);
-  const [executionError, setExecutionError] = useState<string | null>(null);
-  const [cmdParams, setCmdParams] = useState<Record<string, string>>({});
-  const [newPlaybookCategory, setNewPlaybookCategory] = useState('investigation');
-  const [newSteps, setNewSteps] = useState<DraftStep[]>([]);
+  const [runBusy, setRunBusy] = useState(false);
+
+  // Builder (create + edit)
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState('');
+  const [draftDesc, setDraftDesc] = useState('');
+  const [draftCategory, setDraftCategory] = useState('investigation');
+  const [draftEnabled, setDraftEnabled] = useState(true);
+  const [draftSeverities, setDraftSeverities] = useState<string[]>([]);
+  const [draftRulePattern, setDraftRulePattern] = useState('');
+  const [draftMitre, setDraftMitre] = useState('');
+  const [draftSteps, setDraftSteps] = useState<DraftStep[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
   const stepKeyRef = useRef(0);
-  const [agents, setAgents] = useState<{ id: string; hostname: string }[]>([]);
 
-  useEffect(() => {
-    const state = location.state as any;
-    if (state?.alertId && state?.alertDetails) {
-      setAlertContext({
-        alertId: state.alertId,
-        alertDetails: state.alertDetails,
-        timestamp: new Date().toISOString(),
-      });
-      // Pre-fill agent ID if available
-      if (state.alertDetails.agentId) {
-        setAgentIdInput(state.alertDetails.agentId);
-      }
-    }
+  const [viewPlaybook, setViewPlaybook] = useState<Playbook | null>(null);
 
-    fetchPlaybooks();
-    fetchAgents();
-  }, [location.state]);
+  const activeAlertId = alertContext?.alertId || '';
 
-  const fetchAgents = async () => {
-    try {
-      const res = await agentsApi.list({ limit: 100 });
-      if (res && res.data) {
-        setAgents(res.data.map((a: any) => ({ id: a.id, hostname: a.hostname || a.id })));
-      }
-    } catch (error) {
-      console.error('Failed to fetch agents:', error);
-    }
+  const actionByType = useCallback(
+    (type: string): ResponseAction | undefined => catalog?.actions.find(a => a.type === type),
+    [catalog],
+  );
+  const actionLabel = (type: string) => {
+    if (type === 'run_cmd') return 'Run command (legacy)';
+    return actionByType(type)?.label || type;
   };
 
-  const fetchPlaybooks = async () => {
+  // Alert context: ?alert_id=… (shareable link) or router state from Alerts.
+  useEffect(() => {
+    const state = location.state as { alertId?: string; alertDetails?: AlertContext['alertDetails'] } | null;
+    if (state?.alertId && state.alertDetails && (!queryAlertId || state.alertId === queryAlertId)) {
+      setAlertContext({ alertId: state.alertId, alertDetails: state.alertDetails, timestamp: new Date().toISOString() });
+      return;
+    }
+    if (!queryAlertId) {
+      setAlertContext(null);
+      return;
+    }
+    let cancelled = false;
+    alertsApi.get(queryAlertId)
+      .then(a => {
+        if (cancelled) return;
+        setAlertContext({
+          alertId: a.id,
+          alertDetails: {
+            severity: a.severity, ruleName: a.rule_title, agentId: a.agent_id, title: a.rule_title,
+            description: a.human_summary, riskScore: a.risk_score,
+          },
+          timestamp: new Date().toISOString(),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAlertContext({
+            alertId: queryAlertId,
+            alertDetails: { severity: 'unknown', ruleName: 'Alert', agentId: '', title: 'Alert' },
+            timestamp: new Date().toISOString(),
+          });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [location.state, queryAlertId]);
+
+  const fetchPlaybooks = useCallback(async () => {
     try {
       setLoading(true);
       const res = await automationApi.listPlaybooks();
-
-      let mappedPlaybooks: Playbook[] = (res.playbooks || []).map((p: any) => ({
+      setPlaybooks((res.playbooks || []).map(p => ({
         id: p.id,
         name: p.name,
-        description: p.description,
+        description: p.description || '',
         category: p.category,
-        commands: (p.commands || []).map((cmd: any) => ({
-          type: cmd.type || cmd.command_type || 'unknown',
-          description: cmd.description || 'Command',
-          timeout: cmd.timeout || 300,
-          // Seeded playbooks store step params under "params"; playbooks created
-          // through the API are serialized by the server under "parameters".
-          params: cmd.params || cmd.parameters || {},
-        })),
+        commands: (Array.isArray(p.commands) ? (p.commands as StoredStep[]) : []).map(cmd => {
+          // Seeded playbooks store step params under "params", API-created
+          // ones under "parameters"; read both.
+          const raw = cmd.params || cmd.parameters || {};
+          const params: Record<string, string> = {};
+          Object.entries(raw).forEach(([k, v]) => { params[k] = toText(v); });
+          return {
+            type: cmd.type || cmd.command_type || 'unknown',
+            description: cmd.description || '',
+            timeout: Number(cmd.timeout) || 300,
+            on_failure: cmd.on_failure || 'stop',
+            script_id: cmd.script_id || params.script_id || '',
+            params,
+          };
+        }),
         mitreTechniques: p.mitre_techniques || [],
-        enabled: p.enabled,
+        enabled: !!p.enabled,
         createdAt: p.created_at || new Date().toISOString(),
         severityFilter: p.severity_filter || [],
         rulePattern: p.rule_pattern || '',
-      }));
-
-      setPlaybooks(mappedPlaybooks);
-
-      if (alertContext) {
-        const filteredSuggestions = mappedPlaybooks.filter(playbook => {
-          const severity = alertContext.alertDetails.severity;
-          const ruleName = alertContext.alertDetails.ruleName.toLowerCase();
-
-          if (severity === 'critical' && playbook.category === 'containment') return true;
-          if (ruleName.includes('malware') && playbook.category === 'investigation') return true;
-          if (ruleName.includes('usb') && playbook.name.toLowerCase().includes('usb')) return true;
-          if (ruleName.includes('ransomware') && playbook.name.toLowerCase().includes('ransomware')) return true;
-          return false;
-        });
-        setSuggestions(filteredSuggestions);
-      }
+      })));
     } catch (error) {
       console.error('Failed to fetch playbooks:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const fetchExecutions = useCallback(async () => {
+    try {
+      setExecutions(await automationApi.listExecutions(activeAlertId ? { alert_id: activeAlertId, limit: 20 } : { limit: 20 }));
+    } catch {
+      setExecutions([]);
+    }
+  }, [activeAlertId]);
+
+  useEffect(() => {
+    fetchPlaybooks();
+    automationApi.getCatalog().then(setCatalog).catch(err => console.error('Failed to load response catalog:', err));
+    agentsApi.list({ limit: 100 })
+      .then(res => setAgents((res?.data || []).map(a => ({ id: a.id, hostname: a.hostname || a.id }))))
+      .catch(err => console.error('Failed to fetch agents:', err));
+  }, [fetchPlaybooks]);
+
+  useEffect(() => { fetchExecutions(); }, [fetchExecutions]);
+
+  // Server-ranked suggestions for the active alert.
+  useEffect(() => {
+    if (!activeAlertId) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    automationApi.getAlertSuggestions(activeAlertId)
+      .then(res => { if (!cancelled) setSuggestions(res.suggestions || []); })
+      .catch(() => { if (!cancelled) setSuggestions([]); });
+    return () => { cancelled = true; };
+  }, [activeAlertId]);
 
   const handleSuggestionAction = (action: string) => {
     console.log('Suggestion action:', action);
   };
 
   const handleDeletePlaybook = async (playbookId: string) => {
-    if (!window.confirm("Are you sure you want to delete this playbook?")) return;
+    if (!window.confirm('Are you sure you want to delete this playbook?')) return;
     try {
-      if (playbookId) {
-        await automationApi.deletePlaybook(playbookId);
-      }
+      await automationApi.deletePlaybook(playbookId);
       setPlaybooks(prev => prev.filter(p => p.id !== playbookId));
-      if (suggestions.some(p => p.id === playbookId)) {
-        setSuggestions(prev => prev.filter(p => p.id !== playbookId));
-      }
+      setSuggestions(prev => prev.filter(s => s.playbook_id !== playbookId));
     } catch (error) {
-      console.error("Failed to delete playbook:", error);
-      alert("Failed to delete playbook.");
+      alert(`Failed to delete playbook: ${apiErrorMessage(error)}`);
     }
   };
 
-  const openExecuteModal = (playbook: Playbook) => {
+  const openRunModal = (playbook: Playbook) => {
     setSelectedPlaybook(playbook);
-    if (alertContext?.alertDetails?.agentId) setAgentIdInput(alertContext.alertDetails.agentId);
-
-    // ?? Extract relevant fields from the alert's event_data ?????????????????
-    const ed = alertContext?.alertDetails?.event_data || {};
-
-    // Process info from alert (used for terminate_process)
-    const alertProcessName =
-      (ed.Image ? ed.Image.split('\\').pop() : '') ||
-      ed.ProcessName ||
-      ed.OriginalFileName ||
-      '';
-    const alertPid = ed.ProcessId ? String(ed.ProcessId) : '';
-    // If we have a PID, prefer "PID:1234" so the agent can match by PID too.
-    const alertProcessValue = alertProcessName || (alertPid ? `PID:${alertPid}` : '');
-
-    // File path from alert (used for quarantine_file / scan_file)
-    const alertFilePath =
-      ed.TargetFilename ||
-      ed.file_path ||
-      ed.FilePath ||
-      ed.Image ||   // fallback: the process image that triggered the alert
-      '';
-
-    const defaults: Record<string, string> = {};
-
-    playbook.commands.forEach((cmd, idx) => {
-      const defs = COMMAND_PARAMS[cmd.type] || [];
-      defs.forEach(pd => {
-        // Step 1: Start with DB default (skip ${template} vars)
-        const dbVal = String(cmd.params?.[pd.key] || '');
-        defaults[`${idx}_${pd.key}`] = dbVal.startsWith('${') ? '' : dbVal;
-
-        // Step 2: For user-required fields, override with alert context when available
-        if (pd.required) {
-          if ((cmd.type === 'terminate_process' || cmd.type === 'process_terminate') && pd.key === 'process_name') {
-            if (alertProcessValue) defaults[`${idx}_process_name`] = alertProcessValue;
-          }
-          if ((cmd.type === 'quarantine_file') && pd.key === 'file_path') {
-            if (alertFilePath) defaults[`${idx}_file_path`] = alertFilePath;
-          }
-          if ((cmd.type === 'scan_file' || cmd.type === 'yara_scan') && pd.key === 'file_path') {
-            if (alertFilePath) defaults[`${idx}_file_path`] = alertFilePath;
-          }
-        }
-      });
-    });
-
-    setCmdParams(defaults);
+    setAgentIdInput(alertContext?.alertDetails?.agentId || '');
+    setRunBusy(false);
+  };
+  const openRunById = (playbookId: string) => {
+    const pb = playbooks.find(p => p.id === playbookId);
+    if (pb) openRunModal(pb);
+  };
+  const closeRunModal = () => {
+    if (runBusy && !window.confirm('The playbook keeps running on the server. Close this window?')) return;
+    setSelectedPlaybook(null);
+    fetchExecutions();
   };
 
-  const confirmExecution = async () => {
-    if (!agentIdInput || !selectedPlaybook) {
-      alert("Please provide a valid Target Agent ID");
-      return;
-    }
-
-    // Pre-flight: check all required fields are filled
-    const missing: string[] = [];
-    selectedPlaybook.commands.forEach((cmd, idx) => {
-      const defs = COMMAND_PARAMS[cmd.type] || [];
-      defs.forEach(pd => {
-        if (pd.required && !cmdParams[`${idx}_${pd.key}`]?.trim()) {
-          missing.push(`Step ${idx + 1} (${cmd.type}) - ${pd.label}`);
-        }
-      });
-    });
-    if (missing.length > 0) {
-      alert(`Please fill in the required fields before executing:\n\n- ${missing.join("\n- ")}`);
-      return;
-    }
-    setIsExecuting(true);
-    setActiveCommandIndex(0);
-    setExecutionComplete(false);
-    setExecutionError(null);
-
-    const commands = selectedPlaybook.commands;
-
-    for (let logIndex = 0; logIndex < commands.length; logIndex++) {
-      setActiveCommandIndex(logIndex);
-      const cmd = commands[logIndex];
-      let mappedType = cmd.type;
-      let params: Record<string, string> = {};
-
-      // Build params from user inputs
-      const p = (key: string) => cmdParams[`${logIndex}_${key}`] || '';
-
-      switch (cmd.type) {
-        // ── Real DB command types ───────────────────────────────────────
-        // For each type: use the user-edited value from state (p(key)),
-        // then fall back to the DB-stored default (cmd.params), then a
-        // hardcoded safe fallback. This means every command runs without
-        // the analyst typing anything when defaults are pre-loaded from DB.
-        case 'terminate_process':  params = { process_name: p('process_name') || String(cmd.params?.process_name || 'suspicious.exe'), kill_tree: 'true' }; break;
-        case 'quarantine_file':    params = { file_path: p('file_path') || String(cmd.params?.file_path || 'C:\\Windows\\Temp') }; break;
-        case 'run_cmd':            params = { cmd: p('cmd') || String(cmd.params?.cmd || '') }; break;
-        case 'collect_logs':       params = { log_types: p('log_types') || String(cmd.params?.log_types || 'System,Security') }; break;
-        case 'scan_file':          params = { file_path: p('file_path') || String(cmd.params?.file_path || 'C:\\Windows\\Temp') }; break;
-        case 'collect_forensics':  params = { log_types: p('log_types') || String(cmd.params?.log_types || 'System,Security'), max_events: p('max_events') || String(cmd.params?.max_events || '500') }; break;
-        case 'update_signatures':  params = { url: p('url') || String(cmd.params?.url || '') }; break;
-        case 'filesystem_timeline':params = { window_hours: p('window_hours') || String(cmd.params?.window_hours || '24') }; break;
-        case 'isolate_network':
-        case 'unisolate_network':
-        case 'memory_dump':
-        case 'process_tree_snapshot':
-        case 'persistence_scan':
-        case 'agent_integrity_check':
-        case 'lsass_access_audit':
-        case 'network_last_seen':  params = {}; break;
-        // ── Legacy type aliases ─────────────────────────────────────────
-        case 'network_isolate':   mappedType = 'isolate_network'; break;
-        case 'process_terminate': mappedType = 'terminate_process'; params = { process_name: p('process_name') || String(cmd.params?.process_name || 'suspicious.exe'), kill_tree: 'true' }; break;
-        case 'forensic_dump':     mappedType = 'collect_forensics'; params = { log_types: 'System,Security', max_events: '500' }; break;
-        case 'device_unmount':    mappedType = 'run_cmd'; params = { cmd: '__EJECT_USB__', from_playbook: 'true' }; break;
-        case 'log_pull':          mappedType = 'collect_logs'; params = { log_types: 'System,Security' }; break;
-        case 'yara_scan':         mappedType = 'scan_file'; params = { file_path: p('file_path') || String(cmd.params?.file_path || 'C:\\Windows\\Temp') }; break;
-        // registry_query: use single backslashes — 'HKLM\Software\...' in JS = 'HKLM\Software\...' at runtime (one backslash each)
-        case 'registry_query':    mappedType = 'run_cmd'; params = { cmd: 'reg query HKLM\Software\Microsoft\Windows\CurrentVersion\Run' }; break;
-      }
-
-      // Inject playbook context marker so the agent routes through the
-      // elevated playbookAllowedCommands whitelist, not the interactive one.
-      params.from_playbook = "true";
-
-      try {
-        await agentsApi.executeCommand(agentIdInput, {
-          command_type: mappedType as any,
-          parameters: params,
-          timeout: cmd.timeout || 300
-        });
-
-        // Add a slight artificial delay for UI feel so the user sees the progress step if it was super fast
-        await new Promise(resolve => setTimeout(resolve, 800));
-      } catch (err: any) {
-        console.error("Command execution failed:", err);
-        const errMsg = err.response?.data?.message || err.message || "Unknown error";
-        setExecutionError(`Failed at step ${logIndex + 1} (${cmd.type}): ${errMsg}. The agent may be offline or unreachable.`);
-        setIsExecuting(false);
-        return; // Halt execution of remaining steps
-      }
-    }
-
-    // If we made it here, all commands executed successfully
-    setActiveCommandIndex(commands.length);
-    setExecutionComplete(true);
-    setTimeout(() => {
-      setIsExecuting(false);
-      setSelectedPlaybook(null);
-      setActiveCommandIndex(-1);
-      setExecutionComplete(false);
-    }, 3000);
+  // ── Builder ────────────────────────────────────────────────────────────
+  const newDraftStep = (type = 'isolate_network'): DraftStep => {
+    stepKeyRef.current += 1;
+    return { key: stepKeyRef.current, type, description: '', timeout: '300', onFailure: 'stop', scriptId: '', params: {} };
   };
 
   const openCreatePlaybook = () => {
-    setNewPlaybookName('');
-    setNewPlaybookDesc('');
-    setNewPlaybookCategory('investigation');
-    setNewSteps([]);
-    setIsCreatingPlaybook(true);
+    setEditingId(null);
+    setDraftName('');
+    setDraftDesc('');
+    setDraftCategory('investigation');
+    setDraftEnabled(true);
+    setDraftSeverities([]);
+    setDraftRulePattern('');
+    setDraftMitre('');
+    setDraftSteps([]);
+    setEditorOpen(true);
   };
 
-  const addStep = () => {
-    stepKeyRef.current += 1;
-    setNewSteps(prev => [...prev, {
-      key: stepKeyRef.current,
-      type: 'isolate_network',
-      description: '',
-      timeout: '300',
-      params: {},
-    }]);
+  const openEditPlaybook = (pb: Playbook) => {
+    setViewPlaybook(null);
+    setEditingId(pb.id);
+    setDraftName(pb.name);
+    setDraftDesc(pb.description);
+    setDraftCategory(pb.category);
+    setDraftEnabled(pb.enabled);
+    setDraftSeverities(pb.severityFilter);
+    setDraftRulePattern(pb.rulePattern);
+    setDraftMitre(pb.mitreTechniques.join(', '));
+    setDraftSteps(pb.commands.map(c => ({
+      ...newDraftStep(canonicalType(c.type)),
+      description: c.description,
+      timeout: String(c.timeout || 300),
+      onFailure: c.on_failure === 'continue' ? 'continue' : 'stop',
+      scriptId: c.script_id || '',
+      params: { ...c.params },
+    })));
+    setEditorOpen(true);
   };
 
-  const updateStep = (key: number, patch: Partial<DraftStep>) => {
-    setNewSteps(prev => prev.map(s => (s.key === key ? { ...s, ...patch } : s)));
-  };
-
-  const setStepParam = (key: number, param: string, value: string) => {
-    setNewSteps(prev => prev.map(s => (s.key === key ? { ...s, params: { ...s.params, [param]: value } } : s)));
-  };
-
+  const addStep = () => setDraftSteps(prev => [...prev, newDraftStep()]);
+  const updateStep = (key: number, patch: Partial<DraftStep>) =>
+    setDraftSteps(prev => prev.map(s => (s.key === key ? { ...s, ...patch } : s)));
+  const setStepParam = (key: number, param: string, value: string) =>
+    setDraftSteps(prev => prev.map(s => (s.key === key ? { ...s, params: { ...s.params, [param]: value } } : s)));
   const moveStep = (index: number, delta: number) => {
-    setNewSteps(prev => {
+    setDraftSteps(prev => {
       const target = index + delta;
       if (target < 0 || target >= prev.length) return prev;
       const next = [...prev];
@@ -417,28 +338,21 @@ export function PlaybooksPage() {
       return next;
     });
   };
+  const removeStep = (key: number) => setDraftSteps(prev => prev.filter(s => s.key !== key));
 
-  const removeStep = (key: number) => {
-    setNewSteps(prev => prev.filter(s => s.key !== key));
-  };
-
-  const confirmCreatePlaybook = async () => {
-    if (!newPlaybookName.trim() || !newPlaybookDesc.trim()) {
-      alert("Please fill out required fields.");
-      return;
-    }
-
+  const savePlaybook = async () => {
     const problems: string[] = [];
-    if (newSteps.length === 0) problems.push('Add at least one action step.');
-    newSteps.forEach((s, idx) => {
+    if (!draftName.trim()) problems.push('Name is required.');
+    if (!draftDesc.trim()) problems.push('Description is required.');
+    if (draftSteps.length === 0) problems.push('Add at least one action step.');
+    draftSteps.forEach((s, idx) => {
       const label = `Step ${idx + 1} (${actionLabel(s.type)})`;
       const t = Number(s.timeout);
       if (!Number.isInteger(t) || t < 1 || t > 3600) problems.push(`${label}: timeout must be a whole number between 1 and 3600 seconds.`);
-      if (s.type === 'run_cmd' && !s.params.cmd?.trim()) problems.push(`${label}: command is required.`);
-      Object.entries(s.params).forEach(([k, v]) => {
-        if (NUMERIC_PARAMS.has(k) && v.trim() !== '' && !/^[1-9]\d*$/.test(v.trim())) {
-          problems.push(`${label}: ${k} must be a positive whole number.`);
-        }
+      if (s.type === 'run_script' && !s.scriptId) problems.push(`${label}: select a library script.`);
+      (actionByType(s.type)?.params || []).forEach(p => {
+        const v = (s.params[p.key] || '').trim();
+        if (p.kind === 'int' && v && !/^[1-9]\d*$/.test(v)) problems.push(`${label}: ${p.label} must be a positive whole number.`);
       });
     });
     if (problems.length > 0) {
@@ -446,45 +360,43 @@ export function PlaybooksPage() {
       return;
     }
 
-    setIsSavingPlaybook(true);
+    const payload: PlaybookInput = {
+      name: draftName.trim(),
+      description: draftDesc.trim(),
+      category: draftCategory,
+      enabled: draftEnabled,
+      severity_filter: draftSeverities,
+      rule_pattern: draftRulePattern.trim(),
+      mitre_techniques: draftMitre.split(',').map(t => t.trim().toUpperCase()).filter(Boolean),
+      commands: draftSteps.map(s => {
+        const base = {
+          type: s.type,
+          description: s.description.trim() || actionLabel(s.type),
+          timeout: Number(s.timeout),
+          on_failure: s.onFailure,
+        };
+        if (s.type === 'run_script') return { ...base, script_id: s.scriptId };
+        if (s.type === 'run_cmd') return { ...base, parameters: { cmd: s.params.cmd || '' } };
+        // Only the action's declared parameters, and only when set.
+        const parameters: Record<string, string> = {};
+        (actionByType(s.type)?.params || []).forEach(p => {
+          const v = (s.params[p.key] || '').trim();
+          if (v) parameters[p.key] = v;
+        });
+        return { ...base, parameters };
+      }),
+    };
+
+    setIsSaving(true);
     try {
-      const payload = {
-        name: newPlaybookName.trim(),
-        description: newPlaybookDesc.trim(),
-        category: newPlaybookCategory,
-        commands: newSteps.map(s => {
-          // Only send params that belong to this action and have a value.
-          const parameters: Record<string, string> = {};
-          (COMMAND_PARAMS[s.type] || []).forEach(pd => {
-            const v = (s.params[pd.key] || '').trim();
-            if (v) parameters[pd.key] = v;
-          });
-          return {
-            type: s.type,
-            description: s.description.trim() || actionLabel(s.type),
-            timeout: Number(s.timeout),
-            // Manual runs halt on the first failed step, so record that behavior.
-            on_failure: 'stop',
-            parameters,
-          };
-        }),
-      };
-
-      await automationApi.createPlaybook(payload);
-
-      setIsCreatingPlaybook(false);
-      setNewPlaybookName('');
-      setNewPlaybookDesc('');
-      setNewSteps([]);
-      alert(`Playbook "${newPlaybookName}" created successfully!`);
-
-      // Refresh list
+      if (editingId) await automationApi.updatePlaybook(editingId, payload);
+      else await automationApi.createPlaybook(payload);
+      setEditorOpen(false);
       fetchPlaybooks();
     } catch (err) {
-      console.error("Failed to create playbook", err);
-      alert("Failed to create playbook. Check console for details.");
+      alert(`Failed to save playbook: ${apiErrorMessage(err)}`);
     } finally {
-      setIsSavingPlaybook(false);
+      setIsSaving(false);
     }
   };
 
@@ -498,15 +410,10 @@ export function PlaybooksPage() {
     }
   };
 
-  const getCategoryLabel = (category: string) => {
-    switch (category) {
-      case 'containment': return 'Containment';
-      case 'investigation': return 'Investigation';
-      case 'remediation': return 'Remediation';
-      case 'validation': return 'Validation';
-      default: return category.charAt(0).toUpperCase() + category.slice(1);
-    }
-  };
+  const getCategoryLabel = (category: string) =>
+    category ? category.charAt(0).toUpperCase() + category.slice(1) : '';
+
+  const inputClass = 'w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none';
 
   return (
     <div className="space-y-6 relative">
@@ -520,7 +427,7 @@ export function PlaybooksPage() {
             <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
               Incident Response Playbooks
             </h1>
-            <p className="text-sm text-slate-500 mt-1">Pre-defined automated workflows to investigate and remediate threats.</p>
+            <p className="text-sm text-slate-500 mt-1">Workflows run by the server-side response engine on the target endpoint.</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -530,10 +437,7 @@ export function PlaybooksPage() {
               <span>Active Alert Context</span>
             </div>
           )}
-          <button
-            onClick={openCreatePlaybook}
-            className="btn btn-primary flex items-center gap-2"
-          >
+          <button onClick={openCreatePlaybook} className="btn btn-primary flex items-center gap-2">
             <Plus className="w-4 h-4" />
             Create Playbook
           </button>
@@ -555,7 +459,7 @@ export function PlaybooksPage() {
         onSuggestionAction={handleSuggestionAction}
       />
 
-      {/* Suggestions for Current Alert */}
+      {/* Suggestions for Current Alert (ranked by the server) */}
       {alertContext && suggestions.length > 0 && (
         <div className="bg-indigo-50 dark:bg-indigo-900/10 rounded-xl border border-indigo-200 dark:border-indigo-800/50 p-6 shadow-sm">
           <h3 className="text-lg font-bold text-indigo-900 dark:text-indigo-100 mb-4 flex items-center gap-2">
@@ -563,38 +467,25 @@ export function PlaybooksPage() {
             Recommended Playbooks for Current Alert
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {suggestions.map((playbook) => (
-              <div key={playbook.id} className="bg-white dark:bg-slate-800 rounded-lg border border-indigo-100 dark:border-indigo-800 p-5 shadow-sm hover:shadow-md transition-shadow flex flex-col h-full">
+            {suggestions.map((s, i) => (
+              <div key={s.playbook_id} className="bg-white dark:bg-slate-800 rounded-lg border border-indigo-100 dark:border-indigo-800 p-5 shadow-sm hover:shadow-md transition-shadow flex flex-col h-full">
                 <div className="flex items-center justify-between mb-3 gap-2">
-                  <h4 className="font-semibold text-slate-900 dark:text-white truncate flex-1" title={playbook.name}>
-                    {playbook.name}
+                  <h4 className="font-semibold text-slate-900 dark:text-white truncate flex-1" title={s.playbook_name}>
+                    {i === 0 && <span className="text-[10px] uppercase font-bold text-indigo-500 mr-1.5">Best</span>}
+                    {s.playbook_name}
                   </h4>
-                  <span className={`shrink-0 px-2.5 py-0.5 text-[10px] uppercase tracking-wider rounded-full font-bold ${getCategoryColor(playbook.category)}`}>
-                    {getCategoryLabel(playbook.category)}
+                  <span className={`shrink-0 px-2.5 py-0.5 text-[10px] uppercase tracking-wider rounded-full font-bold ${getCategoryColor(s.category)}`}>
+                    {getCategoryLabel(s.category)}
                   </span>
                 </div>
-                <p className="text-sm text-slate-600 dark:text-slate-400 mb-4 line-clamp-2" title={playbook.description}>
-                  {playbook.description}
-                </p>
-
-                <div className="flex flex-wrap gap-2 mb-5">
-                  {playbook.severityFilter && playbook.severityFilter.length > 0 && (
-                    <div className="flex items-center gap-1 px-2 py-0.5 bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 rounded text-[10px] font-bold uppercase border border-rose-200 dark:border-rose-800/50">
-                      <Filter className="w-3 h-3" />
-                      {playbook.severityFilter.join(', ')}
-                    </div>
-                  )}
-                  {playbook.rulePattern && (
-                    <div className="flex items-center gap-1 px-2 py-0.5 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded text-[10px] font-mono border border-indigo-200 dark:border-indigo-800/50 max-w-full truncate" title={playbook.rulePattern}>
-                      <Zap className="w-3 h-3 shrink-0" />
-                      <span className="truncate">{playbook.rulePattern}</span>
-                    </div>
-                  )}
-                </div>
-
+                {s.reasons && s.reasons.length > 0 && (
+                  <ul className="text-xs text-slate-600 dark:text-slate-400 mb-4 list-disc list-inside space-y-0.5">
+                    {s.reasons.map((r, j) => <li key={j}>{r}</li>)}
+                  </ul>
+                )}
                 <div className="mt-auto">
                   <button
-                    onClick={() => openExecuteModal(playbook)}
+                    onClick={() => openRunById(s.playbook_id)}
                     className="w-full px-4 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2 transition-colors"
                   >
                     <Play className="w-4 h-4" />
@@ -610,12 +501,8 @@ export function PlaybooksPage() {
       {/* All Playbooks */}
       <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
         <div className="p-6 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
-          <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-            Available Playbooks
-          </h2>
-          <p className="text-sm text-slate-500 mt-1">
-            Standard operating procedures configured for the automation engine.
-          </p>
+          <h2 className="text-lg font-bold text-slate-900 dark:text-white">Available Playbooks</h2>
+          <p className="text-sm text-slate-500 mt-1">Standard operating procedures configured for the automation engine.</p>
         </div>
 
         {loading ? (
@@ -630,55 +517,43 @@ export function PlaybooksPage() {
                 <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
                   <div className="flex-1">
                     <div className="flex items-center gap-3 mb-2">
-                      <h3 className="font-bold text-lg text-slate-900 dark:text-white">
-                        {playbook.name}
-                      </h3>
+                      <h3 className="font-bold text-lg text-slate-900 dark:text-white">{playbook.name}</h3>
                       <span className={`px-2.5 py-0.5 text-[11px] uppercase tracking-wider font-bold rounded-md ${getCategoryColor(playbook.category)}`}>
                         {getCategoryLabel(playbook.category)}
                       </span>
                     </div>
-                    <p className="text-sm text-slate-600 dark:text-slate-400 mb-4 max-w-3xl">
-                      {playbook.description}
-                    </p>
+                    <p className="text-sm text-slate-600 dark:text-slate-400 mb-4 max-w-3xl">{playbook.description}</p>
 
-                    {/* Metadata Badges */}
                     <div className="flex flex-wrap items-center gap-3 text-xs mb-5">
-                      <div 
-                        className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-800 rounded-md text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 cursor-help transition-colors hover:bg-slate-200 dark:hover:bg-slate-700"
-                        title={playbook.commands.map((c, i) => `${i + 1}. ${c.type}`).join('\n')}
+                      <div
+                        className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-800 rounded-md text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 cursor-help"
+                        title={playbook.commands.map((c, i) => `${i + 1}. ${actionLabel(canonicalType(c.type))}`).join('\n')}
                       >
                         <Terminal className="w-3.5 h-3.5" />
-                        <span className="font-semibold">{playbook.commands.length} Commands</span>
+                        <span className="font-semibold">{playbook.commands.length} Steps</span>
                       </div>
-                      
-                      {playbook.severityFilter && playbook.severityFilter.length > 0 && (
+                      {playbook.severityFilter.length > 0 && (
                         <div className="flex items-center gap-1.5 px-2.5 py-1 bg-rose-50 dark:bg-rose-900/20 rounded-md text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800/50">
                           <Filter className="w-3.5 h-3.5" />
                           <span className="font-semibold capitalize">Severity: {playbook.severityFilter.join(', ')}</span>
                         </div>
                       )}
-
                       {playbook.rulePattern && (
                         <div className="flex items-center gap-1.5 px-2.5 py-1 bg-indigo-50 dark:bg-indigo-900/20 rounded-md text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/50">
                           <Zap className="w-3.5 h-3.5" />
-                          <span className="font-semibold font-mono text-[10px] truncate max-w-[200px]" title={playbook.rulePattern}>
-                            {playbook.rulePattern}
-                          </span>
+                          <span className="font-semibold font-mono text-[10px] truncate max-w-[200px]" title={playbook.rulePattern}>{playbook.rulePattern}</span>
                         </div>
                       )}
-
-                      {playbook.mitreTechniques && playbook.mitreTechniques.length > 0 && (
+                      {playbook.mitreTechniques.length > 0 && (
                         <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-800 rounded-md text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
                           <Shield className="w-3.5 h-3.5" />
                           <span className="font-semibold">{playbook.mitreTechniques.join(', ')}</span>
                         </div>
                       )}
-
                       <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border ${playbook.enabled ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800/50' : 'bg-slate-50 dark:bg-slate-800/50 text-slate-500 border-slate-200 dark:border-slate-700'}`}>
-                         <ToggleRight className="w-3.5 h-3.5" />
-                         <span className="font-semibold">{playbook.enabled ? 'Enabled' : 'Disabled'}</span>
+                        <ToggleRight className="w-3.5 h-3.5" />
+                        <span className="font-semibold">{playbook.enabled ? 'Enabled' : 'Disabled'}</span>
                       </div>
-
                       <div className="flex items-center gap-1.5 px-2.5 py-1 text-slate-500">
                         <Clock className="w-3.5 h-3.5" />
                         <span>Created {new Date(playbook.createdAt).toLocaleDateString()}</span>
@@ -689,26 +564,35 @@ export function PlaybooksPage() {
                   {/* Actions */}
                   <div className="flex lg:flex-col items-center gap-3 shrink-0">
                     <button
-                      onClick={() => openExecuteModal(playbook)}
-                      className="px-6 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2 w-full transition-colors shadow-sm"
+                      onClick={() => openRunModal(playbook)}
+                      disabled={!playbook.enabled}
+                      title={playbook.enabled ? 'Run this playbook' : 'Enable the playbook to run it'}
+                      className="px-6 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium flex items-center justify-center gap-2 w-full transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Play className="w-4 h-4" />
                       Execute
                     </button>
                     <div className="flex w-full gap-2">
-                        <button
-                          onClick={() => setViewPlaybook(playbook)}
-                          className="flex-1 px-4 py-2 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 font-medium transition-colors text-sm"
-                        >
-                          View Details
-                        </button>
-                        <button
-                          onClick={() => handleDeletePlaybook(playbook.id)}
-                          className="px-3 py-2 bg-white dark:bg-slate-800 text-rose-600 dark:text-rose-400 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-900/20 font-medium transition-colors flex items-center justify-center"
-                          title="Delete Playbook"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                      <button
+                        onClick={() => setViewPlaybook(playbook)}
+                        className="flex-1 px-4 py-2 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 font-medium transition-colors text-sm"
+                      >
+                        View Details
+                      </button>
+                      <button
+                        onClick={() => openEditPlaybook(playbook)}
+                        className="px-3 py-2 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center justify-center"
+                        title="Edit Playbook"
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDeletePlaybook(playbook.id)}
+                        className="px-3 py-2 bg-white dark:bg-slate-800 text-rose-600 dark:text-rose-400 border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-900/20 font-medium transition-colors flex items-center justify-center"
+                        title="Delete Playbook"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -718,7 +602,53 @@ export function PlaybooksPage() {
         )}
       </div>
 
-      {/* Execution Modal */}
+      {/* Recent runs */}
+      <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
+        <div className="p-6 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <History className="w-5 h-5" /> Recent Runs{activeAlertId ? ' for this Alert' : ''}
+            </h2>
+            <p className="text-sm text-slate-500 mt-1">Manual and automated playbook executions recorded by the server.</p>
+          </div>
+          <button onClick={fetchExecutions} className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">Refresh</button>
+        </div>
+        {executions.length === 0 ? (
+          <p className="p-6 text-sm text-slate-500">No runs yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs uppercase text-slate-500 bg-slate-50 dark:bg-slate-900/40">
+                <tr>
+                  <th className="text-left px-6 py-2">Playbook</th>
+                  <th className="text-left px-3 py-2">Status</th>
+                  <th className="text-left px-3 py-2">Trigger</th>
+                  <th className="text-left px-3 py-2">Steps</th>
+                  <th className="text-left px-3 py-2">Started</th>
+                  <th className="text-left px-3 py-2">By</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200 dark:divide-slate-700/80">
+                {executions.map(e => (
+                  <tr key={e.id}>
+                    <td className="px-6 py-2 text-slate-800 dark:text-slate-200">
+                      {e.playbook_name || e.playbook_id}
+                      {e.error_message && <div className="text-xs text-rose-600 dark:text-rose-400 truncate max-w-md" title={e.error_message}>{e.error_message}</div>}
+                    </td>
+                    <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-semibold ${statusBadge[e.status] || 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>{e.status}</span></td>
+                    <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{e.trigger_source}</td>
+                    <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{e.commands_executed}/{e.commands_total}</td>
+                    <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{new Date(e.started_at).toLocaleString()}</td>
+                    <td className="px-3 py-2 text-slate-600 dark:text-slate-400">{e.created_by_username || (e.trigger_source === 'automation' ? 'automation' : '—')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Run Modal (server-side execution) */}
       {selectedPlaybook && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col border border-slate-200 dark:border-slate-800" style={{ maxHeight: '92vh' }}>
@@ -726,33 +656,17 @@ export function PlaybooksPage() {
               <div>
                 <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
                   <Play className="w-5 h-5 text-indigo-500" />
-                  Execute Playbook
+                  Run Playbook
                 </h2>
-                <p className="text-sm text-slate-500 mt-1">Configure parameters for manual deployment.</p>
+                <p className="text-sm text-slate-500 mt-1">{selectedPlaybook.name}</p>
               </div>
-              <button
-                onClick={() => setSelectedPlaybook(null)}
-                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors"
-              >
+              <button onClick={closeRunModal} className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Scrollable body */}
-            <div className="overflow-y-auto flex-1 p-6 space-y-6">
-              {/* Playbook Summary */}
-              <div className="bg-indigo-50 dark:bg-indigo-900/10 border border-indigo-100 dark:border-indigo-800/50 rounded-xl p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="font-bold text-indigo-900 dark:text-indigo-100">{selectedPlaybook.name}</h3>
-                  <span className={`px-2.5 py-0.5 text-[10px] uppercase tracking-wider font-bold rounded-md ${getCategoryColor(selectedPlaybook.category)}`}>
-                    {getCategoryLabel(selectedPlaybook.category)}
-                  </span>
-                </div>
-                <p className="text-sm text-indigo-700/80 dark:text-indigo-300/80">{selectedPlaybook.description}</p>
-              </div>
-
-              {/* Agent selector + dynamic per-command parameter inputs */}
-              <div className="space-y-4">
+            <div className="overflow-y-auto flex-1 p-6 space-y-5">
+              {!activeAlertId && (
                 <div>
                   <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
                     Target Agent <span className="text-rose-500">*</span>
@@ -761,472 +675,295 @@ export function PlaybooksPage() {
                     <select
                       value={agentIdInput}
                       onChange={(e) => setAgentIdInput(e.target.value)}
-                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none appearance-none transition-shadow pl-10"
+                      disabled={runBusy}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none appearance-none pl-10"
                     >
                       <option value="" disabled>Select Target Agent</option>
                       {agents.map(a => (
                         <option key={a.id} value={a.id}>{a.hostname} ({a.id})</option>
                       ))}
-                      {agentIdInput && !agents.some(a => a.id === agentIdInput) && (
-                        <option value={agentIdInput}>{agentIdInput} (From Alert Context)</option>
-                      )}
                     </select>
                     <Target className="w-5 h-5 text-slate-400 absolute left-3 top-3.5" />
                   </div>
-                  {alertContext?.alertDetails?.agentId && (
-                    <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-2 flex items-center gap-1.5 font-medium">
-                      <CheckCircle className="w-3.5 h-3.5" />
-                      Auto-filled from active alert context
-                    </p>
-                  )}
+                  <p className="text-xs text-slate-500 mt-2">Without an alert, steps that need alert values (PID, file, IP) must be filled in below.</p>
                 </div>
-
-                {/* Dynamic parameter inputs per command step */}
-                {(() => {
-                  const inputs: React.ReactNode[] = [];
-                  selectedPlaybook.commands.forEach((cmd, idx) => {
-                    const defs = COMMAND_PARAMS[cmd.type] || [];
-                    defs.forEach(pd => {
-                      const currentVal  = cmdParams[`${idx}_${pd.key}`] || '';
-                      const dbDefault   = String(cmd.params?.[pd.key] || cmd.params?.['log_types'] || '');
-                      const hasDbValue  = !!dbDefault && !dbDefault.startsWith('${');
-
-                      const isFromAlert  = pd.required && !!currentVal && currentVal !== dbDefault;
-                      const isAutoFilled = !pd.required && hasDbValue && currentVal === dbDefault;
-                      const isEmpty      = pd.required && !currentVal.trim();
-
-                      // ── Checklist (log channel selector) ──────────────────
-                      if (pd.type === 'checklist') {
-                        const selected = new Set(
-                          (currentVal || 'System,Security').split(',').map(s => s.trim()).filter(Boolean)
-                        );
-                        const toggle = (val: string) => {
-                          const next = new Set(selected);
-                          if (next.has(val)) next.delete(val); else next.add(val);
-                          setCmdParams(prev => ({ ...prev, [`${idx}_${pd.key}`]: [...next].join(',') }));
-                        };
-                        inputs.push(
-                          <div key={`${idx}-${pd.key}`}>
-                            <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
-                              Step {idx + 1} &mdash; {pd.label}
-                              <span className="text-xs font-normal text-slate-400 ml-2">({cmd.type})</span>
-                            </label>
-                            <div className="grid grid-cols-2 gap-2">
-                              {LOG_TYPE_OPTIONS.map(opt => (
-                                <button
-                                  key={opt.value}
-                                  type="button"
-                                  onClick={() => toggle(opt.value)}
-                                  className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left text-sm transition-all ${
-                                    selected.has(opt.value)
-                                      ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
-                                      : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-indigo-400'
-                                  }`}
-                                >
-                                  <div className={`w-4 h-4 rounded flex items-center justify-center shrink-0 border ${
-                                    selected.has(opt.value)
-                                      ? 'bg-white border-white'
-                                      : 'border-slate-400 dark:border-slate-600'
-                                  }`}>
-                                    {selected.has(opt.value) && (
-                                      <svg className="w-3 h-3 text-indigo-600" fill="currentColor" viewBox="0 0 12 12">
-                                        <path d="M10 3L5 8.5 2 5.5l-1 1L5 10.5l6-7-1-0.5z"/>
-                                      </svg>
-                                    )}
-                                  </div>
-                                  <div>
-                                    <div className="font-semibold leading-tight">{opt.label}</div>
-                                    <div className={`text-xs leading-tight ${ selected.has(opt.value) ? 'text-indigo-200' : 'text-slate-400' }`}>{opt.desc}</div>
-                                  </div>
-                                </button>
-                              ))}
-                            </div>
-                            {currentVal && (
-                              <p className="text-xs text-slate-500 mt-2">
-                                Selected: <span className="font-mono text-indigo-600 dark:text-indigo-400">{currentVal}</span>
-                              </p>
-                            )}
-                          </div>
-                        );
-                        return;
-                      }
-
-                      // ── Standard text input ───────────────────────────────
-                      inputs.push(
-                        <div key={`${idx}-${pd.key}`}>
-                          <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-1.5">
-                            Step {idx + 1} &mdash; {pd.label}
-                            {pd.required && <span className="text-rose-500 ml-1">*</span>}
-                            <span className="text-xs font-normal text-slate-400 ml-2">({cmd.type})</span>
-                            {isFromAlert && (
-                              <span className="ml-2 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded">
-                                From Alert
-                              </span>
-                            )}
-                            {isAutoFilled && (
-                              <span className="ml-2 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 rounded">
-                                Auto-filled
-                              </span>
-                            )}
-                          </label>
-                          <div className="relative">
-                            <input
-                              type="text"
-                              value={currentVal}
-                              onChange={e => setCmdParams(prev => ({ ...prev, [`${idx}_${pd.key}`]: e.target.value }))}
-                              placeholder={pd.placeholder}
-                              readOnly={isAutoFilled}
-                              className={`w-full bg-white dark:bg-slate-950 border rounded-lg px-4 py-2.5 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm pl-10 transition-colors ${
-                                isAutoFilled
-                                  ? "border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/10 text-slate-600 dark:text-slate-400 cursor-default"
-                                  : isEmpty
-                                    ? "border-rose-300 dark:border-rose-600 focus:ring-rose-400"
-                                    : isFromAlert
-                                      ? "border-amber-300 dark:border-amber-600"
-                                      : "border-slate-300 dark:border-slate-700"
-                              }`}
-                            />
-                            <Terminal className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                          </div>
-                          {isAutoFilled && (
-                            <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-1 flex items-center gap-1">
-                              <CheckCircle className="w-3 h-3" />
-                              Pre-loaded from playbook - click to override.
-                            </p>
-                          )}
-                          {isFromAlert && (
-                            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
-                              <AlertTriangle className="w-3 h-3" />
-                              Auto-filled from alert context - review and confirm.
-                            </p>
-                          )}
-                          {isEmpty && (
-                            <p className="text-xs text-rose-600 dark:text-rose-400 mt-1 flex items-center gap-1">
-                              <AlertTriangle className="w-3 h-3" />
-                              Required - enter a value to proceed.
-                            </p>
-                          )}
-                        </div>
-                      );
-                    });
-                  });
-                  return inputs.length > 0 ? (
-                    <div className="space-y-4">
-                      <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Command Parameters</p>
-                      {inputs}
-                    </div>
-                  ) : null;
-                })()}
-              </div>
-
-              {/* Sequence Preview / Live UI Progress */}
-              <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-3">
-                  {isExecuting ? 'Execution Progress' : 'Execution Sequence'}
-                </label>
-                <div className="bg-slate-50 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-3">
-                  {selectedPlaybook.commands.map((cmd, idx) => {
-                    const isCompleted = (isExecuting || executionError) && idx < activeCommandIndex;
-                    const isActive = isExecuting && idx === activeCommandIndex && !executionError;
-                    const isFailed = executionError && idx === activeCommandIndex;
-
-                    return (
-                      <div key={idx} className={`flex items-start gap-3 p-2 rounded-lg transition-colors ${isActive ? 'bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-100 dark:border-indigo-800/50' : ''}`}>
-                        <div className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold shrink-0 mt-0.5 ${isFailed ? 'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400 border border-rose-200 dark:border-rose-800' :
-                            isCompleted ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' :
-                              isActive ? 'bg-indigo-600 text-white shadow-md animate-pulse' :
-                                'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400'
-                          }`}>
-                          {isFailed ? <X className="w-4 h-4" /> : isCompleted ? <CheckCircle className="w-4 h-4" /> : (idx + 1)}
-                        </div>
-                        <div className="flex-1">
-                          <div className={`text-sm font-bold ${isFailed ? 'text-rose-700 dark:text-rose-400' : isCompleted ? 'text-emerald-700 dark:text-emerald-400' : isActive ? 'text-indigo-700 dark:text-indigo-300' : 'text-slate-800 dark:text-slate-200'}`}>
-                            {cmd.type}
-                          </div>
-                          <div className={`text-xs mt-0.5 ${isFailed ? 'text-rose-600/80 dark:text-rose-400/80 font-medium' : isActive ? 'text-indigo-600/80 dark:text-indigo-400/80' : 'text-slate-500'}`}>
-                            {isFailed ? 'Execution Failed' : isActive ? 'Executing command...' : cmd.description}
-                          </div>
-                        </div>
-                        {isActive && (
-                          <div className="shrink-0 flex items-center justify-center pt-1">
-                            <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {executionComplete && !executionError && (
-                    <div className="mt-4 p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/50 rounded-lg flex items-center justify-center gap-2 text-emerald-700 dark:text-emerald-400 font-bold text-sm animate-in fade-in slide-in-from-bottom-2">
-                      <CheckCircle className="w-5 h-5" />
-                      Playbook Execution Successful
-                    </div>
-                  )}
-                  {executionError && (
-                    <div className="mt-4 p-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800/50 rounded-lg flex flex-col gap-2 text-rose-700 dark:text-rose-400 text-sm animate-in fade-in slide-in-from-bottom-2">
-                      <div className="flex items-center gap-2 font-bold">
-                        <AlertTriangle className="w-5 h-5" />
-                        Execution Aborted
-                      </div>
-                      <div className="pl-7 opacity-90">{executionError}</div>
-                    </div>
-                  )}
-                </div>
-              </div>
+              )}
+              <PlaybookRunPanel
+                playbookId={selectedPlaybook.id}
+                alertId={activeAlertId || undefined}
+                agentId={activeAlertId ? undefined : (agentIdInput || undefined)}
+                onStarted={() => setRunBusy(true)}
+                onFinished={() => { setRunBusy(false); fetchExecutions(); }}
+              />
             </div>
 
             <div className="flex items-center justify-end gap-3 p-6 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/30">
-              <button
-                onClick={() => setSelectedPlaybook(null)}
-                className="px-5 py-2.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg transition-colors"
-                disabled={isExecuting}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmExecution}
-                disabled={isExecuting}
-                className="px-6 py-2.5 font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-md transition-all flex items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
-              >
-                {isExecuting ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Dispatching...
-                  </>
-                ) : (
-                  <>
-                    <Terminal className="w-4 h-4" />
-                    Confirm Execution
-                  </>
-                )}
+              <button onClick={closeRunModal} className="px-5 py-2.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg transition-colors">
+                Close
               </button>
             </div>
           </div>
         </div>
       )}
-      {/* Create Playbook Modal */}
-      {isCreatingPlaybook && (
+
+      {/* Create / Edit Playbook Modal */}
+      {editorOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col border border-slate-200 dark:border-slate-800" style={{ maxHeight: '92vh' }}>
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col border border-slate-200 dark:border-slate-800" style={{ maxHeight: '92vh' }}>
             <div className="flex items-center justify-between p-6 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/30 shrink-0">
               <div>
                 <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
                   <Terminal className="w-5 h-5 text-indigo-500" />
-                  Create Response Playbook
+                  {editingId ? 'Edit Response Playbook' : 'Create Response Playbook'}
                 </h2>
-                <p className="text-sm text-slate-500 mt-1">Design an autonomous command sequence.</p>
+                <p className="text-sm text-slate-500 mt-1">Steps use approved actions and library scripts only.</p>
               </div>
-              <button
-                onClick={() => setIsCreatingPlaybook(false)}
-                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors"
-              >
+              <button onClick={() => setEditorOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-6 space-y-5 overflow-y-auto flex-1">
-              <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
-                  Playbook Name <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={newPlaybookName}
-                  onChange={(e) => setNewPlaybookName(e.target.value)}
-                  placeholder="e.g., Critical Database Isolation"
-                  className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-shadow"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Playbook Name <span className="text-rose-500">*</span></label>
+                  <input type="text" value={draftName} maxLength={255} onChange={e => setDraftName(e.target.value)} placeholder="e.g., Critical Database Isolation" className={inputClass} />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Category</label>
+                  <select value={draftCategory} onChange={e => setDraftCategory(e.target.value)} className={inputClass}>
+                    <option value="containment">Containment</option>
+                    <option value="investigation">Investigation</option>
+                    <option value="remediation">Remediation</option>
+                    <option value="validation">Validation</option>
+                  </select>
+                </div>
               </div>
 
               <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
-                  Description <span className="text-rose-500">*</span>
-                </label>
-                <textarea
-                  value={newPlaybookDesc}
-                  onChange={(e) => setNewPlaybookDesc(e.target.value)}
-                  placeholder="Describe the purpose of this playbook..."
-                  className="w-full h-24 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                />
+                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Description <span className="text-rose-500">*</span></label>
+                <textarea value={draftDesc} onChange={e => setDraftDesc(e.target.value)} placeholder="Describe the purpose of this playbook..." className={`${inputClass} h-20`} />
               </div>
 
-              <div>
-                <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">
-                  Category
-                </label>
-                <select
-                  value={newPlaybookCategory}
-                  onChange={e => setNewPlaybookCategory(e.target.value)}
-                  className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-3 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                >
-                  <option value="containment">Containment</option>
-                  <option value="investigation">Investigation</option>
-                  <option value="remediation">Remediation</option>
-                  <option value="validation">Validation</option>
-                </select>
+              {/* Matching hints used to suggest this playbook for alerts */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Suggest for severities</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {['critical', 'high', 'medium', 'low'].map(sev => {
+                      const on = draftSeverities.includes(sev);
+                      return (
+                        <button key={sev} type="button"
+                          onClick={() => setDraftSeverities(prev => on ? prev.filter(s => s !== sev) : [...prev, sev])}
+                          className={`px-2.5 py-1 rounded-md border text-xs font-medium capitalize ${on ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300'}`}>
+                          {sev}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+                    <input type="checkbox" checked={draftEnabled} onChange={e => setDraftEnabled(e.target.checked)} />
+                    Enabled (disabled playbooks never run)
+                  </label>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Rule title pattern (regex, optional)</label>
+                  <input type="text" value={draftRulePattern} maxLength={500} onChange={e => setDraftRulePattern(e.target.value)} placeholder="e.g., (?i)ransomware|vssadmin" className={`${inputClass} font-mono`} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">MITRE techniques (comma separated)</label>
+                  <input type="text" value={draftMitre} onChange={e => setDraftMitre(e.target.value)} placeholder="e.g., T1486, T1490" className={`${inputClass} font-mono`} />
+                </div>
               </div>
 
               {/* Action steps */}
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300">
-                    Action Steps <span className="text-rose-500">*</span>
-                  </label>
-                  <span className="text-xs text-slate-500">Steps run in order; execution stops at the first failure.</span>
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300">Action Steps <span className="text-rose-500">*</span></label>
+                  <span className="text-xs text-slate-500">Steps run in order on the alert's endpoint.</span>
                 </div>
+                {catalog && catalog.variables.length > 0 && (
+                  <p className="text-xs text-slate-500 mb-2">
+                    Parameters may use alert values, e.g. <code className="font-mono text-indigo-600 dark:text-indigo-400">{'{{alert.file_path}}'}</code>. Empty parameters are filled from the alert when possible.
+                  </p>
+                )}
 
-                {newSteps.length === 0 && (
+                {draftSteps.length === 0 && (
                   <div className="text-sm text-slate-500 border border-dashed border-slate-300 dark:border-slate-700 rounded-lg p-4 text-center">
                     No steps yet. Add the first action this playbook should perform.
                   </div>
                 )}
 
                 <div className="space-y-3">
-                  {newSteps.map((step, idx) => (
-                    <div key={step.key} className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 bg-slate-50/60 dark:bg-slate-950/40">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <span className="flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400">
-                            {idx + 1}
-                          </span>
-                          <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{actionLabel(step.type)}</span>
+                  {draftSteps.map((step, idx) => {
+                    const action = actionByType(step.type);
+                    const isLegacyCmd = step.type === 'run_cmd';
+                    return (
+                      <div key={step.key} className="border border-slate-200 dark:border-slate-700 rounded-xl p-4 bg-slate-50/60 dark:bg-slate-950/40">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <span className="flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400">{idx + 1}</span>
+                            <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{actionLabel(step.type)}</span>
+                            {action?.destructive && <span className="text-[10px] uppercase font-bold text-rose-500">destructive</span>}
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button type="button" onClick={() => moveStep(idx, -1)} disabled={idx === 0}
+                              className="p-1.5 rounded-md text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed" title="Move up">
+                              <ChevronUp className="w-4 h-4" />
+                            </button>
+                            <button type="button" onClick={() => moveStep(idx, 1)} disabled={idx === draftSteps.length - 1}
+                              className="p-1.5 rounded-md text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed" title="Move down">
+                              <ChevronDown className="w-4 h-4" />
+                            </button>
+                            <button type="button" onClick={() => removeStep(step.key)}
+                              className="p-1.5 rounded-md text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title="Remove step">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <button type="button" onClick={() => moveStep(idx, -1)} disabled={idx === 0}
-                            className="p-1.5 rounded-md text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed" title="Move up">
-                            <ChevronUp className="w-4 h-4" />
-                          </button>
-                          <button type="button" onClick={() => moveStep(idx, 1)} disabled={idx === newSteps.length - 1}
-                            className="p-1.5 rounded-md text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed" title="Move down">
-                            <ChevronDown className="w-4 h-4" />
-                          </button>
-                          <button type="button" onClick={() => removeStep(step.key)}
-                            className="p-1.5 rounded-md text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20" title="Remove step">
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <div className="sm:col-span-2">
-                          <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Action</label>
-                          <select
-                            value={step.type}
-                            onChange={e => updateStep(step.key, { type: e.target.value, params: {} })}
-                            className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
-                          >
-                            {ACTION_GROUPS.map(group => (
-                              <optgroup key={group} label={group}>
-                                {ACTION_OPTIONS.filter(a => a.group === group).map(a => (
-                                  <option key={a.value} value={a.value}>{a.label}</option>
-                                ))}
-                              </optgroup>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Timeout (seconds)</label>
-                          <input
-                            type="number" min={1} max={3600}
-                            value={step.timeout}
-                            onChange={e => updateStep(step.key, { timeout: e.target.value })}
-                            className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
-                          />
-                        </div>
-                      </div>
-
-                      {/* Action-specific parameters */}
-                      {(COMMAND_PARAMS[step.type] || []).map(pd => {
-                        if (pd.type === 'checklist') {
-                          const selected = new Set((step.params[pd.key] || '').split(',').map(v => v.trim()).filter(Boolean));
-                          const toggle = (val: string) => {
-                            const next = new Set(selected);
-                            if (next.has(val)) next.delete(val); else next.add(val);
-                            setStepParam(step.key, pd.key, [...next].join(','));
-                          };
-                          return (
-                            <div key={pd.key} className="mt-3">
-                              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                                {pd.label} <span className="font-normal text-slate-400">(none selected = System, Security)</span>
-                              </label>
-                              <div className="flex flex-wrap gap-1.5">
-                                {LOG_TYPE_OPTIONS.map(opt => (
-                                  <button
-                                    key={opt.value} type="button" onClick={() => toggle(opt.value)} title={opt.desc}
-                                    className={`px-2.5 py-1 rounded-md border text-xs font-medium transition-colors ${
-                                      selected.has(opt.value)
-                                        ? 'bg-indigo-600 border-indigo-600 text-white'
-                                        : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-indigo-400'
-                                    }`}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                ))}
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                          <div className="sm:col-span-2">
+                            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Action</label>
+                            {isLegacyCmd ? (
+                              <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/50 rounded-lg px-3 py-2">
+                                Legacy free-text command — only administrators can save it. Prefer a library script.
                               </div>
-                            </div>
-                          );
-                        }
-                        const isRunTime = RUN_TIME_PARAMS.has(pd.key);
-                        const isRequired = step.type === 'run_cmd' && pd.key === 'cmd';
-                        return (
-                          <div key={pd.key} className="mt-3">
-                            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                              {pd.label}
-                              {isRequired && <span className="text-rose-500 ml-1">*</span>}
-                              {isRunTime && <span className="font-normal text-slate-400 ml-1">(optional — can be filled from the alert at run time)</span>}
-                            </label>
-                            <input
-                              type="text"
-                              value={step.params[pd.key] || ''}
-                              onChange={e => setStepParam(step.key, pd.key, e.target.value)}
-                              placeholder={pd.placeholder}
-                              className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
-                            />
-                            {step.type === 'run_cmd' && pd.key === 'cmd' && (
-                              <p className="text-xs text-slate-500 mt-1">Only commands on the agent's approved playbook list will run.</p>
+                            ) : (
+                              <select
+                                value={step.type}
+                                onChange={e => updateStep(step.key, { type: e.target.value, params: {}, scriptId: '' })}
+                                className={inputClass}
+                              >
+                                {!action && <option value={step.type}>{step.type} (unsupported)</option>}
+                                {ACTION_GROUPS.map(group => (
+                                  <optgroup key={group} label={group}>
+                                    {(catalog?.actions || []).filter(a => a.group === group).map(a => (
+                                      <option key={a.type} value={a.type}>{a.label}</option>
+                                    ))}
+                                  </optgroup>
+                                ))}
+                              </select>
                             )}
                           </div>
-                        );
-                      })}
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Timeout (s)</label>
+                            <input type="number" min={1} max={3600} value={step.timeout} onChange={e => updateStep(step.key, { timeout: e.target.value })} className={inputClass} />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">On failure</label>
+                            <select value={step.onFailure} onChange={e => updateStep(step.key, { onFailure: e.target.value as DraftStep['onFailure'] })} className={inputClass}>
+                              <option value="stop">Stop playbook</option>
+                              <option value="continue">Continue</option>
+                            </select>
+                          </div>
+                        </div>
 
-                      <div className="mt-3">
-                        <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Description (optional)</label>
-                        <input
-                          type="text"
-                          value={step.description}
-                          onChange={e => updateStep(step.key, { description: e.target.value })}
-                          placeholder={actionLabel(step.type)}
-                          className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
-                        />
+                        {action?.description && <p className="text-xs text-slate-500 mt-2">{action.description}</p>}
+
+                        {/* Library script picker */}
+                        {step.type === 'run_script' && (
+                          <div className="mt-3">
+                            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Library script <span className="text-rose-500">*</span></label>
+                            <select value={step.scriptId} onChange={e => updateStep(step.key, { scriptId: e.target.value })} className={inputClass}>
+                              <option value="">Select an approved script…</option>
+                              {(catalog?.scripts || []).map(s => (
+                                <option key={s.id} value={s.id}>{s.name}</option>
+                              ))}
+                              {step.scriptId && !(catalog?.scripts || []).some(s => s.id === step.scriptId) && (
+                                <option value={step.scriptId}>Unavailable script ({step.scriptId.slice(0, 8)})</option>
+                              )}
+                            </select>
+                            {(catalog?.scripts || []).length === 0 && (
+                              <p className="text-xs text-slate-500 mt-1">No enabled scripts. An administrator can add them in the Script Library.</p>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Legacy command (read-only) */}
+                        {isLegacyCmd && (
+                          <div className="mt-3">
+                            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Command</label>
+                            <input type="text" value={step.params.cmd || ''} onChange={e => setStepParam(step.key, 'cmd', e.target.value)} className={`${inputClass} font-mono`} />
+                          </div>
+                        )}
+
+                        {/* Catalog parameters */}
+                        {(action?.params || []).map(p => {
+                          if (p.kind === 'log_channels') {
+                            const selected = new Set((step.params[p.key] || '').split(',').map(v => v.trim()).filter(Boolean));
+                            const toggle = (val: string) => {
+                              const next = new Set(selected);
+                              if (next.has(val)) next.delete(val); else next.add(val);
+                              setStepParam(step.key, p.key, [...next].join(','));
+                            };
+                            return (
+                              <div key={p.key} className="mt-3">
+                                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                                  {p.label} <span className="font-normal text-slate-400">(none selected = agent default)</span>
+                                </label>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {LOG_TYPE_OPTIONS.map(opt => (
+                                    <button key={opt.value} type="button" onClick={() => toggle(opt.value)} title={opt.desc}
+                                      className={`px-2.5 py-1 rounded-md border text-xs font-medium transition-colors ${selected.has(opt.value)
+                                        ? 'bg-indigo-600 border-indigo-600 text-white'
+                                        : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-indigo-400'}`}>
+                                      {opt.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div key={p.key} className="mt-3">
+                              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                                {p.label}
+                                {p.required && !p.alert_var && <span className="text-rose-500 ml-1">*</span>}
+                                {p.alert_var && <span className="font-normal text-slate-400 ml-1">(empty = alert's {p.alert_var})</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={step.params[p.key] || ''}
+                                onChange={e => setStepParam(step.key, p.key, e.target.value)}
+                                placeholder={p.alert_var ? `{{alert.${p.alert_var}}}` : ''}
+                                className={`${inputClass} font-mono`}
+                              />
+                            </div>
+                          );
+                        })}
+
+                        <div className="mt-3">
+                          <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Description (optional)</label>
+                          <input type="text" value={step.description} maxLength={500} onChange={e => updateStep(step.key, { description: e.target.value })} placeholder={actionLabel(step.type)} className={inputClass} />
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 <button
                   type="button"
                   onClick={addStep}
-                  className="mt-3 w-full px-4 py-2.5 border border-dashed border-indigo-300 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 font-medium flex items-center justify-center gap-2 transition-colors text-sm"
+                  disabled={!catalog || draftSteps.length >= 25}
+                  className="mt-3 w-full px-4 py-2.5 border border-dashed border-indigo-300 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 font-medium flex items-center justify-center gap-2 transition-colors text-sm disabled:opacity-50"
                 >
                   <Plus className="w-4 h-4" />
-                  Add Step
+                  {catalog ? 'Add Step' : 'Loading actions…'}
                 </button>
               </div>
             </div>
 
             <div className="flex items-center justify-end gap-3 p-6 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/30 shrink-0">
-              <button
-                onClick={() => setIsCreatingPlaybook(false)}
-                className="px-5 py-2.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg transition-colors"
-                disabled={isSavingPlaybook}
-              >
+              <button onClick={() => setEditorOpen(false)} disabled={isSaving}
+                className="px-5 py-2.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg transition-colors">
                 Cancel
               </button>
-              <button
-                onClick={confirmCreatePlaybook}
-                disabled={isSavingPlaybook}
-                className="px-6 py-2.5 font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-md transition-all flex items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
-              >
-                {isSavingPlaybook ? 'Saving...' : 'Create Playbook'}
+              <button onClick={savePlaybook} disabled={isSaving}
+                className="px-6 py-2.5 font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-md transition-all flex items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed">
+                {isSaving ? 'Saving...' : editingId ? 'Save Changes' : 'Create Playbook'}
               </button>
             </div>
           </div>
@@ -1238,16 +975,11 @@ export function PlaybooksPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col border border-slate-200 dark:border-slate-800" style={{ maxHeight: '92vh' }}>
             <div className="flex items-center justify-between p-6 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/30 shrink-0">
-              <div>
-                <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                  <Shield className="w-5 h-5 text-indigo-500" />
-                  Playbook Details
-                </h2>
-              </div>
-              <button
-                onClick={() => setViewPlaybook(null)}
-                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors"
-              >
+              <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <Shield className="w-5 h-5 text-indigo-500" />
+                Playbook Details
+              </h2>
+              <button onClick={() => setViewPlaybook(null)} className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -1257,59 +989,59 @@ export function PlaybooksPage() {
                 <h3 className="text-lg font-bold text-slate-900 dark:text-white">{viewPlaybook.name}</h3>
                 <p className="text-sm text-slate-600 dark:text-slate-400 mt-2">{viewPlaybook.description}</p>
                 <div className="flex flex-wrap gap-3 mt-4">
-                  <span className={`px-2.5 py-1 text-xs font-bold rounded-md ${getCategoryColor(viewPlaybook.category)}`}>
-                    {getCategoryLabel(viewPlaybook.category)}
-                  </span>
-                  
-                  {viewPlaybook.severityFilter && viewPlaybook.severityFilter.length > 0 && (
+                  <span className={`px-2.5 py-1 text-xs font-bold rounded-md ${getCategoryColor(viewPlaybook.category)}`}>{getCategoryLabel(viewPlaybook.category)}</span>
+                  {viewPlaybook.severityFilter.length > 0 && (
                     <span className="flex items-center gap-1.5 px-2.5 py-1 bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 rounded-md text-xs font-bold uppercase border border-rose-200 dark:border-rose-800/50">
-                      <Filter className="w-3.5 h-3.5" />
-                      {viewPlaybook.severityFilter.join(', ')}
+                      <Filter className="w-3.5 h-3.5" />{viewPlaybook.severityFilter.join(', ')}
                     </span>
                   )}
-
                   {viewPlaybook.rulePattern && (
                     <span className="flex items-center gap-1.5 px-2.5 py-1 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded-md text-xs font-mono border border-indigo-200 dark:border-indigo-800/50">
-                      <Zap className="w-3.5 h-3.5" />
-                      {viewPlaybook.rulePattern}
+                      <Zap className="w-3.5 h-3.5" />{viewPlaybook.rulePattern}
                     </span>
                   )}
-
                   <span className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-md border ${viewPlaybook.enabled ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800/50' : 'bg-slate-50 dark:bg-slate-800/50 text-slate-500 border-slate-200 dark:border-slate-700'}`}>
-                    <ToggleRight className="w-3.5 h-3.5" />
-                    {viewPlaybook.enabled ? 'Enabled' : 'Disabled'}
+                    <ToggleRight className="w-3.5 h-3.5" />{viewPlaybook.enabled ? 'Enabled' : 'Disabled'}
                   </span>
-
-                  <span className="px-2.5 py-1 text-xs font-bold rounded-md bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
-                    ID: {viewPlaybook.id}
-                  </span>
+                  <span className="px-2.5 py-1 text-xs font-bold rounded-md bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700">ID: {viewPlaybook.id}</span>
                 </div>
               </div>
 
               <div className="border-t border-slate-200 dark:border-slate-800 pt-6">
-                <h4 className="text-sm font-bold text-slate-900 dark:text-white mb-4">Command Sequence Map</h4>
-                <div className="space-y-4 relative before:absolute before:inset-0 before:ml-5 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-slate-200 dark:before:via-slate-700 before:to-transparent">
-                  {viewPlaybook.commands.map((cmd, idx) => (
-                    <div key={idx} className="relative flex items-center justify-between md:justify-normal md:odd:flex-row-reverse group is-active">
-                      <div className="flex items-center justify-center w-10 h-10 rounded-full border-4 border-white dark:border-slate-900 bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-400 shadow shrink-0 md:order-1 md:group-odd:-translate-x-1/2 md:group-even:translate-x-1/2 font-bold text-sm z-10">
-                        {idx + 1}
-                      </div>
-                      <div className="w-[calc(100%-4rem)] md:w-[calc(50%-2.5rem)] bg-white dark:bg-slate-800 p-4 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700/60">
-                        <div className="font-bold text-slate-900 dark:text-white text-sm mb-1">{cmd.type}</div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400">{cmd.description}</div>
-                        <div className="mt-2 text-[10px] uppercase font-bold text-indigo-500">Timeout: {cmd.timeout}s</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <h4 className="text-sm font-bold text-slate-900 dark:text-white mb-4">Steps</h4>
+                <ol className="space-y-3">
+                  {viewPlaybook.commands.map((cmd, idx) => {
+                    const scriptName = cmd.script_id ? catalog?.scripts.find(s => s.id === cmd.script_id)?.name : undefined;
+                    return (
+                      <li key={idx} className="flex items-start gap-3 bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700/60">
+                        <span className="flex items-center justify-center w-7 h-7 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-400 font-bold text-xs shrink-0">{idx + 1}</span>
+                        <div className="min-w-0">
+                          <div className="font-bold text-slate-900 dark:text-white text-sm">{actionLabel(canonicalType(cmd.type))}</div>
+                          {cmd.description && <div className="text-xs text-slate-500 dark:text-slate-400">{cmd.description}</div>}
+                          {scriptName && <div className="text-xs font-mono text-indigo-600 dark:text-indigo-400 mt-1">{scriptName}</div>}
+                          {Object.keys(cmd.params).length > 0 && (
+                            <div className="mt-1 text-xs font-mono text-slate-600 dark:text-slate-300 break-all">
+                              {Object.entries(cmd.params).map(([k, v]) => <div key={k}>{k}: {v}</div>)}
+                            </div>
+                          )}
+                          <div className="mt-2 text-[10px] uppercase font-bold text-indigo-500">
+                            Timeout: {cmd.timeout}s · On failure: {cmd.on_failure === 'continue' ? 'continue' : 'stop'}
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
               </div>
             </div>
 
-            <div className="p-6 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/30 flex justify-end shrink-0">
-              <button
-                onClick={() => setViewPlaybook(null)}
-                className="px-6 py-2.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg transition-colors"
-              >
+            <div className="p-6 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/30 flex justify-end gap-3 shrink-0">
+              <button onClick={() => openEditPlaybook(viewPlaybook)}
+                className="px-5 py-2.5 font-medium text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 rounded-lg hover:bg-indigo-50 dark:hover:bg-indigo-900/20 flex items-center gap-2">
+                <Pencil className="w-4 h-4" /> Edit
+              </button>
+              <button onClick={() => setViewPlaybook(null)}
+                className="px-6 py-2.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg transition-colors">
                 Close
               </button>
             </div>

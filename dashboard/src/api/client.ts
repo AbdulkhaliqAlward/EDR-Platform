@@ -1100,14 +1100,153 @@ export const responseScriptsApi = {
     },
 };
 
+/** A parameter of a built-in response action (server catalog). */
+export interface ResponseActionParam {
+    key: string;
+    label: string;
+    required: boolean;
+    alert_var?: string;
+    kind: string;
+}
+
+/** A built-in, approved playbook action (GET /automation/catalog). */
+export interface ResponseAction {
+    type: string;
+    label: string;
+    group: string;
+    description: string;
+    params: ResponseActionParam[] | null;
+    destructive: boolean;
+}
+
+export interface ResponseCatalog {
+    actions: ResponseAction[];
+    scripts: { id: string; name: string; description: string; timeout_seconds: number }[];
+    variables: string[];
+}
+
+/** A playbook step bound to an alert/endpoint, with its runtime state. */
+export interface BoundPlaybookStep {
+    index: number;
+    type: string;
+    label: string;
+    description?: string;
+    timeout: number;
+    on_failure: string;
+    params: Record<string, string> | null;
+    script_id?: string;
+    script_name?: string;
+    errors?: string[];
+    status: 'pending' | 'running' | 'success' | 'failed' | 'skipped' | string;
+    command_id?: string;
+    error?: string;
+    output?: string;
+    started_at?: string;
+    completed_at?: string;
+}
+
+export interface PlaybookRunPlan {
+    playbook_id: string;
+    playbook_name: string;
+    alert_id?: string;
+    agent_id: string;
+    agent_hostname?: string;
+    agent_online: boolean;
+    steps: BoundPlaybookStep[];
+    variables: Record<string, string> | null;
+    warnings?: string[];
+    ready: boolean;
+}
+
+export interface PlaybookExecution {
+    id: string;
+    alert_id?: string;
+    playbook_id: string;
+    playbook_name: string;
+    rule_id?: string;
+    agent_id: string;
+    status: 'pending' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled' | string;
+    trigger_source: string;
+    created_by_username: string;
+    started_at: string;
+    completed_at?: string;
+    commands_executed: number;
+    commands_total: number;
+    steps: BoundPlaybookStep[] | null;
+    error_message?: string;
+    execution_time_ms: number;
+    updated_at: string;
+}
+
+export interface PlaybookSuggestion {
+    playbook_id: string;
+    playbook_name: string;
+    category: string;
+    score: number;
+    reasons: string[] | null;
+    rule_id?: string;
+}
+
+export interface PlaybookInput {
+    name: string;
+    description: string;
+    category: string;
+    commands: any[];
+    enabled?: boolean;
+    severity_filter?: string[];
+    rule_pattern?: string;
+    mitre_techniques?: string[];
+}
+
+/** True once a run can no longer change. */
+export const isExecutionFinished = (status: string) =>
+    status === 'completed' || status === 'partial' || status === 'failed' || status === 'cancelled';
+
 export const automationApi = {
     listPlaybooks: async () => {
         const response = await connectionApi.get<{ data: ResponsePlaybook[], total: number }>('/api/v1/automation/playbooks');
         return { playbooks: response.data.data, total: response.data.total };
     },
-    createPlaybook: async (data: { name: string, description: string, category: string, commands: any[] }) => {
+    createPlaybook: async (data: PlaybookInput) => {
         const response = await connectionApi.post<{ data: ResponsePlaybook }>('/api/v1/automation/playbooks', data);
         return response.data;
+    },
+    updatePlaybook: async (id: string, data: PlaybookInput) => {
+        const response = await connectionApi.put<{ data: ResponsePlaybook }>(`/api/v1/automation/playbooks/${id}`, data);
+        return response.data;
+    },
+    /** Approved actions, enabled library scripts and alert template variables. */
+    getCatalog: async (): Promise<ResponseCatalog> => {
+        const response = await connectionApi.get<ResponseCatalog>('/api/v1/automation/catalog');
+        return response.data;
+    },
+    /** Ranked playbooks for a Sigma alert (suggested_playbook_id = best). */
+    getAlertSuggestions: async (alertId: string) => {
+        const response = await connectionApi.get<{ alert_id: string; suggested_playbook_id: string; suggestions: PlaybookSuggestion[] | null }>(
+            `/api/v1/automation/alerts/${encodeURIComponent(alertId)}/suggestions`);
+        return response.data;
+    },
+    /** Parameters bound to the alert/endpoint, without running anything. */
+    previewRun: async (playbookId: string, opts: { alertId?: string; agentId?: string }) => {
+        const params: Record<string, string> = {};
+        if (opts.alertId) params.alert_id = opts.alertId;
+        if (opts.agentId) params.agent_id = opts.agentId;
+        const response = await connectionApi.get<PlaybookRunPlan>(`/api/v1/automation/playbooks/${playbookId}/preview`, { params });
+        return response.data;
+    },
+    /** Starts a tracked server-side run (202); poll getExecution for progress. */
+    runPlaybook: async (playbookId: string, body: { alert_id?: string; agent_id?: string; reason?: string; overrides?: Record<number, Record<string, string>> }) => {
+        const response = await connectionApi.post<{ execution_id: string; execution: PlaybookExecution; plan: PlaybookRunPlan }>(
+            `/api/v1/automation/playbooks/${playbookId}/run`, body);
+        return response.data;
+    },
+    getExecution: async (id: string) => {
+        const response = await connectionApi.get<{ data: PlaybookExecution }>(`/api/v1/automation/executions/${id}`);
+        return response.data.data;
+    },
+    listExecutions: async (filter: { alert_id?: string; playbook_id?: string; agent_id?: string; limit?: number } = {}) => {
+        const response = await connectionApi.get<{ data: PlaybookExecution[] | null; total: number }>('/api/v1/automation/executions', { params: filter });
+        return response.data.data || [];
     },
     listRules: async () => {
         const response = await connectionApi.get<{ data: AutomationRule[], total: number }>('/api/v1/automation/rules');

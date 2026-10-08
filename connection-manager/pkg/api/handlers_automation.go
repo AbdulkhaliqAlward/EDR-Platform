@@ -1,9 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,6 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/edr-platform/connection-manager/internal/repository"
+	"github.com/edr-platform/connection-manager/internal/response"
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/models"
 )
@@ -20,6 +25,22 @@ type AutomationHandlers struct {
 	logger            *logrus.Logger
 	automationService *service.AutomationService
 	metricsService    *service.MetricsService
+
+	// Optional response-engine sources (set when the database is available).
+	scripts response.ScriptStore
+	alerts  sigmaAlertSource
+}
+
+// sigmaAlertSource loads Sigma alerts (the alerts the dashboard shows).
+type sigmaAlertSource interface {
+	GetSigmaAlert(ctx context.Context, id uuid.UUID) (*repository.SigmaAlertRecord, error)
+}
+
+// SetResponseSources wires the script library (step validation) and the
+// Sigma alert source (rule matching previews).
+func (h *AutomationHandlers) SetResponseSources(scripts response.ScriptStore, alerts sigmaAlertSource) {
+	h.scripts = scripts
+	h.alerts = alerts
 }
 
 // NewAutomationHandlers creates new automation handlers
@@ -35,17 +56,16 @@ func NewAutomationHandlers(
 	}
 }
 
-// CreatePlaybookRequest represents a request to create a playbook
+// CreatePlaybookRequest represents a request to create or update a playbook
 type CreatePlaybookRequest struct {
-	Name        string                   `json:"name" validate:"required"`
-	Description string                   `json:"description,omitempty"`
-	Category    string                   `json:"category" validate:"required"`
-	Commands    []models.PlaybookCommand `json:"commands" validate:"required"`
-}
-
-// ExecutePlaybookRequest represents a request to execute a playbook
-type ExecutePlaybookRequest struct {
-	PlaybookID uuid.UUID `json:"playbook_id" validate:"required"`
+	Name            string                   `json:"name" validate:"required"`
+	Description     string                   `json:"description,omitempty"`
+	Category        string                   `json:"category" validate:"required"`
+	Commands        []models.PlaybookCommand `json:"commands" validate:"required"`
+	Enabled         *bool                    `json:"enabled,omitempty"`
+	SeverityFilter  []string                 `json:"severity_filter,omitempty"`
+	RulePattern     string                   `json:"rule_pattern,omitempty"`
+	MitreTechniques []string                 `json:"mitre_techniques,omitempty"`
 }
 
 // PlaybookListResponse represents a response with playbook list
@@ -68,21 +88,31 @@ func (h *AutomationHandlers) CreatePlaybook(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 	}
-
-	// Validate request
-	if err := h.validatePlaybookRequest(&req); err != nil {
-		return errorResponse(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+	steps, err := h.validatePlaybookRequest(c, &req)
+	if err != nil {
+		return h.playbookValidationError(c, err)
 	}
 
+	// Enabled defaults to true (the column default); the zero value of the
+	// Go struct used to store every API-created playbook as disabled.
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
 	playbook := &models.ResponsePlaybook{
-		Name:        req.Name,
-		Description: req.Description,
-		Category:    req.Category,
-		Commands:    marshalCommands(req.Commands),
-		CreatedBy:   getCurrentUserID(c),
+		Name:           req.Name,
+		Description:    req.Description,
+		Category:       req.Category,
+		Commands:       marshalCommands(steps),
+		Enabled:        enabled,
+		SeverityFilter: req.SeverityFilter,
+		RulePattern:    req.RulePattern,
+		MITRETechiques: req.MitreTechniques,
+		CreatedBy:      getCurrentUserID(c),
 	}
 
 	if err := h.automationService.CreatePlaybook(c.Request().Context(), playbook); err != nil {
+		h.logger.WithError(err).Error("CreatePlaybook failed")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create playbook")
 	}
 
@@ -94,6 +124,63 @@ func (h *AutomationHandlers) CreatePlaybook(c echo.Context) error {
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		},
 	})
+}
+
+// UpdatePlaybook replaces an existing playbook definition (steps, order,
+// parameters, failure policy, enabled state and matching metadata).
+func (h *AutomationHandlers) UpdatePlaybook(c echo.Context) error {
+	playbookID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid playbook ID")
+	}
+	var req CreatePlaybookRequest
+	if err := c.Bind(&req); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
+	}
+	ctx := c.Request().Context()
+	existing, err := h.automationService.GetPlaybookByID(ctx, playbookID)
+	if err != nil {
+		return errorResponse(c, http.StatusNotFound, "NOT_FOUND", "Playbook not found")
+	}
+	steps, err := h.validatePlaybookRequest(c, &req)
+	if err != nil {
+		return h.playbookValidationError(c, err)
+	}
+
+	existing.Name = req.Name
+	existing.Description = req.Description
+	existing.Category = req.Category
+	existing.Commands = marshalCommands(steps)
+	if req.Enabled != nil {
+		existing.Enabled = *req.Enabled
+	}
+	existing.SeverityFilter = req.SeverityFilter
+	existing.RulePattern = req.RulePattern
+	existing.MITRETechiques = req.MitreTechniques
+
+	if err := h.automationService.UpdatePlaybook(ctx, existing); err != nil {
+		h.logger.WithError(err).Error("UpdatePlaybook failed")
+		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update playbook")
+	}
+	updated, err := h.automationService.GetPlaybookByID(ctx, playbookID)
+	if err != nil {
+		updated = existing
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Playbook updated successfully",
+		"data":    updated,
+		"meta": ResponseMeta{
+			RequestID: c.Response().Header().Get(echo.HeaderXRequestID),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		},
+	})
+}
+
+func (h *AutomationHandlers) playbookValidationError(c echo.Context, err error) error {
+	if errors.Is(err, response.ErrFreeTextCommandNotAllowed) {
+		return errorResponse(c, http.StatusForbidden, "FREE_TEXT_COMMAND_REQUIRES_ADMIN", err.Error())
+	}
+	return errorResponse(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
 }
 
 // DeletePlaybook deletes a playbook
@@ -129,22 +216,30 @@ func (h *AutomationHandlers) ListPlaybooks(c echo.Context) error {
 	var err error
 
 	if alertID != "" {
-		// Get playbook suggestions for a specific alert
-		alertUUID, err := uuid.Parse(alertID)
-		if err != nil {
+		// Playbooks recommended for a Sigma alert, best first.
+		alertUUID, perr := uuid.Parse(alertID)
+		if perr != nil {
 			return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid alert ID")
 		}
-
-		suggestions, err := h.automationService.GetSuggestions(ctx, alertUUID)
-		if err != nil {
-			return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to get suggestions")
+		if h.alerts == nil {
+			return errorResponse(c, http.StatusServiceUnavailable, "UNAVAILABLE", "Alert source unavailable")
 		}
-
-		// Convert suggestions to playbooks
-		for _, suggestion := range suggestions {
-			playbook, err := h.automationService.GetPlaybookByID(ctx, suggestion.PlaybookID)
-			if err == nil {
-				playbooks = append(playbooks, playbook)
+		alert, aerr := h.alerts.GetSigmaAlert(ctx, alertUUID)
+		if aerr != nil {
+			return errorResponse(c, http.StatusNotFound, "NOT_FOUND", "Alert not found")
+		}
+		all, lerr := h.automationService.ListPlaybooks(ctx, repository.PlaybookFilter{Limit: 500})
+		if lerr != nil {
+			return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to fetch playbooks")
+		}
+		rules, _ := h.automationService.ListRules(ctx)
+		byID := make(map[string]*models.ResponsePlaybook, len(all))
+		for _, p := range all {
+			byID[p.ID.String()] = p
+		}
+		for _, sg := range response.Suggest(alert, all, rules, 10) {
+			if p := byID[sg.PlaybookID]; p != nil {
+				playbooks = append(playbooks, p)
 			}
 		}
 	} else {
@@ -199,21 +294,28 @@ func (h *AutomationHandlers) ListAutomationRules(c echo.Context) error {
 	var rules []*models.AutomationRule
 	var err error
 
-	if alertIDStr != "" {
-		// Get rules matching a specific alert
-		alertID, err := uuid.Parse(alertIDStr)
-		if err != nil {
+	rules, err = h.automationService.ListRules(ctx)
+	if err == nil && alertIDStr != "" {
+		// Only the enabled rules whose conditions match this Sigma alert.
+		alertID, perr := uuid.Parse(alertIDStr)
+		if perr != nil {
 			return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid alert ID")
 		}
-
-		alert, err := h.automationService.GetAlertByID(ctx, alertID)
-		if err != nil {
+		if h.alerts == nil {
+			return errorResponse(c, http.StatusServiceUnavailable, "UNAVAILABLE", "Alert source unavailable")
+		}
+		alert, aerr := h.alerts.GetSigmaAlert(ctx, alertID)
+		if aerr != nil {
 			return errorResponse(c, http.StatusNotFound, "NOT_FOUND", "Alert not found")
 		}
-
-		rules, err = h.automationService.GetMatchingRules(ctx, alert)
-	} else {
-		rules, err = h.automationService.ListRules(ctx)
+		matching := make([]*models.AutomationRule, 0, len(rules))
+		for _, r := range rules {
+			if cond, ok := response.ParseConditions(r.TriggerConditions); ok && r.Enabled && cond.Matches(alert) {
+				r.MatchesCurrentAlert = true
+				matching = append(matching, r)
+			}
+		}
+		rules = matching
 	}
 
 	if err != nil {
@@ -230,14 +332,90 @@ func (h *AutomationHandlers) ListAutomationRules(c echo.Context) error {
 	})
 }
 
-// CreateAutomationRule creates a new automation rule
+// AutomationRuleRequest is the body for creating/updating an automation rule.
+type AutomationRuleRequest struct {
+	Name              string          `json:"name"`
+	Description       string          `json:"description"`
+	TriggerConditions json.RawMessage `json:"trigger_conditions"`
+	PlaybookID        uuid.UUID       `json:"playbook_id"`
+	Priority          *int            `json:"priority"`
+	AutoExecute       *bool           `json:"auto_execute"`
+	CooldownMinutes   *int            `json:"cooldown_minutes"`
+	Enabled           *bool           `json:"enabled"`
+}
+
+const (
+	defaultRuleCooldown = 30
+	maxRuleCooldown     = 1440
+)
+
+// validateRuleRequest checks a rule's fields; partial=true for updates.
+func (h *AutomationHandlers) validateRuleRequest(ctx context.Context, req *AutomationRuleRequest, partial bool) error {
+	req.Name = strings.TrimSpace(req.Name)
+	req.Description = strings.TrimSpace(req.Description)
+	if !partial || req.Name != "" {
+		if req.Name == "" || len(req.Name) > 255 {
+			return errors.New("rule name is required (max 255 characters)")
+		}
+	}
+	if !partial || len(req.TriggerConditions) > 0 {
+		if _, ok := response.ParseConditions(req.TriggerConditions); !ok {
+			return errors.New("trigger conditions must set at least one of severity, rule_patterns or min_risk_score")
+		}
+	}
+	if !partial || req.PlaybookID != uuid.Nil {
+		if req.PlaybookID == uuid.Nil {
+			return errors.New("a target playbook is required")
+		}
+		if _, err := h.automationService.GetPlaybookByID(ctx, req.PlaybookID); err != nil {
+			return errors.New("target playbook not found")
+		}
+	}
+	if req.Priority != nil && (*req.Priority < 1 || *req.Priority > 100) {
+		return errors.New("priority must be between 1 and 100")
+	}
+	if req.CooldownMinutes != nil && (*req.CooldownMinutes < 0 || *req.CooldownMinutes > maxRuleCooldown) {
+		return fmt.Errorf("cooldown must be between 0 and %d minutes", maxRuleCooldown)
+	}
+	return nil
+}
+
+// CreateAutomationRule creates a new automation rule.
 func (h *AutomationHandlers) CreateAutomationRule(c echo.Context) error {
-	var rule models.AutomationRule
-	if err := c.Bind(&rule); err != nil {
+	var req AutomationRuleRequest
+	if err := c.Bind(&req); err != nil {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 	}
+	ctx := c.Request().Context()
+	if err := h.validateRuleRequest(ctx, &req, false); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+	}
+	cond, _ := response.ParseConditions(req.TriggerConditions)
+	condJSON, _ := json.Marshal(cond)
+	rule := models.AutomationRule{
+		Name:              req.Name,
+		Description:       req.Description,
+		TriggerConditions: condJSON,
+		PlaybookID:        req.PlaybookID,
+		Priority:          5,
+		CooldownMinutes:   defaultRuleCooldown,
+		Enabled:           true,
+	}
+	if req.Priority != nil {
+		rule.Priority = *req.Priority
+	}
+	if req.CooldownMinutes != nil {
+		rule.CooldownMinutes = *req.CooldownMinutes
+	}
+	if req.AutoExecute != nil {
+		rule.AutoExecute = *req.AutoExecute
+	}
+	if req.Enabled != nil {
+		rule.Enabled = *req.Enabled
+	}
 
-	if err := h.automationService.CreateRule(c.Request().Context(), &rule); err != nil {
+	if err := h.automationService.CreateRule(ctx, &rule); err != nil {
+		h.logger.WithError(err).Error("CreateAutomationRule failed")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to create rule")
 	}
 
@@ -258,18 +436,21 @@ func (h *AutomationHandlers) UpdateAutomationRule(c echo.Context) error {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid rule ID")
 	}
 
-	var req models.AutomationRule
+	var req AutomationRuleRequest
 	if err := c.Bind(&req); err != nil {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 	}
 
 	ctx := c.Request().Context()
+	if err := h.validateRuleRequest(ctx, &req, true); err != nil {
+		return errorResponse(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+	}
 	rule, err := h.automationService.GetRuleByID(ctx, ruleID)
 	if err != nil {
 		return errorResponse(c, http.StatusNotFound, "NOT_FOUND", "Rule not found")
 	}
 
-	// Update fields
+	// Only fields present in the request change.
 	if req.Name != "" {
 		rule.Name = req.Name
 	}
@@ -277,14 +458,24 @@ func (h *AutomationHandlers) UpdateAutomationRule(c echo.Context) error {
 		rule.Description = req.Description
 	}
 	if len(req.TriggerConditions) > 0 {
-		rule.TriggerConditions = req.TriggerConditions
+		cond, _ := response.ParseConditions(req.TriggerConditions)
+		rule.TriggerConditions, _ = json.Marshal(cond)
 	}
 	if req.PlaybookID != uuid.Nil {
 		rule.PlaybookID = req.PlaybookID
 	}
-	rule.Priority = req.Priority
-	rule.AutoExecute = req.AutoExecute
-	rule.Enabled = req.Enabled
+	if req.Priority != nil {
+		rule.Priority = *req.Priority
+	}
+	if req.AutoExecute != nil {
+		rule.AutoExecute = *req.AutoExecute
+	}
+	if req.CooldownMinutes != nil {
+		rule.CooldownMinutes = *req.CooldownMinutes
+	}
+	if req.Enabled != nil {
+		rule.Enabled = *req.Enabled
+	}
 
 	if err := h.automationService.UpdateRule(ctx, rule); err != nil {
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update rule")
@@ -340,8 +531,9 @@ func (h *AutomationHandlers) ToggleAutomationRule(c echo.Context) error {
 		return errorResponse(c, http.StatusNotFound, "NOT_FOUND", "Rule not found")
 	}
 
+	// Only the enabled flag changes. (auto_execute used to mirror it, so
+	// enabling a manual-only rule silently made it auto-executing.)
 	rule.Enabled = req.Enabled
-	rule.AutoExecute = req.Enabled // auto_execute mirrors enabled: disabled rule never auto-fires
 
 	if err := h.automationService.UpdateRule(ctx, rule); err != nil {
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to update rule")
@@ -350,60 +542,6 @@ func (h *AutomationHandlers) ToggleAutomationRule(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Rule state updated successfully",
 		"data":    rule,
-		"meta": ResponseMeta{
-			RequestID: c.Response().Header().Get(echo.HeaderXRequestID),
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		},
-	})
-}
-
-// ExecutePlaybookForAlert executes a playbook for a specific alert
-func (h *AutomationHandlers) ExecutePlaybookForAlert(c echo.Context) error {
-	alertID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid alert ID")
-	}
-
-	var req ExecutePlaybookRequest
-	if err := c.Bind(&req); err != nil {
-		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
-	}
-
-	execution, err := h.automationService.ExecutePlaybookForAlert(
-		c.Request().Context(),
-		req.PlaybookID,
-		alertID,
-		getCurrentUserID(c),
-	)
-
-	if err != nil {
-		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to execute playbook")
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Playbook execution started",
-		"data":    execution,
-		"meta": ResponseMeta{
-			RequestID: c.Response().Header().Get(echo.HeaderXRequestID),
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		},
-	})
-}
-
-// GetPlaybookSuggestions retrieves playbook suggestions for an alert
-func (h *AutomationHandlers) GetPlaybookSuggestions(c echo.Context) error {
-	alertID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid alert ID")
-	}
-
-	suggestions, err := h.automationService.GetSuggestions(c.Request().Context(), alertID)
-	if err != nil {
-		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to fetch suggestions")
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"data": suggestions,
 		"meta": ResponseMeta{
 			RequestID: c.Response().Header().Get(echo.HeaderXRequestID),
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -448,52 +586,58 @@ func (h *AutomationHandlers) GetAutomationOptimizations(c echo.Context) error {
 	})
 }
 
-// GetPlaybookExecutions retrieves execution history for an alert
-func (h *AutomationHandlers) GetPlaybookExecutions(c echo.Context) error {
-	_, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid alert ID")
-	}
-
-	// This would typically call a repository method
-	// For now, return empty list as placeholder
-	executions := []*models.PlaybookExecution{}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"data": executions,
-		"meta": ResponseMeta{
-			RequestID: c.Response().Header().Get(echo.HeaderXRequestID),
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		},
-	})
+var validPlaybookCategories = map[string]bool{
+	"containment": true, "investigation": true, "remediation": true, "validation": true,
 }
 
-// validatePlaybookRequest validates playbook creation request
-func (h *AutomationHandlers) validatePlaybookRequest(req *CreatePlaybookRequest) error {
-	if req.Name == "" {
-		return errors.New("playbook name is required")
-	}
+var validSeverities = map[string]bool{
+	"critical": true, "high": true, "medium": true, "low": true, "informational": true,
+}
 
-	if req.Category == "" {
-		return errors.New("playbook category is required")
-	}
+var mitreTechniqueRe = regexp.MustCompile(`^T\d{4}(\.\d{3})?$`)
 
-	if len(req.Commands) == 0 {
-		return errors.New("at least one command is required")
+// validatePlaybookRequest validates and normalises a create/update request.
+func (h *AutomationHandlers) validatePlaybookRequest(c echo.Context, req *CreatePlaybookRequest) ([]models.PlaybookCommand, error) {
+	req.Name = strings.TrimSpace(req.Name)
+	req.Description = strings.TrimSpace(req.Description)
+	req.Category = strings.ToLower(strings.TrimSpace(req.Category))
+	req.RulePattern = strings.TrimSpace(req.RulePattern)
+	if req.Name == "" || len(req.Name) > 255 {
+		return nil, errors.New("playbook name is required (max 255 characters)")
 	}
-
-	// Validate commands
-	for _, cmd := range req.Commands {
-		if cmd.Type == "" {
-			return errors.New("command type is required")
+	if !validPlaybookCategories[req.Category] {
+		return nil, errors.New("category must be containment, investigation, remediation or validation")
+	}
+	sev := make([]string, 0, len(req.SeverityFilter))
+	for _, v := range req.SeverityFilter {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if !validSeverities[v] {
+			return nil, fmt.Errorf("invalid severity %q", v)
 		}
-
-		if cmd.Timeout <= 0 {
-			return errors.New("timeout must be greater than 0")
+		sev = append(sev, v)
+	}
+	req.SeverityFilter = sev
+	if len(req.RulePattern) > 500 {
+		return nil, errors.New("rule pattern is too long")
+	}
+	if req.RulePattern != "" {
+		if _, err := regexp.Compile("(?i)" + req.RulePattern); err != nil {
+			return nil, fmt.Errorf("rule pattern is not a valid regular expression: %v", err)
 		}
 	}
+	techs := make([]string, 0, len(req.MitreTechniques))
+	for _, t := range req.MitreTechniques {
+		t = strings.ToUpper(strings.TrimSpace(t))
+		if !mitreTechniqueRe.MatchString(t) {
+			return nil, fmt.Errorf("invalid MITRE technique %q (expected e.g. T1059 or T1059.001)", t)
+		}
+		techs = append(techs, t)
+	}
+	req.MitreTechniques = techs
 
-	return nil
+	user := getCurrentUser(c)
+	isAdmin := user != nil && userHasRole(user, "admin")
+	return response.ValidateDefinition(c.Request().Context(), req.Commands, h.scripts, isAdmin)
 }
 
 // marshalCommands converts playbook commands to JSON

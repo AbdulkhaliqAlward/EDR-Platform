@@ -179,12 +179,8 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	alerts.POST("/:id/resolve", handlers.ResolveAlert, handlers.RequirePermission("alerts", "write"))
 	alerts.POST("/:id/notes", handlers.AddAlertNote, handlers.RequirePermission("alerts", "write"))
 	alerts.DELETE("/:id", handlers.DeleteAlert, handlers.RequirePermission("alerts", "delete"))
-	// Automation endpoints for alerts
-	if handlers.AutomationHandlers != nil {
-		alerts.POST("/:id/execute-playbook", handlers.AutomationHandlers.ExecutePlaybookForAlert, handlers.RequirePermission("alerts", "write"))
-		alerts.GET("/:id/suggestions", handlers.AutomationHandlers.GetPlaybookSuggestions, handlers.RequirePermission("alerts", "read"))
-		alerts.GET("/:id/executions", handlers.AutomationHandlers.GetPlaybookExecutions, handlers.RequirePermission("alerts", "read"))
-	}
+	// Playbook runs/suggestions for alerts live under /automation (the gateway
+	// routes /api/v1/alerts/* to the sigma engine, not here).
 
 	// ── SIEM / external forwarding destinations (not in-app alert or event UIs) ──
 	siem := protected.Group("/siem")
@@ -304,7 +300,15 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 		automation.GET("/playbooks", handlers.AutomationHandlers.ListPlaybooks, handlers.RequirePermission("responses", "read"))
 		automation.POST("/playbooks", handlers.AutomationHandlers.CreatePlaybook, handlers.RequirePermission("responses", "execute"))
 		automation.GET("/playbooks/:id", handlers.AutomationHandlers.GetPlaybook, handlers.RequirePermission("responses", "read"))
+		automation.PUT("/playbooks/:id", handlers.AutomationHandlers.UpdatePlaybook, handlers.RequirePermission("responses", "execute"))
 		automation.DELETE("/playbooks/:id", handlers.AutomationHandlers.DeletePlaybook, handlers.RequirePermission("responses", "execute"))
+		// Server-side response engine (see handlers_response.go)
+		automation.GET("/catalog", handlers.GetResponseCatalog, handlers.RequirePermission("responses", "read"))
+		automation.GET("/alerts/:id/suggestions", handlers.GetAlertSuggestions, handlers.RequirePermission("responses", "read"))
+		automation.GET("/playbooks/:id/preview", handlers.PreviewPlaybookRun, handlers.RequirePermission("responses", "read"))
+		automation.POST("/playbooks/:id/run", handlers.RunPlaybook, handlers.RequirePermission("responses", "execute"))
+		automation.GET("/executions", handlers.ListPlaybookExecutions, handlers.RequirePermission("responses", "read"))
+		automation.GET("/executions/:id", handlers.GetPlaybookExecution, handlers.RequirePermission("responses", "read"))
 		// Automation Rules
 		automation.GET("/rules", handlers.AutomationHandlers.ListAutomationRules, handlers.RequirePermission("responses", "read"))
 		automation.POST("/rules", handlers.AutomationHandlers.CreateAutomationRule, handlers.RequirePermission("responses", "execute"))

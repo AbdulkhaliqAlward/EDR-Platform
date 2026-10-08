@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import ReactDOM from 'react-dom';
 import { X } from 'lucide-react';
 
@@ -31,10 +31,14 @@ export function Modal({
     closeOnOverlayClick = true,
     footer,
 }: ModalProps) {
-    // Handle escape key
+    const dialogRef = useRef<HTMLDivElement>(null);
+
+    // Handle escape key (only the topmost of nested modals closes)
     useEffect(() => {
         const handleEscape = (e: KeyboardEvent) => {
             if (e.key === 'Escape' && isOpen) {
+                const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
+                if (dialogs.length > 0 && dialogs[dialogs.length - 1] !== dialogRef.current) return;
                 onClose();
             }
         };
@@ -68,6 +72,7 @@ export function Modal({
 
             {/* Modal Content */}
             <div
+                ref={dialogRef}
                 className={`relative w-full ${sizeClasses[size]} bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700/80 rounded-2xl shadow-2xl dark:shadow-slate-900/60 animate-slide-up-fade overflow-hidden flex flex-col max-h-[90vh]`}
                 role="dialog"
                 aria-modal="true"

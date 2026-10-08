@@ -4,6 +4,7 @@ import { AlertContextPanel } from '../../components/automation/AlertContextPanel
 import { UserAssistant } from '../../components/automation/UserAssistant';
 import { Settings, TrendingUp, Clock, AlertTriangle, Plus, Activity, Power, X, CheckCircle, Trash2, Zap, Target } from 'lucide-react';
 import { automationApi } from '../../api/client';
+import { apiErrorMessage } from '../../api/apiError';
 
 interface AutomationRule {
   id: string;
@@ -21,8 +22,8 @@ interface AutomationRule {
 }
 
 // Structured trigger conditions. This is exactly the shape evaluated by the
-// connection-manager AutomationService.evaluateAdvancedConditions; all set
-// conditions must match (AND).
+// connection-manager response engine (internal/response/conditions.go) against
+// new Sigma alerts; all set conditions must match (AND).
 interface TriggerConditions {
   severity?: string[];
   rule_patterns?: string[];
@@ -102,6 +103,8 @@ export function AutomationRulesPage() {
   const [selectedPlaybookId, setSelectedPlaybookId] = useState('');
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [autoExecute, setAutoExecute] = useState(true);
+  const [rulePriority, setRulePriority] = useState('5');
+  const [ruleCooldown, setRuleCooldown] = useState('30');
 
   useEffect(() => {
     // Extract alert context from navigation state
@@ -217,6 +220,8 @@ export function AutomationRulesPage() {
     setIsCreatingRule(true);
     setEditingRuleId(null);
     setAutoExecute(true);
+    setRulePriority('5');
+    setRuleCooldown('30');
     resetConditionForm();
     if (alertContext?.alertDetails?.ruleName) {
       setNewRuleName(`Response Rule for: ${alertContext.alertDetails.ruleName}`);
@@ -242,6 +247,8 @@ export function AutomationRulesPage() {
       setEditingLegacyCondition(legacyConditionText(rule.triggerConditions));
     }
     setAutoExecute(rule.autoExecute);
+    setRulePriority(String(rule.priority));
+    setRuleCooldown(String(rule.cooldownMinutes));
     if (rule.playbookId) setSelectedPlaybookId(rule.playbookId);
   };
 
@@ -287,6 +294,16 @@ export function AutomationRulesPage() {
       alert("Add at least one condition (severity, rule name, or minimum risk score).");
       return;
     }
+    const priority = Number(rulePriority);
+    if (!Number.isInteger(priority) || priority < 1 || priority > 100) {
+      alert("Priority must be a whole number between 1 (highest) and 100.");
+      return;
+    }
+    const cooldown = Number(ruleCooldown);
+    if (!Number.isInteger(cooldown) || cooldown < 0 || cooldown > 1440) {
+      alert("Cooldown must be a whole number of minutes between 0 and 1440.");
+      return;
+    }
 
     setIsSaving(true);
 
@@ -295,27 +312,28 @@ export function AutomationRulesPage() {
         name: newRuleName.trim(),
         description: `Triggers when: ${describeConditions(conditions)}`,
         trigger_conditions: conditions,
-        priority: 5,
+        priority,
+        cooldown_minutes: cooldown,
         auto_execute: autoExecute,
-        enabled: true,
         playbook_id: selectedPlaybookId || undefined
       };
-      
+
       if (editingRuleId) {
+        // Enabled state is changed only by the toggle, never by an edit.
         await automationApi.updateRule(editingRuleId, payload);
         alert(`Automation Rule "${newRuleName}" updated successfully!`);
       } else {
-        await automationApi.createRule(payload);
+        await automationApi.createRule({ ...payload, enabled: true });
         alert(`Automation Rule "${newRuleName}" created successfully!`);
       }
-      
+
       setIsSaving(false);
       setIsCreatingRule(false);
-      
+
       fetchRules();
     } catch (err) {
       console.error("Failed to save rule:", err);
-      alert("Failed to save rule. Please try again.");
+      alert(`Failed to save rule: ${apiErrorMessage(err)}`);
       setIsSaving(false);
     }
   };
@@ -707,10 +725,33 @@ export function AutomationRulesPage() {
                 </select>
               </div>
 
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Priority</label>
+                  <input
+                    type="number" min={1} max={100}
+                    value={rulePriority}
+                    onChange={(e) => setRulePriority(e.target.value)}
+                    className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-2.5 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">1 runs first when several rules match.</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Cooldown (minutes)</label>
+                  <input
+                    type="number" min={0} max={1440}
+                    value={ruleCooldown}
+                    onChange={(e) => setRuleCooldown(e.target.value)}
+                    className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-4 py-2.5 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">Per endpoint: the rule fires at most once per window on the same host.</p>
+                </div>
+              </div>
+
               <div className="flex items-center gap-3 pt-2">
-                <input 
-                  type="checkbox" 
-                  id="autoExec" 
+                <input
+                  type="checkbox"
+                  id="autoExec"
                   checked={autoExecute}
                   onChange={(e) => setAutoExecute(e.target.checked)}
                   className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" 
