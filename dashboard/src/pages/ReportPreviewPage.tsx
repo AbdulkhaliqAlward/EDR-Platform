@@ -88,7 +88,7 @@ export default function ReportPreviewPage() {
             }
             const parsed: PreviewPayload = JSON.parse(raw);
             setPayload(parsed);
-            document.title = `Report Preview — EDR Platform`;
+            document.title = `Report Preview — MITRAS`;
             
             // Optional: clean up localStorage so it doesn't persist forever
             // localStorage.removeItem(SESSION_KEY);
@@ -153,7 +153,7 @@ export default function ReportPreviewPage() {
                         </div>
                         <div className="min-w-0">
                             <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                                EDR Report Preview
+                                MITRAS Report Preview
                             </p>
                             {generatedAt && (
                                 <p className="text-xs text-slate-400 dark:text-slate-500 flex items-center gap-1">

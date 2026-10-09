@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/edr-platform/sigma-engine/internal/analytics"
-	"github.com/edr-platform/sigma-engine/internal/automation"
 	"github.com/edr-platform/sigma-engine/internal/application/alert"
 	"github.com/edr-platform/sigma-engine/internal/application/baselines"
 	"github.com/edr-platform/sigma-engine/internal/application/detection"
 	"github.com/edr-platform/sigma-engine/internal/application/scoring"
+	"github.com/edr-platform/sigma-engine/internal/automation"
 	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/cache"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/database"
@@ -27,7 +27,7 @@ import (
 type EventLoopConfig struct {
 	Workers         int           `yaml:"workers"`          // Detection worker count
 	EventBuffer     int           `yaml:"event_buffer"`     // Event channel buffer size
-	AlertBuffer     int           `yaml:"alert_buffer"`     // Alert channel buffer size
+	AlertBuffer     int           `yaml:"alert_buffer"`     // Legacy setting; delivery concurrency is bounded by Workers
 	StatsInterval   time.Duration `yaml:"stats_interval"`   // Statistics reporting interval
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"` // Graceful shutdown timeout
 }
@@ -149,16 +149,16 @@ func (sc *suppressionCache) size() int {
 	return len(sc.entries)
 }
 
-// EventLoop coordinates Kafka consumer, detection engine, and alert producer.
+// EventLoop coordinates Kafka consumer, detection engine, and durable alert delivery.
 type EventLoop struct {
 	consumer        *EventConsumer
-	producer        *AlertProducer
+	producer        durableProducer
 	detectionEngine *detection.SigmaDetectionEngine
 	alertGenerator  *alert.AlertGenerator
 	config          EventLoopConfig
 	metrics         *EventLoopMetrics
 	suppression     *suppressionCache
-	alertWriter     *database.AlertWriter // Writes alerts to PostgreSQL
+	alertWriter     durableAlertWriter // Writes alerts to PostgreSQL
 
 	// lineageCache stores the contextual snapshot of every observed process
 	// for a short TTL window. It is hydrated BEFORE Sigma rule evaluation so
@@ -193,10 +193,10 @@ type EventLoop struct {
 
 	lineageCacheErrors atomic.Uint64 // monotonic counter for cache write failures
 
-	alertChan chan *domain.Alert
-	doneChan  chan struct{}
+	doneChan chan struct{}
 
-	running atomic.Bool
+	running  atomic.Bool
+	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	workerWG sync.WaitGroup // detection workers only (shutdown ordering)
 }
@@ -219,9 +219,6 @@ func NewEventLoop(
 	if config.Workers <= 0 {
 		config.Workers = 4
 	}
-	if config.AlertBuffer <= 0 {
-		config.AlertBuffer = 5000 // S6 FIX: increased from 500 to 5000
-	}
 
 	return &EventLoop{
 		consumer:        consumer,
@@ -231,7 +228,6 @@ func NewEventLoop(
 		config:          config,
 		metrics:         &EventLoopMetrics{},
 		suppression:     newSuppressionCache(defaultSuppressionTTL),
-		alertChan:       make(chan *domain.Alert, config.AlertBuffer),
 		lineageWriteCh:  make(chan *cache.ProcessLineageEntry, lineageWriteBuffer),
 		doneChan:        make(chan struct{}),
 	}
@@ -284,22 +280,26 @@ func (el *EventLoop) Start(ctx context.Context) error {
 		return nil
 	}
 	el.running.Store(true)
+	ctx, el.cancel = context.WithCancel(ctx)
 
 	logger.Infof("Starting event loop with %d detection workers", el.config.Workers)
 
 	// Start Kafka consumer
 	if err := el.consumer.Start(ctx); err != nil {
+		el.cancel()
+		el.running.Store(false)
 		return err
 	}
 
 	// Start Kafka producer
 	if err := el.producer.Start(ctx); err != nil {
+		el.cancel()
+		el.running.Store(false)
 		el.consumer.Stop()
 		return err
 	}
 
-	// Start detection workers (tracked separately so shutdown can wait for
-	// them before closing the alert channel they send on).
+	// Start bounded parallel detection/delivery workers.
 	for i := 0; i < el.config.Workers; i++ {
 		el.workerWG.Add(1)
 		go el.detectionWorker(ctx, i)
@@ -314,10 +314,6 @@ func (el *EventLoop) Start(ctx context.Context) error {
 		logger.Infof("Lineage write workers started (%d workers, buffer=%d)", lineageWriteWorkers, lineageWriteBuffer)
 	}
 
-	// Start alert publisher
-	el.wg.Add(1)
-	go el.alertPublisher(ctx)
-
 	// Start stats reporter
 	el.wg.Add(1)
 	go el.statsReporter(ctx)
@@ -326,7 +322,7 @@ func (el *EventLoop) Start(ctx context.Context) error {
 	el.wg.Add(1)
 	go el.suppressionCleaner(ctx)
 
-	logger.Infof("Event loop started (alert suppression: %v window, alert buffer: %d)", el.suppression.ttl, el.config.AlertBuffer)
+	logger.Infof("Event loop started (alert suppression: %v window, durable delivery workers: %d)", el.suppression.ttl, el.config.Workers)
 	return nil
 }
 
@@ -344,8 +340,14 @@ func (el *EventLoop) detectionWorker(ctx context.Context, workerID int) {
 	eventChan := el.consumer.Events()
 
 	for event := range eventChan {
-		el.processOneEvent(event) // recovers its own panics
-		// Commit the Kafka offset only now that the event is fully handled.
+		for !el.processOneEvent(ctx, event) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+		// Only durable detections (or events with no match) can advance offsets.
 		event.Ack()
 	}
 
@@ -357,8 +359,11 @@ func (el *EventLoop) detectionWorker(ctx context.Context, workerID int) {
 // Execution order:
 //  1. Hydrate the lineage cache for process events (when configured)
 //  2. Run Sigma rule evaluation (DetectAggregated)
-//  3. If matched → generate alert → risk score → correlate → suppression → alertChan
-func (el *EventLoop) processOneEvent(event *domain.LogEvent) {
+//  3. If matched → generate alert → bounded enrichment → durable delivery
+func (el *EventLoop) processOneEvent(ctx context.Context, event *domain.LogEvent) (handled bool) {
+	if ctx.Err() != nil {
+		return false
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Errorf("Panic recovered while processing event: %v", r)
@@ -417,7 +422,9 @@ func (el *EventLoop) processOneEvent(event *domain.LogEvent) {
 					Event:       event,
 					AgentID:     agentStr,
 				}
-				scoreOut, scoreErr := el.riskScorer.Score(context.Background(), scoringInput)
+				scoreCtx, scoreCancel := context.WithTimeout(ctx, 2*time.Second)
+				scoreOut, scoreErr := el.riskScorer.Score(scoreCtx, scoringInput)
+				scoreCancel()
 				if scoreErr != nil {
 					logger.Warnf("RiskScorer error for rule %s: %v — using base score", baseAlert.RuleID, scoreErr)
 				} else {
@@ -433,12 +440,17 @@ func (el *EventLoop) processOneEvent(event *domain.LogEvent) {
 					}
 					logger.Debugf("Risk scored alert %s: score=%d fp=%.2f lineage=%s",
 						baseAlert.RuleID, scoreOut.RiskScore, scoreOut.FalsePositiveRisk,
-						scoreOut.Snapshot.LineageSuspicion)
+						func() string {
+							if scoreOut.Snapshot != nil {
+								return scoreOut.Snapshot.LineageSuspicion
+							}
+							return "unknown"
+						}())
 				}
 			}
 			// ─────────────────────────────────────────────────────────────────────
 
-			// Correlation runs in the alert publisher, after persistence, so
+			// Correlation runs after durable delivery, so
 			// edges reference the canonical (database) alert ID.
 
 			// Suppression identity: rule + agent + the category-specific
@@ -446,40 +458,13 @@ func (el *EventLoop) processOneEvent(event *domain.LogEvent) {
 			// destination, file or key) from one process is not merged.
 			suppressKey := baseAlert.RuleID + "|" + agentStr + "|" + suppressionSubject(event)
 
-			if el.suppression.shouldSuppress(suppressKey) {
+			if el.suppression.contains(suppressKey) {
 				atomic.AddUint64(&el.metrics.AlertsSuppressed, 1)
 			} else {
-				// S6 FIX: Use 5s backpressure instead of silent drop.
-				// Security alerts are too valuable to silently discard.
-				select {
-				case el.alertChan <- baseAlert:
-				case <-time.After(5 * time.Second):
-					// Backpressure fallback path:
-					// Try direct best-effort publish/write so alerts are not lost when the
-					// alert channel is saturated.
-					// The database assigns the canonical identity, so when a
-					// writer exists the alert goes to its retrying queue; Kafka
-					// is used directly only when there is no writer.
-					fallbackOK := false
-					if el.alertWriter != nil {
-						if err := el.alertWriter.Write(baseAlert); err == nil {
-							fallbackOK = true
-						}
-					} else if err := el.producer.Publish(baseAlert); err == nil {
-						atomic.AddUint64(&el.metrics.AlertsPublished, 1)
-						fallbackOK = true
-					}
-					if !fallbackOK {
-						atomic.AddUint64(&el.metrics.ProcessingErrors, 1)
-						atomic.AddUint64(&el.metrics.AlertsDropped, 1)
-						metricsPkg.DefaultMetrics.RecordError("alert_drop_channel_saturated")
-						logger.Errorf("Alert channel full for 5s — ALERT DROPPED: rule=%s agent=%s", baseAlert.RuleID, agentStr)
-					} else {
-						atomic.AddUint64(&el.metrics.AlertFallbackUsed, 1)
-						metricsPkg.DefaultMetrics.RecordError("alert_fallback_delivery_used")
-						logger.Warnf("Alert channel saturated; used fallback delivery path: rule=%s agent=%s", baseAlert.RuleID, agentStr)
-					}
+				if !el.deliverAlert(ctx, baseAlert) {
+					return false
 				}
+				el.suppression.shouldSuppress(suppressKey)
 			}
 		}
 	}
@@ -491,74 +476,54 @@ func (el *EventLoop) processOneEvent(event *domain.LogEvent) {
 	el.metrics.AverageLatencyMs = (el.metrics.AverageLatencyMs*0.9 + latency*0.1)
 	el.metrics.AverageRuleMatchingMs = (el.metrics.AverageRuleMatchingMs*0.9 + matchLatency*0.1)
 	el.metrics.mu.Unlock()
+	return true
 }
 
-// alertPublisher sends alerts to Kafka producer AND writes to PostgreSQL.
-// Drains alertChan until it is closed, then exits.
-func (el *EventLoop) alertPublisher(ctx context.Context) {
-	defer el.wg.Done()
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Errorf("Panic recovered in alertPublisher: %v", r)
-		}
-	}()
-	logger.Debug("Alert publisher started")
-
-	for alert := range el.alertChan {
-		// 1. Persist first (dedup + retries). The writer sets alert.ID to the
-		//    canonical database ID — the new row's or the merged alert's.
-		//    A dedicated context lets alerts drained at shutdown still persist.
-		isNew := true
-		if el.alertWriter != nil {
-			pctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_, created, err := el.alertWriter.Persist(pctx, alert)
-			cancel()
-			if err != nil {
-				atomic.AddUint64(&el.metrics.AlertDBQueueFailures, 1)
-				metricsPkg.DefaultMetrics.RecordError("alert_db_persist_failed")
-			} else {
-				isNew = created
-			}
-		}
-
-		// 2. Correlate new alerts under their canonical ID and store the
-		//    resulting summary on the alert row.
-		if isNew && el.alertCorrelator != nil {
-			if rels := el.alertCorrelator.CorrelateAlert(alert); len(rels) > 0 {
-				logger.Debugf("Correlations for alert %s: %d edge(s)", alert.ID, len(rels))
-				if el.alertWriter != nil {
-					if summary, ok := alert.ContextSnapshot["correlation"]; ok {
-						cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-						if err := el.alertWriter.UpdateCorrelationSummary(cctx, alert.ID, map[string]any{"correlation": summary}); err != nil {
-							logger.Warnf("Failed to store correlation summary for alert %s: %v", alert.ID, err)
-						}
-						cancel()
-					}
-				}
-			}
-		}
-
-		// 3. Publish to Kafka (same canonical ID as the database row)
-		if err := el.producer.Publish(alert); err != nil {
-			logger.Warnf("Failed to publish alert to Kafka: %v", err)
-			atomic.AddUint64(&el.metrics.ProcessingErrors, 1)
-			atomic.AddUint64(&el.metrics.AlertPublishFailures, 1)
-			metricsPkg.DefaultMetrics.RecordError("alert_publish_failed")
-		} else {
-			atomic.AddUint64(&el.metrics.AlertsPublished, 1)
-		}
-
-		if el.escalations != nil {
-			el.escalations.TrackAlert(alert)
-		}
-		// Response playbooks run once per incident: a deduplicated repeat of
-		// an open alert must not re-trigger automated actions.
-		if el.playbooks != nil && isNew {
-			el.playbooks.ExecuteForAlert(ctx, alert)
+// deliverAlert applies backpressure only to matched events. No response or offset
+// acknowledgement occurs before database persistence and broker acknowledgement.
+func (el *EventLoop) deliverAlert(ctx context.Context, alert *domain.Alert) bool {
+	var persist func(context.Context) (bool, error)
+	if el.alertWriter != nil {
+		persist = func(ctx context.Context) (bool, error) {
+			_, created, err := el.alertWriter.Persist(ctx, alert)
+			return created, err
 		}
 	}
-
-	logger.Debug("Alert publisher stopped (alert channel closed)")
+	isNew, err := persistAndPublish(ctx, persist, func(ctx context.Context) error {
+		return el.producer.PublishSync(ctx, alert)
+	}, func(stage string, err error) {
+		atomic.AddUint64(&el.metrics.ProcessingErrors, 1)
+		if stage == "persist" {
+			atomic.AddUint64(&el.metrics.AlertDBQueueFailures, 1)
+		} else {
+			atomic.AddUint64(&el.metrics.AlertPublishFailures, 1)
+		}
+		metricsPkg.DefaultMetrics.RecordError("alert_" + stage + "_retry")
+		logger.Warnf("Alert delivery retry stage=%s rule=%s: %v", stage, alert.RuleID, err)
+	})
+	if err != nil {
+		return false
+	}
+	atomic.AddUint64(&el.metrics.AlertsPublished, 1)
+	if isNew && el.alertCorrelator != nil {
+		el.alertCorrelator.CorrelateAlert(alert)
+		if el.alertWriter != nil {
+			if summary, ok := alert.ContextSnapshot["correlation"]; ok {
+				cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				if err := el.alertWriter.UpdateCorrelationSummary(cctx, alert.ID, map[string]any{"correlation": summary}); err != nil {
+					logger.Warnf("Failed to store correlation summary for alert %s: %v", alert.ID, err)
+				}
+				cancel()
+			}
+		}
+	}
+	if el.escalations != nil {
+		el.escalations.TrackAlert(alert)
+	}
+	if el.playbooks != nil && isNew {
+		el.playbooks.ExecuteForAlert(ctx, alert)
+	}
+	return true
 }
 
 // statsReporter periodically reports statistics.
@@ -653,10 +618,7 @@ func (el *EventLoop) suppressionCleaner(ctx context.Context) {
 // Stop gracefully stops the event loop with correct drain ordering:
 //  1. Stop consumer (closes eventChan → workers drain remaining events)
 //  2. Wait for detection workers to finish (they exit when eventChan is closed)
-//  3. Close alertChan → alert publisher drains remaining alerts
-//  4. Signal statsReporter to stop
-//  5. Wait for publisher + statsReporter to finish
-//  6. Stop Kafka producer (flushes final batch)
+//  3. Flush acknowledged source offsets, stop helpers and close the producer.
 func (el *EventLoop) Stop() error {
 	if !el.running.Load() {
 		return nil
@@ -679,6 +641,12 @@ func (el *EventLoop) Stop() error {
 	case <-workersDone:
 	case <-time.After(el.config.ShutdownTimeout):
 		logger.Warn("Shutdown timeout waiting for detection workers; unacknowledged events will be re-delivered")
+		if el.cancel != nil {
+			el.cancel()
+		}
+	}
+	if el.cancel != nil {
+		el.cancel()
 	}
 
 	// Step 3: commit acknowledged offsets and close the reader.
@@ -686,19 +654,9 @@ func (el *EventLoop) Stop() error {
 		logger.Errorf("Error closing consumer: %v", err)
 	}
 
-	// Step 4: no worker can send any more (or they timed out). Closing the
-	// alert channel lets the publisher drain and exit. (Previously this
-	// happened after a fixed 2s sleep, racing workers still sending → panic
-	// "send on closed channel" and lost alerts.)
-	select {
-	case <-workersDone:
-		close(el.alertChan)
-	default:
-		logger.Warn("Detection workers still running; alert channel left open to avoid a send-on-closed panic")
-	}
 	close(el.doneChan) // stats reporter and other helpers exit
 
-	// Step 5: wait for the publisher and helpers with timeout.
+	// Wait for background helpers with timeout.
 	allDone := make(chan struct{})
 	go func() {
 		el.wg.Wait()
@@ -707,7 +665,7 @@ func (el *EventLoop) Stop() error {
 
 	select {
 	case <-allDone:
-		logger.Info("All workers and publisher stopped")
+		logger.Info("All workers and helpers stopped")
 	case <-time.After(el.config.ShutdownTimeout):
 		logger.Warn("Shutdown timeout, some goroutines may still be running")
 	}

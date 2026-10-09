@@ -7,7 +7,7 @@ const (
 	EventCategoryUnknown            EventCategory = "unknown"
 	EventCategoryProcessCreation    EventCategory = "process_creation"
 	EventCategoryProcessTermination EventCategory = "process_termination"
-	EventCategoryNetworkConnection EventCategory = "network_connection"
+	EventCategoryNetworkConnection  EventCategory = "network_connection"
 	EventCategoryFileEvent          EventCategory = "file_event"
 	EventCategoryFileAccess         EventCategory = "file_access"
 	EventCategoryFileDelete         EventCategory = "file_delete"
@@ -31,7 +31,7 @@ const (
 	EventCategoryProcessTampering   EventCategory = "process_tampering"
 	EventCategoryAuthentication     EventCategory = "authentication"
 	EventCategoryServiceCreation    EventCategory = "service_creation"
-	EventCategoryScheduledTask     EventCategory = "scheduled_task"
+	EventCategoryScheduledTask      EventCategory = "scheduled_task"
 	EventCategoryUserManagement     EventCategory = "user_management"
 	EventCategoryGroupManagement    EventCategory = "group_management"
 	EventCategoryPowerShell         EventCategory = "powershell"
@@ -57,7 +57,7 @@ var EventIDToCategory = map[int]EventCategory{
 	12:   EventCategoryRegistryEvent,
 	13:   EventCategoryRegistrySet,
 	14:   EventCategoryRegistryRename,
-	15:   EventCategoryFileAccess,
+	15:   EventCategoryCreateStreamHash,
 	17:   EventCategoryPipeCreated,
 	18:   EventCategoryPipeConnected,
 	19:   EventCategoryWMIEvent,
@@ -116,4 +116,3 @@ func ExpandCategories(primary EventCategory) []EventCategory {
 		return []EventCategory{primary}
 	}
 }
-

@@ -20,7 +20,7 @@ export default function SignaturesManagement() {
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
     useEffect(() => {
-        document.title = 'Signatures — System | EDR Platform';
+        document.title = 'Signatures — System | MITRAS';
     }, []);
 
     const statsQuery = useQuery({

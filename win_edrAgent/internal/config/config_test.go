@@ -45,8 +45,8 @@ func TestDefaultConfig(t *testing.T) {
 	}
 
 	// Filtering defaults
-	if len(cfg.Filtering.ExcludeProcesses) == 0 {
-		t.Error("should have default excluded processes")
+	if len(cfg.Filtering.ExcludeProcesses) != 0 {
+		t.Error("default process-name exclusions hide masquerading")
 	}
 }
 

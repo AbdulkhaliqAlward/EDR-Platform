@@ -108,24 +108,33 @@ func (s *WebSocketServer) run() {
 			logger.Infof("WebSocket client disconnected (total: %d)", len(s.clients))
 
 		case alert := <-s.broadcast:
-			s.mu.RLock()
-			for client := range s.clients {
-				if s.matchesFilters(alert, client.filters) {
-					msg := AlertStreamMessage{
-						Type: "alert",
-						Data: toAlertResponse(alert),
-					}
-					data, _ := json.Marshal(msg)
-					select {
-					case client.send <- data:
-					default:
-						// Client buffer full, skip
-					}
-				}
-			}
-			s.mu.RUnlock()
+			s.broadcastToClients(alert)
 		}
 	}
+}
+
+func (s *WebSocketServer) broadcastToClients(alert *database.Alert) {
+	// Serialize once per update, not once per connected analyst.
+	data, err := json.Marshal(AlertStreamMessage{Type: "alert", Data: toAlertResponse(alert)})
+	if err != nil {
+		logger.Warnf("Cannot encode alert stream update: %v", err)
+		return
+	}
+	s.mu.RLock()
+	for client := range s.clients {
+		client.mu.RLock()
+		matches := s.matchesFilters(alert, client.filters)
+		client.mu.RUnlock()
+		if matches {
+			select {
+			case client.send <- data:
+			default:
+				// Force reconnect/reconciliation instead of silently losing live updates.
+				client.conn.Close()
+			}
+		}
+	}
+	s.mu.RUnlock()
 }
 
 // heartbeat sends periodic ping messages.
@@ -186,7 +195,12 @@ func (s *WebSocketServer) BroadcastAlert(alert *database.Alert) {
 	select {
 	case s.broadcast <- alert:
 	default:
-		logger.Warn("Broadcast channel full, dropping alert")
+		logger.Warn("Broadcast channel full; reconnecting clients to reconcile persisted alerts")
+		s.mu.RLock()
+		for client := range s.clients {
+			client.conn.Close()
+		}
+		s.mu.RUnlock()
 	}
 }
 

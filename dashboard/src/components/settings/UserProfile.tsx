@@ -30,7 +30,7 @@ export default function UserProfile() {
     });
 
     useEffect(() => {
-        document.title = 'Profile — System | EDR Platform';
+        document.title = 'Profile — System | MITRAS';
     }, []);
 
     /** Prefer live API; fallback to JWT/session cache */

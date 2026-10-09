@@ -73,6 +73,49 @@ func TestPowerShellScriptBlockParsing(t *testing.T) {
 	}
 }
 
+func TestPowerShellBackpressureRetainsRecordUntilReceiverReady(t *testing.T) {
+	ch := make(chan *event.Event)
+	c := NewPowerShellCollector(ch, testLogger(t), t.TempDir(), false)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- c.handleContext(ctx, psChannelWindows, sample4104) }()
+	select {
+	case <-done:
+		t.Fatal("record dropped before a receiver became available")
+	case <-time.After(2200 * time.Millisecond):
+	}
+	select {
+	case e := <-ch:
+		if e.Type != event.EventTypePowerShell {
+			t.Fatal("wrong event type")
+		}
+	case <-ctx.Done():
+		t.Fatal("record was not retained")
+	}
+	if !<-done {
+		t.Fatal("delivered record should allow bookmark advancement")
+	}
+}
+
+func TestPowerShellCancelledHandoffRemainsReplayable(t *testing.T) {
+	ch := make(chan *event.Event, 1)
+	ch <- &event.Event{}
+	c := NewPowerShellCollector(ch, testLogger(t), t.TempDir(), false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if c.handleContext(ctx, psChannelWindows, sample4104) {
+		t.Fatal("cancelled handoff must not advance bookmark")
+	}
+	<-ch
+	if !c.handleContext(context.Background(), psChannelWindows, sample4104) {
+		t.Fatal("replay failed")
+	}
+	if len(ch) != 1 {
+		t.Fatal("cancelled record was incorrectly deduplicated")
+	}
+}
+
 // End-to-end on a real host: PowerShell auto-logs "suspicious" script blocks
 // even without the Script Block Logging policy, so a block mentioning
 // GetProcAddress must arrive through the subscription. Skips when the host

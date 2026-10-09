@@ -996,7 +996,7 @@ function statusBucket(st: AlertStats['by_status'] | undefined, key: string): num
 
 export function ManagedSecurityOverviewPage() {
     useEffect(() => {
-        document.title = 'MDR — Operations overview | EDR Platform';
+        document.title = 'MDR — Operations overview | MITRAS';
     }, []);
 
     const alertStatsQ = useQuery({
@@ -1425,7 +1425,7 @@ const MANAGED_INCIDENTS_PAGE_SIZE = 25;
 
 export function ManagedSecurityIncidentsPage() {
     useEffect(() => {
-        document.title = 'MDR — Incident queue | EDR Platform';
+        document.title = 'MDR — Incident queue | MITRAS';
     }, []);
 
     const queryClient = useQueryClient();
@@ -3011,7 +3011,7 @@ export function ManagementStaffPage() {
 }
 
 export function ManagementAccountPage() {
-    useEffect(() => { document.title = 'Account | EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Account | MITRAS'; }, []);
 
     const meQ = useQuery({
         queryKey: ['auth', 'me'],
@@ -3101,7 +3101,7 @@ export function ManagementBillingPage() {
 
 
 export function ManagementRmmPage() {
-    useEffect(() => { document.title = 'Remote Management | EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Remote Management | MITRAS'; }, []);
     const cmdQ = useQuery({ queryKey: ['commands-rmm'], queryFn: () => commandsApi.list({ limit: 50, offset: 0 }), staleTime: 30_000, refetchInterval: 30_000 });
     const cmds = cmdQ.data?.data ?? [];
     return (
@@ -3150,7 +3150,7 @@ export function ManagementRmmPage() {
 }
 
 export function ManagementVulnPage() {
-    useEffect(() => { document.title = 'Vulnerability Management | EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Vulnerability Management | MITRAS'; }, []);
     return <VulnerabilityManagementPage />;
 }
 

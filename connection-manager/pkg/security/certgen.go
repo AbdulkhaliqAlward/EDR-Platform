@@ -311,7 +311,7 @@ func generateServerCert(
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName:   "edr-connection-manager",
-			Organization: []string{"EDR Platform"},
+			Organization: []string{"MITRAS"},
 		},
 		NotBefore: now.Add(-5 * time.Minute), // Clock skew tolerance
 		NotAfter:  now.AddDate(1, 0, 0),      // 1 year validity
@@ -437,8 +437,8 @@ func EnsureCA(caCertPath, caKeyPath string, logger *logrus.Logger) (bool, error)
 	caTemplate := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName:   "EDR Platform Root CA",
-			Organization: []string{"EDR Platform"},
+			CommonName:   "MITRAS Root CA",
+			Organization: []string{"MITRAS"},
 			Country:      []string{"SA"},
 		},
 		NotBefore:             now.Add(-5 * time.Minute), // Clock skew tolerance

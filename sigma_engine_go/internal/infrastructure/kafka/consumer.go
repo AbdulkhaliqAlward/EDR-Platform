@@ -5,6 +5,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,8 +27,8 @@ type ConsumerConfig struct {
 	MaxWait        time.Duration `yaml:"max_wait"`
 	CommitInterval time.Duration `yaml:"commit_interval"`
 	StartOffset    int64         `yaml:"start_offset"` // -1 = latest, -2 = earliest
-	// S1 FIX: Number of parallel reader goroutines that call ReadMessage().
-	// More readers = better partition-level parallelism for multi-partition topics.
+	// Legacy config key: fetching is serialized to register offsets in order.
+	// Parallel detection is configured separately by the event loop.
 	ConsumerReaders int `yaml:"consumer_readers"`
 }
 
@@ -42,7 +43,7 @@ func DefaultConsumerConfig() ConsumerConfig {
 		MaxWait:         5 * time.Second,
 		CommitInterval:  1 * time.Second,
 		StartOffset:     kafka.LastOffset, // -1 = latest
-		ConsumerReaders: 2,                // S1 FIX: default 2 parallel readers
+		ConsumerReaders: 1,                // ordered offset registration
 	}
 }
 
@@ -131,16 +132,14 @@ func (c *EventConsumer) Start(ctx context.Context) error {
 	}
 	c.running.Store(true)
 
-	readers := c.config.ConsumerReaders
-	if readers <= 0 {
-		readers = 2
-	}
+	// Fetch and registration must be ordered. Parallel detection remains enabled.
+	readers := 1
 
 	logger.Infof("Starting Kafka consumer: brokers=%v topic=%s group=%s readers=%d",
 		c.config.Brokers, c.config.Topic, c.config.GroupID, readers)
 
-	// S1 FIX: Spawn multiple consumeLoop goroutines for partition-parallel reads.
-	// segmentio/kafka-go Reader.ReadMessage() is concurrency-safe in consumer-group mode.
+	// One goroutine owns ordered registration and channel closure. Detection
+	// workers still evaluate events concurrently.
 	for i := 0; i < readers; i++ {
 		c.wg.Add(1)
 		go c.consumeLoop(ctx, i)
@@ -149,10 +148,10 @@ func (c *EventConsumer) Start(ctx context.Context) error {
 	return nil
 }
 
-// consumeLoop is the main consumer loop. Multiple instances may run in parallel (S1).
+// consumeLoop owns fetching, ordered offset registration, and channel closure.
 func (c *EventConsumer) consumeLoop(ctx context.Context, readerID int) {
 	defer c.wg.Done()
-	// Only close channels once across all goroutines (first to exit wins).
+	// The single reader is the sole channel producer.
 	defer c.closeOnce.Do(func() {
 		close(c.eventChan)
 		close(c.errorChan)
@@ -172,6 +171,18 @@ func (c *EventConsumer) consumeLoop(ctx context.Context, readerID int) {
 			logger.Info("Consumer stop requested, shutting down...")
 			return
 		default:
+			// A stalled write must not retain an unbounded offset queue while
+			// other workers finish later messages. Leave excess events in Kafka.
+			if c.tracker.inFlight() >= 4096 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-c.doneChan:
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+				continue
+			}
 			// FetchMessage does NOT commit: offsets are committed by ack()
 			// once the event has been processed. (ReadMessage auto-committed
 			// on read, so a crash or a drop lost events silently.)
@@ -255,6 +266,10 @@ func (c *EventConsumer) parseMessage(msg kafka.Message) (*domain.LogEvent, error
 	var rawData map[string]interface{}
 	if err := json.Unmarshal(msg.Value, &rawData); err != nil {
 		return nil, err
+	}
+
+	if rawData == nil {
+		return nil, fmt.Errorf("event payload must be a JSON object")
 	}
 
 	// Add Kafka metadata

@@ -107,7 +107,7 @@ export default function IntegrationsTab({ settings, onChange, onSave, saved }: I
 
                     <div className="pt-3 border-t border-slate-100 dark:border-slate-700">
                         <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                            EDR will send a <code className="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded text-xs">POST</code> request
+                            MITRAS will send a <code className="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded text-xs">POST</code> request
                             with a JSON body for each triggered alert. Ensure the endpoint is publicly accessible or reachable from this server.
                         </p>
                     </div>
@@ -143,7 +143,7 @@ export default function IntegrationsTab({ settings, onChange, onSave, saved }: I
                         </div>
                     </div>
                     <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                        The EDR bot must be invited to your channel: <code className="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded text-xs">/invite @edr-platform</code>
+                        Invite your configured integration bot to the channel (for example): <code className="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded text-xs">/invite @edr-platform</code>
                     </p>
                 </div>
             </div>

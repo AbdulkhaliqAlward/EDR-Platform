@@ -36,7 +36,8 @@ type QualityConfig struct {
 	// When enabled, confidence may be reduced for missing/weak context.
 	EnableContextValidation bool
 
-	// Filtering enables global whitelisting to suppress common legitimate activity.
+	// Filtering is retained for config compatibility. Global image allowlists
+	// cannot safely suppress behavioral detections; use rule-scoped exceptions.
 	Filtering FilteringConfig
 
 	// RuleQuality enables rule-level load filtering.
@@ -93,6 +94,10 @@ func NewSigmaDetectionEngine(
 	quality QualityConfig,
 ) *SigmaDetectionEngine {
 	_ = fieldCache
+
+	if quality.Filtering.Enabled && len(quality.Filtering.WhitelistedProcesses) > 0 {
+		logger.Warn("Global process allowlist suppression is disabled for behavioral detection; use audited rule-scoped exceptions")
+	}
 
 	// Normalize defaults defensively
 	if quality.MinConfidence <= 0 {
@@ -206,13 +211,6 @@ func (e *SigmaDetectionEngine) Detect(event *domain.LogEvent) []*domain.Detectio
 		return nil
 	}
 
-	// Global whitelist suppression (reduces false positives on common legitimate activity)
-	if e.isWhitelistedEvent(event) {
-		// Treat as processed with no detections.
-		e.stats.RecordProcessingTime(time.Since(start))
-		return nil
-	}
-
 	// Step 1: Get candidate rules by logsource (O(1) lookup)
 	candidates := e.getCandidateRules(event)
 	e.stats.RecordCandidateCount(len(candidates))
@@ -293,12 +291,6 @@ func (e *SigmaDetectionEngine) DetectAggregated(event *domain.LogEvent) *domain.
 		return result // Empty result (no matches)
 	}
 
-	// Global whitelist suppression
-	if e.isWhitelistedEvent(event) {
-		e.stats.RecordProcessingTime(time.Since(start))
-		return result // Empty result (no matches)
-	}
-
 	// Step 1: Get ALL candidate rules by logsource (O(1) lookup)
 	candidates := e.getCandidateRules(event)
 	e.stats.RecordCandidateCount(len(candidates))
@@ -324,13 +316,9 @@ func (e *SigmaDetectionEngine) DetectAggregated(event *domain.LogEvent) *domain.
 	// Sampled diagnostic log (every 5000 events) for debugging
 	evtCount := e.stats.TotalEvents()
 	if evtCount%5000 == 1 {
-		cmdLine := event.GetStringField("data.command_line")
-		executable := event.GetStringField("data.executable")
-		name := event.GetStringField("data.name")
-		logger.Infof("🔍 DIAG [evt#%d] cat=%s prod=%s svc=%s | candidates=%d matches=%d | cmdline=%q executable=%q name=%q",
+		logger.Debugf("Detection sample event=%d category=%s product=%s service=%s candidates=%d matches=%d",
 			evtCount, event.Category, event.Product, event.Service,
-			len(candidates), matchCount,
-			truncate(cmdLine, 80), truncate(executable, 80), truncate(name, 40))
+			len(candidates), matchCount)
 	}
 
 	return result
@@ -479,89 +467,6 @@ func (e *SigmaDetectionEngine) getStringField(event *domain.LogEvent, fieldName 
 		return "", false
 	}
 	return str, true
-}
-
-// isWhitelistedEvent returns true if the event matches any configured whitelist rule.
-// Whitelisting is evaluated before rule matching to reduce false positives and CPU load.
-//
-// NOTE (RC-2 fix): User and ParentImage whitelisting have been removed.
-//   - User whitelist (e.g. "NT AUTHORITY\SYSTEM") was far too broad: it silently
-//     dropped the vast majority of Windows process events before Sigma rules could
-//     evaluate them, creating massive detection blind spots.
-//   - ParentImage whitelist (e.g. explorer.exe, services.exe) suppressed events
-//     for legitimate attacker parent processes (many tools are spawned by explorer
-//     or services). Sigma rules themselves contain fine-grained filter selections
-//     that handle false positive suppression per-rule.
-func (e *SigmaDetectionEngine) isWhitelistedEvent(event *domain.LogEvent) bool {
-	if !e.quality.Filtering.Enabled || event == nil {
-		return false
-	}
-
-	// Process image whitelist only (exact binary paths like svchost.exe, lsass.exe)
-	if image, ok := e.getStringField(event, "Image"); ok {
-		if matchAnyPathPattern(image, e.quality.Filtering.WhitelistedProcesses) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// matchAnyPathPattern returns true if `path` matches any of the whitelist
-// patterns. This is a pure-string implementation that works identically on
-// Linux (Docker) and Windows, unlike filepath.Match/filepath.Clean which
-// interpret backslashes differently across platforms.
-//
-// Supported pattern syntax:
-//   - Leading `*\` or `*\\` — suffix match ("ends with").
-//   - Trailing `*`           — prefix match ("starts with").
-//   - No wildcards            — exact match.
-func matchAnyPathPattern(path string, patterns []string) bool {
-	if path == "" || len(patterns) == 0 {
-		return false
-	}
-	// Normalize: lowercase + unify separators to backslash for Windows paths
-	normalized := strings.ToLower(strings.ReplaceAll(path, "/", "\\"))
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		pLower := strings.ToLower(strings.ReplaceAll(p, "/", "\\"))
-
-		// Wildcard at both ends: *text* — contains
-		if strings.HasPrefix(pLower, "*") && strings.HasSuffix(pLower, "*") {
-			core := strings.Trim(pLower, "*")
-			if core != "" && strings.Contains(normalized, core) {
-				return true
-			}
-			continue
-		}
-
-		// Leading wildcard: *\thing.exe — suffix / ends-with
-		if strings.HasPrefix(pLower, "*") {
-			suffix := pLower[1:] // strip leading *
-			if strings.HasSuffix(normalized, suffix) {
-				return true
-			}
-			continue
-		}
-
-		// Trailing wildcard: C:\Program Files\Microsoft* — prefix / starts-with
-		if strings.HasSuffix(pLower, "*") {
-			prefix := pLower[:len(pLower)-1] // strip trailing *
-			if strings.HasPrefix(normalized, prefix) {
-				return true
-			}
-			continue
-		}
-
-		// Exact match (no wildcards)
-		if normalized == pLower {
-			return true
-		}
-	}
-	return false
 }
 
 func levelRank(level string) int {

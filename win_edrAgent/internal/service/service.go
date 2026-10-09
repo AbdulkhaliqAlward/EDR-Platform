@@ -30,8 +30,8 @@ import (
 
 const (
 	ServiceName        = "EDRAgent"
-	ServiceDisplayName = "EDR Agent Service"
-	ServiceDescription = "Endpoint Detection and Response Agent - Collects security events and provides threat protection"
+	ServiceDisplayName = "MITRAS Agent Service"
+	ServiceDescription = "MITRAS Endpoint Detection and Response Agent - Collects security events and provides threat protection"
 
 )
 

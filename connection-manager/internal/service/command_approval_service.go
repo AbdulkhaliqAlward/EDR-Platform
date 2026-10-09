@@ -221,7 +221,7 @@ func (s *commandApprovalServiceImpl) IssueChallenge(ctx context.Context, req App
 
 	if err := s.email.Send(EmailMessage{
 		To:      s.verifyAddress,
-		Subject: "EDR Platform — manual command approval required",
+		Subject: "MITRAS — manual command approval required",
 		HTML:    renderApprovalEmailHTML(code, s.challengeTTL, req),
 		Text:    renderApprovalEmailText(code, s.challengeTTL, req),
 	}); err != nil {
@@ -394,7 +394,7 @@ func renderApprovalEmailHTML(code string, ttl time.Duration, req ApprovalRequest
       <table role="presentation" width="520" cellpadding="0" cellspacing="0"
              style="background:#111827;border:1px solid #1f2937;border-radius:12px;padding:24px">
         <tr><td>
-          <p style="margin:0 0 12px 0;font-size:13px;letter-spacing:.18em;color:#f59e0b;text-transform:uppercase">EDR Platform · Manual Approval</p>
+          <p style="margin:0 0 12px 0;font-size:13px;letter-spacing:.18em;color:#f59e0b;text-transform:uppercase">MITRAS · Manual Approval</p>
           <h1 style="margin:0 0 8px 0;font-size:20px;color:#f8fafc">A manual endpoint command needs your approval</h1>
           <p style="margin:0 0 16px 0;font-size:14px;color:#cbd5e1">
             Operator <strong style="color:#f8fafc">%s</strong> is trying to run
@@ -424,7 +424,7 @@ func renderApprovalEmailText(code string, ttl time.Duration, req ApprovalRequest
 		user = req.UserID.String()
 	}
 	return fmt.Sprintf(
-		"EDR Platform — manual command approval\n\n"+
+		"MITRAS — manual command approval\n\n"+
 			"Operator: %s\n"+
 			"From IP:  %s\n"+
 			"Action:   %s on agent %s\n"+

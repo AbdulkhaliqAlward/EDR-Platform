@@ -63,6 +63,20 @@ func TestPersist_DedupReturnsExistingID(t *testing.T) {
 	assert.Equal(t, a.ID, id)
 }
 
+func TestPersistBroadcastsMergedEvidenceOnlyAfterSuccessfulWrite(t *testing.T) {
+	repo := &upsertFake{mergeTo: "canonical"}
+	w := newTestWriter(repo)
+	var ids []string
+	w.SetOnAlertPersisted(func(a *Alert) { ids = append(ids, a.ID) })
+	_, _, err := w.Persist(context.Background(), &domain.Alert{ID: "incoming", RuleID: "rule"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"canonical"}, ids)
+	repo.errs = []error{nil, &pgconn.PgError{Code: "22P02"}}
+	_, _, err = w.Persist(context.Background(), &domain.Alert{ID: "invalid", RuleID: "rule"})
+	require.Error(t, err)
+	require.Len(t, ids, 1, "failed writes must never be broadcast")
+}
+
 func TestPersist_RetriesTransientErrors(t *testing.T) {
 	repo := &upsertFake{errs: []error{errors.New("connection reset"), errors.New("timeout")}}
 	w := newTestWriter(repo)

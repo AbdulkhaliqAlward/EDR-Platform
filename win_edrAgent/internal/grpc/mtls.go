@@ -203,7 +203,7 @@ func (m *CertManager) GenerateCSR(agentID, hostname string) ([]byte, error) {
 	template := x509.CertificateRequest{
 		Subject: pkix.Name{
 			CommonName:         agentID,
-			Organization:       []string{"EDR Platform"},
+			Organization:       []string{"MITRAS"},
 			OrganizationalUnit: []string{"Agents"},
 		},
 		DNSNames: []string{hostname},

@@ -200,7 +200,7 @@ function evalEndpointCompliance(a: Agent): {
 
 /** Live data from connection-manager + sigma (self-hosted). */
 export function DashboardServicePage() {
-    useEffect(() => { document.title = 'Service Summary \u2014 EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Service Summary \u2014 MITRAS'; }, []);
 
     const cmdQ = useQuery({ queryKey: ['commands-stats'], queryFn: () => commandsApi.stats(), staleTime: 30_000 });
     const alertQ = useQuery({ queryKey: ['sigma-stats-alerts'], queryFn: () => statsApi.alerts(), staleTime: 30_000 });
@@ -312,7 +312,7 @@ const ENDPOINT_DASHBOARD_AGENT_LIMIT = 500;
 
 /** Executive endpoint fleet dashboard — registry stats + sampled live connectivity + risk excerpt. */
 export function DashboardEndpointPage() {
-    useEffect(() => { document.title = 'Endpoint Summary — EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Endpoint Summary — MITRAS'; }, []);
 
     const statsQ = useQuery({ queryKey: ['agents-stats'], queryFn: () => agentsApi.stats(), staleTime: 30_000, refetchInterval: 30_000 });
     const riskQ = useQuery({ queryKey: ['endpoint-risk'], queryFn: () => alertsApi.endpointRisk(), staleTime: 60_000, refetchInterval: 60_000, retry: 1 });
@@ -721,7 +721,7 @@ export function DashboardAuditRedirect() {
 
 
 export function DashboardEndpointCompliancePage() {
-    useEffect(() => { document.title = 'Endpoint Compliance | EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Endpoint Compliance | MITRAS'; }, []);
 
     const statsQ = useQuery({
         queryKey: ['agents', 'stats', 'compliance-context'],
@@ -1124,7 +1124,7 @@ export function DashboardRoiPage() {
 }
 
 export function DashboardReportsPage() {
-    useEffect(() => { document.title = 'Reports \u2014 EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Reports \u2014 MITRAS'; }, []);
 
     // Import the new Report Generator
     const ReportGenerator = React.lazy(() => import('../../components/reports').then(m => ({ default: m.ReportGenerator })));
@@ -1145,7 +1145,7 @@ export function DashboardReportsPage() {
 
 // Legacy Reports Page (kept for reference)
 export function _LegacyDashboardReportsPage() {
-    useEffect(() => { document.title = 'Reports \u2014 EDR Platform'; }, []);
+    useEffect(() => { document.title = 'Reports \u2014 MITRAS'; }, []);
 
     const agentsQ = useQuery({ queryKey: ['agents-stats'], queryFn: () => agentsApi.stats(), staleTime: 30_000 });
     const cmdQ = useQuery({ queryKey: ['commands-stats'], queryFn: () => commandsApi.stats(), staleTime: 30_000 });

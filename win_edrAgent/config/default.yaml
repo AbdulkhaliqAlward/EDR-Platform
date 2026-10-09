@@ -75,19 +75,8 @@ response:
   process_prevention_mode: "auto_kill_then_override"
 
 filtering:
-  # Processes to exclude from monitoring
-  exclude_processes:
-    - "csrss.exe"
-    - "services.exe"
-    - "smss.exe"
-    - "wininit.exe"
-    - "winlogon.exe"
-    - "dwm.exe"
-    - "taskhostw.exe"
-    - "RuntimeBroker.exe"
-    - "SearchIndexer.exe"
-    - "MsMpEng.exe"
-    - "agent.exe"
+  # Retain all process names: masquerading and signed binaries can be malicious.
+  exclude_processes: []
   
   # IP addresses/ranges to exclude
   exclude_ips:
@@ -103,8 +92,6 @@ filtering:
   
   # File paths to exclude
   exclude_paths:
-    - "C:\\Windows\\Temp"
-    - "C:\\Users\\*\\AppData\\Local\\Temp"
     - "C:\\Windows\\SoftwareDistribution"
   
   # File paths to always include (override exclude)

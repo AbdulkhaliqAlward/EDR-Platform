@@ -271,78 +271,25 @@ func DefaultConfig() *Config {
 		// Autonomous response defaults: used by installer.GenerateConfig (dashboard / zero-touch).
 		// Keep aligned with config/default.yaml response.* so first-time installs are fully armed.
 		Response: ResponseConfig{
-			AutoQuarantine:            true,
-			SignatureDBPath:           `C:\ProgramData\EDR\signatures.db`,
-			MaxScanBytes:              10 << 20, // 10 MiB
-			USBWatcher:                true,
-			SignatureAutoFetchEnabled: false,
-			SignatureAutoFetchInterval: 24 * time.Hour,
-			SignatureAutoFetchURL:     "",
-			SignatureAutoFetchLimit:   500,
-			SignatureAutoFetchForce:   false,
-			SignatureServerSyncEnabled:   false,
-			SignatureServerSyncURL:       "",
-			SignatureServerSyncInterval:  6 * time.Hour,
-			ProcessAutoKillEnabled:    true,
-			ProcessRulesPath:          `C:\ProgramData\EDR\process_prevention_rules.json`,
-			ProcessPreventionMode:     "auto_kill_then_override",
+			AutoQuarantine:              true,
+			SignatureDBPath:             `C:\ProgramData\EDR\signatures.db`,
+			MaxScanBytes:                10 << 20, // 10 MiB
+			USBWatcher:                  true,
+			SignatureAutoFetchEnabled:   false,
+			SignatureAutoFetchInterval:  24 * time.Hour,
+			SignatureAutoFetchURL:       "",
+			SignatureAutoFetchLimit:     500,
+			SignatureAutoFetchForce:     false,
+			SignatureServerSyncEnabled:  false,
+			SignatureServerSyncURL:      "",
+			SignatureServerSyncInterval: 6 * time.Hour,
+			ProcessAutoKillEnabled:      true,
+			ProcessRulesPath:            `C:\ProgramData\EDR\process_prevention_rules.json`,
+			ProcessPreventionMode:       "auto_kill_then_override",
 		},
 		Filtering: FilteringConfig{
-			ExcludeProcesses: []string{
-				// NOTE: svchost.exe is intentionally NOT excluded — it is a high-value
-				// detection target (MITRE T1036.004 Masquerading). Malware frequently
-				// masquerades as or is launched by svchost.
-
-				// Core OS session managers — pure kernel infrastructure, zero attack surface
-				"csrss.exe",
-				"smss.exe",
-				"wininit.exe",
-				"winlogon.exe",
-				"services.exe",
-				"lsaiso.exe", // Credential Guard (isolated LSA)
-
-				// Desktop / Shell infrastructure — noisy, not attack vectors
-				"dwm.exe",
-				"sihost.exe",
-				"taskhostw.exe",
-				"RuntimeBroker.exe",
-				"ApplicationFrameHost.exe",
-				"SystemSettings.exe",
-				"TextInputHost.exe",
-				"ctfmon.exe",
-				"fontdrvhost.exe",
-				"dashost.exe",
-
-				// Audio / Media — no security signal
-				"audiodg.exe",
-
-				// Search indexing — extremely noisy
-				"SearchIndexer.exe",
-				"SearchProtocolHost.exe",
-				"SearchFilterHost.exe",
-
-				// Windows Update / Telemetry — periodic noise
-				"wuauclt.exe",
-				"musnotification.exe",
-				"CompatTelRunner.exe",
-				"MicrosoftEdgeUpdate.exe",
-
-				// Security services (collecting their events is redundant)
-				"MsMpEng.exe",
-				"SecurityHealthService.exe",
-				"SgrmBroker.exe",
-
-				// COM infrastructure
-				"dllhost.exe",
-
-				// Print / background
-				"spoolsv.exe",
-				"backgroundTaskHost.exe",
-
-				// Self — agent's own executable
-				"edr-agent.exe",
-				"agent.exe",
-			},
+			// Process names are attacker-controlled; retain process evidence by default.
+			ExcludeProcesses: []string{},
 			ExcludeIPs: []string{
 				// Loopback / invalid
 				"127.0.0.0/8",
@@ -362,8 +309,6 @@ func DefaultConfig() *Config {
 				"\\DeviceAssociationService",
 			},
 			ExcludePaths: []string{
-				"C:\\Windows\\Temp",
-				"C:\\Users\\*\\AppData\\Local\\Temp",
 				"C:\\Windows\\SoftwareDistribution",
 				"C:\\Windows\\WinSxS",
 				"C:\\Windows\\assembly",

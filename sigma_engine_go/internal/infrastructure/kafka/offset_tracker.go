@@ -48,7 +48,8 @@ func (t *offsetTracker) add(msg kafka.Message) {
 	if _, dup := pq.byOff[msg.Offset]; dup {
 		return // re-delivery after a rebalance: already tracked
 	}
-	e := &trackedMsg{msg: msg}
+	// Keep commit metadata only, not multi-megabyte event payloads during an outage.
+	e := &trackedMsg{msg: kafka.Message{Topic: msg.Topic, Partition: msg.Partition, Offset: msg.Offset}}
 	pq.byOff[msg.Offset] = e
 	n := len(pq.entries)
 	if n == 0 || pq.entries[n-1].msg.Offset < msg.Offset {

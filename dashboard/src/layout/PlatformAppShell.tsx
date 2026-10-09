@@ -24,7 +24,7 @@ import {
     Sun,
     X,
 } from 'lucide-react';
-import ProtocolLogo from '../components/ProtocolLogo';
+import MitrasLogo from '../components/MitrasLogo';
 import { authApi, statsApi } from '../api/client';
 import { filterSettingsNavByRole } from '../components/settings/types';
 import {
@@ -427,12 +427,12 @@ export const PlatformAppShell = memo(function PlatformAppShell({ children }: { c
                     </button>
 
                     <Link to="/" className="flex items-center gap-2 shrink-0 mr-2 sm:mr-4" onClick={() => setMobileOpen(false)}>
-                        <ProtocolLogo className="w-9 h-9 shrink-0 drop-shadow-[0_0_8px_rgba(34,211,238,0.45)]" idPrefix="shell" />
+                        <MitrasLogo className="w-10 h-10 shrink-0 rounded-lg bg-white p-1" />
                         <div className="hidden sm:flex flex-col leading-tight">
                             <span className="text-[8px] font-bold tracking-[0.18em] uppercase" style={{ color: 'var(--xc-brand-original)' }}>
-                                Protocol Soft
+                                Endpoint Security
                             </span>
-                            <span className="text-sm font-extrabold tracking-tight text-white uppercase">EDR Platform</span>
+                            <span className="text-sm font-extrabold tracking-tight text-white uppercase">MITRAS</span>
                         </div>
                     </Link>
 

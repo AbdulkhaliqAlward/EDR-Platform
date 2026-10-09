@@ -70,7 +70,7 @@ function MetricCard({
 
 export default function ReliabilityHealth() {
     useEffect(() => {
-        document.title = 'Reliability Health — System | EDR Platform';
+        document.title = 'Reliability Health — System | MITRAS';
     }, []);
 
     const { data, isLoading, isFetching, refetch, error, dataUpdatedAt } = useQuery({

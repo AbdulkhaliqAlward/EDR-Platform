@@ -303,7 +303,7 @@ export default function SystemConfiguration() {
                             className={inputClass} placeholder="security-alerts"
                         />
                         <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                            The EDR bot must be invited to your channel: <code className="text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-500/10 px-1 rounded">/invite @edr-platform</code>
+                            Invite your configured integration bot to the channel (for example): <code className="text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-500/10 px-1 rounded">/invite @edr-platform</code>
                         </p>
                     </div>
                 </div>

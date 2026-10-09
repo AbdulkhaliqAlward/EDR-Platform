@@ -76,7 +76,7 @@ const SECTIONS: SectionConfig[] = [
         id: 'security',
         category: 'security',
         label: 'Security Tools',
-        description: 'Security solutions — Sysmon, EDR Agent, Trivy, Windows Defender',
+        description: 'Security solutions — Sysmon, MITRAS Agent, Trivy, Windows Defender',
         icon: Shield,
         accent: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
         dotColor: 'bg-emerald-500',

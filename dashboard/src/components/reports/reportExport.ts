@@ -1,3 +1,4 @@
+import mitrasLogo from '../../assets/mitras-logo.png?inline';
 /**
  * Report Export Functions
  * Export reports to various formats: PDF, Excel, Word, HTML, CSV, JSON
@@ -62,6 +63,7 @@ async function exportToExcel(data: ReportData, template: ReportTemplate): Promis
     const XLSX = await import('xlsx');
     
     const workbook = XLSX.utils.book_new();
+    workbook.Props = { Title: 'MITRAS Security Report', Author: 'MITRAS' };
     
     // Summary sheet
     const summaryData = [
@@ -127,7 +129,7 @@ async function exportToExcel(data: ReportData, template: ReportTemplate): Promis
     }
     
     // Download
-    const fileName = `EDR-Report-${template}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    const fileName = `MITRAS-Report-${template}-${new Date().toISOString().slice(0, 10)}.xlsx`;
     XLSX.writeFile(workbook, fileName);
 }
 
@@ -143,7 +145,7 @@ async function exportToWord(data: ReportData, template: ReportTemplate): Promise
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `EDR-Report-${template}-${new Date().toISOString().slice(0, 10)}.doc`;
+    a.download = `MITRAS-Report-${template}-${new Date().toISOString().slice(0, 10)}.doc`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -159,7 +161,7 @@ async function exportToHTML(data: ReportData, template: ReportTemplate): Promise
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `EDR-Report-${template}-${new Date().toISOString().slice(0, 10)}.html`;
+    a.download = `MITRAS-Report-${template}-${new Date().toISOString().slice(0, 10)}.html`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -172,7 +174,7 @@ async function exportToCSV(data: ReportData, template: ReportTemplate): Promise<
     const rows: string[][] = [];
     
     // Header
-    rows.push(['EDR Security Report']);
+    rows.push(['MITRAS Security Report']);
     rows.push(['Period:', `${data.period.from} to ${data.period.to}`]);
     rows.push(['Generated:', data.generatedAt]);
     rows.push([]);
@@ -232,7 +234,7 @@ async function exportToCSV(data: ReportData, template: ReportTemplate): Promise<
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `EDR-Report-${template}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `MITRAS-Report-${template}-${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -245,7 +247,7 @@ async function exportToJSON(data: ReportData, template: ReportTemplate): Promise
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `EDR-Report-${template}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `MITRAS-Report-${template}-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -375,6 +377,7 @@ function generateHTMLReport(data: ReportData, template: string, title: string, f
 </head>
 <body>
     <div class="header">
+        <img src="${mitrasLogo}" alt="MITRAS" style="width:140px;height:auto;background:white;border-radius:12px" />
         <h1>${title}</h1>
         <p class="meta">
             Generated: ${new Date(data.generatedAt).toLocaleString()}<br>
@@ -543,7 +546,7 @@ function generateHTMLReport(data: ReportData, template: string, title: string, f
     
     <div class="section no-print" style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
         <p style="color: #94a3b8; font-size: 12px; text-align: center;">
-            EDR Security Platform • Report ID: ${Date.now()} • Template: ${template}
+            MITRAS • Report ID: ${Date.now()} • Template: ${template}
         </p>
     </div>
 </body>

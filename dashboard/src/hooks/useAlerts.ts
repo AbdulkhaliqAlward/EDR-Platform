@@ -189,6 +189,12 @@ export function useAlerts(): UseAlertsReturn {
                 }
         });
 
+        let hasConnected = false;
+        const onConnectionChange = (connected: boolean) => {
+            setStreamConnected(connected);
+            if (connected && hasConnected) refresh.schedule();
+            if (connected) hasConnected = true;
+        };
         const stream = createAlertStream((alert) => {
             if (!alert?.id) return;
             if (!seenAlertIdsRef.current.has(alert.id)) {
@@ -197,7 +203,7 @@ export function useAlerts(): UseAlertsReturn {
             }
             // Existing alert IDs can carry aggregation/status updates too.
             refresh.schedule();
-        }, undefined, setStreamConnected);
+        }, undefined, onConnectionChange);
 
         return () => {
             stream.close();

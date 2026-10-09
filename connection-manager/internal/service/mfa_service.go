@@ -155,7 +155,7 @@ func (s *mfaServiceImpl) IssueChallenge(ctx context.Context, user *models.User) 
 
 	if err := s.email.Send(EmailMessage{
 		To:      user.Email,
-		Subject: "Your EDR sign-in verification code",
+		Subject: "Your MITRAS sign-in verification code",
 		HTML:    renderMFAEmail(user.FullName, user.Username, code, s.ttl),
 		Text:    renderMFAEmailText(user.FullName, user.Username, code, s.ttl),
 	}); err != nil {
@@ -278,7 +278,7 @@ func renderMFAEmail(fullName, username, code string, ttl time.Duration) string {
       <table role="presentation" width="480" cellpadding="0" cellspacing="0"
              style="background:#111827;border:1px solid #1f2937;border-radius:12px;padding:24px">
         <tr><td>
-          <p style="margin:0 0 12px 0;font-size:13px;letter-spacing:.18em;color:#22d3ee;text-transform:uppercase">EDR Platform</p>
+          <p style="margin:0 0 12px 0;font-size:13px;letter-spacing:.18em;color:#22d3ee;text-transform:uppercase">MITRAS</p>
           <h1 style="margin:0 0 8px 0;font-size:20px;color:#f8fafc">Verify your sign-in</h1>
           <p style="margin:0 0 16px 0;font-size:14px;color:#cbd5e1">
             Hi %s, use the code below to finish signing in. It expires in
@@ -305,7 +305,7 @@ func renderMFAEmailText(fullName, username, code string, ttl time.Duration) stri
 	}
 	mins := int(ttl.Minutes())
 	return fmt.Sprintf(
-		"EDR Platform — sign-in verification\n\n"+
+		"MITRAS — sign-in verification\n\n"+
 			"Hi %s,\n\n"+
 			"Use this code to finish signing in (valid for %d minutes):\n\n    %s\n\n"+
 			"If you did not request this code, you can safely ignore this email.",

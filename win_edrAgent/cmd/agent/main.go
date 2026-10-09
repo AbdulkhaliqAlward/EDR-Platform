@@ -392,7 +392,7 @@ func applyEmbeddedGRPCPortIfDefault(port *string) {
 // printInstallHelp displays a formatted help message for missing install parameters.
 func printInstallHelp(missingParams []string) {
 	fmt.Fprintf(os.Stderr, "\n╔══════════════════════════════════════════════════════════════╗\n")
-	fmt.Fprintf(os.Stderr, "║           EDR Agent — Installation Help                     ║\n")
+	fmt.Fprintf(os.Stderr, "║           MITRAS Agent — Installation Help                     ║\n")
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════════════════════════╝\n\n")
 
 	if len(missingParams) > 0 {
@@ -442,7 +442,7 @@ func runInstall(
 	installSkipConnectivity bool,
 ) {
 	fmt.Println("════════════════════════════════════════")
-	fmt.Println(" EDR Agent — Zero-Touch Installation")
+	fmt.Println(" MITRAS Agent — Zero-Touch Installation")
 	fmt.Println("════════════════════════════════════════")
 
 	// ── Pre-flight Check: Ensure agent is not already installed ──────────────
@@ -649,7 +649,7 @@ func runInstall(
 
 	if err := service.Install(); err != nil {
 		if isAlreadyExistsErr(err) {
-			fmt.Fprintf(os.Stderr, "\n[X] Error: EDR Agent is already installed on this system.\n")
+			fmt.Fprintf(os.Stderr, "\n[X] Error: MITRAS Agent is already installed on this system.\n")
 			fmt.Fprintf(os.Stderr, "    Re-installation is blocked. Issue an UNINSTALL_AGENT command\n")
 			fmt.Fprintf(os.Stderr, "    from the EDR dashboard to remove this agent first.\n")
 			logger.Errorf("Install aborted: service already exists")
@@ -676,7 +676,7 @@ func runInstall(
 		os.Exit(1)
 	}
 
-	fmt.Println("\n✓ EDR Agent installed and running successfully.")
+	fmt.Println("\n✓ MITRAS Agent installed and running successfully.")
 	fmt.Printf("  Server:    %s:%s\n", serverDomain, serverPort)
 	fmt.Printf("  Config:    %s\n", configPath)
 	fmt.Println("  Binary:    C:\\ProgramData\\EDR\\bin\\edr-agent.exe (secured)")
@@ -706,13 +706,13 @@ func runUpdate(
 	serverIP, serverDomain, serverPort, token, configPath string,
 ) {
 	fmt.Println("════════════════════════════════════════")
-	fmt.Println(" EDR Agent — In-Place Upgrade (-update)")
+	fmt.Println(" MITRAS Agent — In-Place Upgrade (-update)")
 	fmt.Println("════════════════════════════════════════")
 
 	requireElevationForUpdate()
 
 	if !service.ServiceExists() {
-		fmt.Fprintf(os.Stderr, "\n[X] Error: EDR Agent is not installed on this system.\n")
+		fmt.Fprintf(os.Stderr, "\n[X] Error: MITRAS Agent is not installed on this system.\n")
 		fmt.Fprintf(os.Stderr, "    Please install first using: edr-agent.exe -install\n")
 		os.Exit(1)
 	}

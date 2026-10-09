@@ -243,7 +243,7 @@ func (s *certServiceImpl) Issue(ctx context.Context, agentID uuid.UUID, csrPEM [
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName:   expectedCN,
-			Organization: []string{"EDR Agent"},
+			Organization: []string{"MITRAS Agent"},
 		},
 		NotBefore:   now,
 		NotAfter:    expiresAt,

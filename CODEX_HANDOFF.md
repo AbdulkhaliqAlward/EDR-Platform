@@ -368,3 +368,33 @@ Remaining verification/deployment:
 - The screenshots supplied by the user show the prior deployed dialog. Rebuild/deploy the modified dashboard and CM to see these changes in that environment.
 - No live database profiling, deployed HTTP timing, production approval-email flow, or endpoint mutation was performed. Do not claim that every cause of deployed latency is resolved. Multiple aggregate queries in Sigma GetStats may still require profiling against actual data if latency persists.
 - No fresh live EDR end-to-end run is claimed; prior live-testing limitations above still apply.
+
+
+## 2026-10-09 — MITRAS commercial branding
+
+- Replaced active dashboard product branding, login/header artwork, page titles, browser icon, report preview/export titles and filenames with MITRAS. Shared component: dashboard/src/components/MitrasLogo.tsx.
+- Original user-supplied transparent PNG preserved byte-for-byte at dashboard/src/assets/mitras-logo.png. SVG viewBox selects the emblem or full wordmark without editing pixels. Browser favicon embeds that artwork; exported HTML/Word/print reports embed it as a data URL for offline use.
+- Updated MFA/approval email product text, template SMTP sender display name, new certificate organization/root-CA display name, Windows service display name and CLI product messages. Existing certificates are not regenerated. Service identifier EDRAgent, registry/storage paths, API/module names, integration bot handles and technical EDR terminology remain compatible. Existing installations need an updated deployment to display changes.
+- Verification: dashboard npm run build passed (existing Recharts circular-chunk warnings remain); isolated Chrome login smoke check passed at 390 and 1280px in light/dark, including artwork decode, title, favicon HTTP response and no horizontal overflow. Screenshots: system TEMP/mitras-branding. Connection-manager go test ./internal/service ./pkg/security -count=1 passed; service package has no test files. No emails sent and no endpoint actions run.
+- Final compilation: connection-manager ./cmd/server and Windows agent ./cmd/agent (CGO with existing Zig wrapper) both passed; binaries written only to system TEMP and never executed. git diff --check passed. Legacy unused public logo files removed. Changes are local, not committed/pushed or deployed in this branding task.
+
+
+## 2026-10-10 — General detection and reliable alert delivery
+
+User scope: behavioral detection across malicious activity, including but not limited to Atomic Red Team. No specific failed technique, deployed endpoint event or execution time was supplied. No claim is made about the cause of the user's live test. Actual endpoint/attack testing remains user-owned.
+
+See DETECTION_RELIABILITY_REVIEW.md for the complete implementation map, deployment steps and remaining operational checks. Existing MITRAS changes and staged files were preserved; staging observed on continuation was not authored by this turn. HEAD remained 3778a57c. No commit, push, deployment, production DB access or real endpoint response was performed. sigma_engine_go/config/config.yaml is unchanged.
+
+Changes: agent default process-name/Temp exclusions removed; PowerShell channel handoff now waits with cancellation and does not advance the subscription bookmark past an undelivered record; legacy global image whitelists no longer bypass behavioral rules; Sysmon 15 routes to create_stream_hash (9 retains the correct Sigma raw_access_thread category); Kafka source acknowledgement follows persistence and synchronous broker confirmation, with bounded worker backpressure/retry and ordered single-reader registration; offset backlog capped at 4096 and metadata-only entries; merged alerts broadcast, WebSocket filter reads synchronized, saturated clients reconnect and UI reconciles on reconnect. Full alert/command evidence removed from the touched diagnostic/error logging paths. Existing rule filters, audited exceptions, rule quality configuration and response guardrails retained.
+
+Verification executed:
+- Sigma tests: kafka, detection, database, handlers and domain packages passed. Real-DB tests requiring an explicitly disposable DB were skipped, not claimed as executed. After later edits, all kafka/handlers/database package tests and the targeted shipped-rule, legacy-allowlist, ordered delivery, cancellation, offset/parser and actual loopback WebSocket tests passed.
+- Final Sigma go vet of detection/kafka/database/handlers and build of cmd/sigma-engine-kafka passed.
+- Agent config/filter pure tests passed. Five explicitly selected collector tests passed on final PowerShell code: default Temp/masquerading evidence, fragment reassembly, XML parsing, blocked receiver beyond the old two-second drop deadline, cancellation/replay. No live subscription or attack command was invoked.
+- CM go test ./internal/response ./pkg/server -count=1 passed. Actual automated actions remain unverified.
+- Dashboard npm run test:exceptions passed nine Node tests and the Chromium fixture, including new reconnect reconciliation. Production build and focused ESLint for useAlerts/useDashboard passed. Existing Recharts circular-chunk warnings remain.
+- Remaining validation: production-like broker rebalances/crash recovery, actual SQL transactions/outbox semantics, native PowerShell subscription/bookmark rollover, completeness of telemetry sources and rules, long-running performance/load/FP calibration, and real endpoint response. Delivery is at least once, not exactly once; no transactional outbox was added. Downloading all rules does not enable disabled/experimental/unsupported rules or create missing event sources.
+
+Operational note: existing endpoint YAML exclusions survive binary upgrades and must be reviewed when deploying. The changes use bounded backpressure rather than throwing away detected alerts during an outage; lag can grow and permanently invalid messages/persistence failures require operator repair. Browser events remain best effort with HTTP reconciliation.
+
+Final 2026-10-10 verification: Windows/CGO agent go vet ./internal/config ./internal/collectors and go build -o <TEMP>/mitras-agent-detection-final.exe ./cmd/agent both passed (exit 0). Final Sigma vet/build passed. Dashboard focused ESLint passed. Built executables were not run. Both staged and unstaged git diff --check passed. New PowerShell edits and the review/handoff additions were left unstaged; previously staged changes were preserved.

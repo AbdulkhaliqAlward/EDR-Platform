@@ -43,7 +43,7 @@ export default function EssentialPlatform() {
     // user removed as it's not used in UI anymore
 
     useEffect(() => {
-        document.title = 'Essential Platform | EDR';
+        document.title = 'Essential Platform | MITRAS';
     }, []);
 
     const snapshotQ = useQuery({

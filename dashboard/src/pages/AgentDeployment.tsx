@@ -494,7 +494,7 @@ export default function AgentDeployment() {
                         Agent Deployment
                     </h2>
                     <p className="text-slate-500 dark:text-slate-400 mt-1">
-                        Build, configure, and deploy the EDR agent to endpoint machines.
+                        Build, configure, and deploy the MITRAS agent to endpoint machines.
                     </p>
                 </div>
                 {authApi.canBuildAgent() && (

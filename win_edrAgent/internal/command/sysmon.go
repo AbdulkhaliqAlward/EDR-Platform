@@ -36,7 +36,7 @@ func sysmonConfigPath() string {
 // config_url is provided and no config file exists on disk. It matches the
 // server-side embedded sysmonconfig.xml and enables all key event types.
 const defaultSysmonConfigXML = `<!--
-  EDR Platform default Sysmon configuration.
+  MITRAS default Sysmon configuration.
   This is intentionally conservative (low noise) and safe as a default.
 -->
 <Sysmon schemaversion="4.90">

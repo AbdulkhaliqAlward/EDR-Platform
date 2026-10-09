@@ -233,7 +233,13 @@ func (c *PowerShellCollector) loop(ctx context.Context, channel string, sub *psS
 			for i := uint32(0); i < returned; i++ {
 				h := handles[i]
 				if xmlText, rerr := renderXML(h, evtRenderEventXML); rerr == nil {
-					c.handle(channel, xmlText)
+					if !c.handleContext(ctx, channel, xmlText) {
+						// Do not advance past an undelivered record; replay it on restart.
+						for j := i; j < returned; j++ {
+							procEvtClose.Call(uintptr(handles[j]))
+						}
+						return
+					}
 				}
 				procEvtUpdateBookmark.Call(uintptr(sub.bookmark), uintptr(h))
 				procEvtClose.Call(uintptr(h))
@@ -303,9 +309,14 @@ type psEventXML struct {
 }
 
 func (c *PowerShellCollector) handle(channel, text string) {
+	c.handleContext(context.Background(), channel, text)
+}
+
+// handleContext waits for pipeline capacity instead of discarding script evidence.
+func (c *PowerShellCollector) handleContext(ctx context.Context, channel, text string) bool {
 	var x psEventXML
 	if err := xml.Unmarshal([]byte(text), &x); err != nil {
-		return
+		return true
 	}
 	fields := map[string]string{}
 	for _, d := range x.EventData.Data {
@@ -317,7 +328,7 @@ func (c *PowerShellCollector) handle(channel, text string) {
 		eventAt = t.UTC()
 	}
 	if isSelfPID(pid) {
-		return // the agent's own PowerShell helpers
+		return true // the agent's own PowerShell helpers
 	}
 
 	data := map[string]interface{}{
@@ -356,10 +367,10 @@ func (c *PowerShellCollector) handle(channel, text string) {
 		data["payload"] = body
 		data["context_info"] = fields["ContextInfo"]
 	default:
-		return
+		return true
 	}
 	if strings.TrimSpace(body) == "" || c.isDuplicate(pid, x.System.EventID, body, fields["MessageNumber"]) {
-		return
+		return true
 	}
 	// Replayed records must not be enriched with a newer owner of the PID.
 	if started := processCreateTime(pid); !started.IsZero() && !eventAt.IsZero() && !started.After(eventAt) {
@@ -380,9 +391,15 @@ func (c *PowerShellCollector) handle(channel, text string) {
 	select {
 	case c.eventChan <- evt:
 		c.collected.Add(1)
-	case <-time.After(2 * time.Second):
-		c.dropped.Add(1)
+	case <-ctx.Done():
+		// This record was not handed off. Permit replay even on the same collector.
+		key := sha1.Sum([]byte(fmt.Sprintf("%d|%d|%s|%s", pid, x.System.EventID, fields["MessageNumber"], body)))
+		c.dedupMu.Lock()
+		delete(c.dedup, key)
+		c.dedupMu.Unlock()
+		return false
 	}
+	return true
 }
 
 func atoiOr(s string, def int) int {

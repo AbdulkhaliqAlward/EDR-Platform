@@ -105,7 +105,7 @@ func resolveLocalAgentID() (string, error) {
 	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
 		return "", fmt.Errorf("access denied reading the agent configuration — run this from an elevated prompt (Run as Administrator)")
 	case errors.Is(err, windows.ERROR_FILE_NOT_FOUND):
-		return "", fmt.Errorf("no EDR agent configuration found in the registry — the agent does not appear to be installed on this machine")
+		return "", fmt.Errorf("no MITRAS agent configuration found in the registry — the agent does not appear to be installed on this machine")
 	case err != nil:
 		return "", fmt.Errorf("cannot open the agent configuration in the registry: %v", err)
 	}
@@ -240,7 +240,7 @@ func runUninstallStage2(logger *logging.Logger, tokenFile string) {
 	removeAgentTree(logger, `C:\ProgramData\EDR`)
 
 	logger.Info("[Uninstall] Stage2 complete — agent removed")
-	fmt.Println("✓ EDR agent uninstalled.")
+	fmt.Println("✓ MITRAS agent uninstalled.")
 	os.Exit(0)
 }
 

@@ -145,6 +145,12 @@ export function useDashboard(): DashboardData {
             void queryClient.invalidateQueries({ queryKey: ['alertStats'], refetchType }, { cancelRefetch: false });
             void queryClient.invalidateQueries({ queryKey: ['recentAlerts'], refetchType }, { cancelRefetch: false });
         });
+        let hasConnected = false;
+        const onConnectionChange = (connected: boolean) => {
+            setStreamConnected(connected);
+            if (connected && hasConnected) refresh.schedule();
+            if (connected) hasConnected = true;
+        };
         const stream = createAlertStream(
             (alert) => {
                 if (!alert?.id) return;
@@ -153,7 +159,7 @@ export function useDashboard(): DashboardData {
                 refresh.schedule();
             },
             { severity: ['critical', 'high', 'medium', 'low'] },
-            setStreamConnected,
+            onConnectionChange,
         );
 
         return () => {
@@ -174,7 +180,7 @@ export function useDashboard(): DashboardData {
 
     // ── Document title ─────────────────────────────────────────
     useEffect(() => {
-        document.title = 'Security Posture — EDR Platform';
+        document.title = 'Security Posture — MITRAS';
     }, []);
 
     return {

@@ -270,6 +270,10 @@ try {
     await page.evaluate(() => { window.__allowSocketOpen = false; const socket = window.__testSockets.at(-1); socket.readyState = 3; socket.onclose?.({ code: 1006, reason: 'fixture disconnect', wasClean: false }); });
     await page.waitForTimeout(5500);
     assert.ok((await saved()).perfRequests.alerts > beforeOffline, 'HTTP fallback must continue during a stream outage');
+    const beforeReconnect = (await saved()).perfRequests.alerts;
+    await page.evaluate(() => { window.__allowSocketOpen = true; const socket = window.__testSockets.at(-1); socket.readyState = 1; socket.onopen?.({}); });
+    await page.waitForTimeout(1400);
+    assert.ok((await saved()).perfRequests.alerts > beforeReconnect, 'reconnection must reconcile missed alerts without waiting for the 30-second poll');
     await page.getByRole('button', { name: 'Leave pages' }).click();
     assert.equal(await page.evaluate(() => window.__testSockets.filter(socket => socket.readyState !== 3).length), 0);
     assert.deepEqual(errors, []);

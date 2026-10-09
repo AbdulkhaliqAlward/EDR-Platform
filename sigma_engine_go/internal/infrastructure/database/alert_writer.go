@@ -3,7 +3,6 @@ package database
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -67,7 +66,7 @@ type AlertWriter struct {
 	repo    AlertRepository
 	config  AlertWriterConfig
 	metrics *AlertWriterMetrics
-	// onAlertPersisted is an optional callback fired after a NEW alert is
+	// onAlertPersisted is an optional callback fired after an alert is
 	// successfully inserted into storage. It is used to fan out real-time
 	// notifications (e.g. WebSocket broadcast) without coupling writer logic
 	// to transport concerns.
@@ -227,11 +226,12 @@ func (w *AlertWriter) Persist(ctx context.Context, domainAlert *domain.Alert) (s
 
 			if isNew {
 				atomic.AddUint64(&w.metrics.AlertsWritten, 1)
-				if w.onAlertPersisted != nil && result != nil {
-					w.onAlertPersisted(result)
-				}
 			} else {
 				atomic.AddUint64(&w.metrics.AlertsDeduplicated, 1)
+			}
+			// Merged evidence also needs a live UI refresh under the canonical ID.
+			if w.onAlertPersisted != nil && result != nil {
+				w.onAlertPersisted(result)
 			}
 			return canonical, isNew, nil
 		}
@@ -255,9 +255,8 @@ func (w *AlertWriter) Persist(ctx context.Context, domainAlert *domain.Alert) (s
 	}
 
 	atomic.AddUint64(&w.metrics.AlertsDropped, 1)
-	// Last resort: the full alert is logged as JSON so it can be recovered.
-	payload, _ := json.Marshal(domainAlert)
-	logger.Errorf("ALERT NOT PERSISTED after retries (rule=%s): %v | alert=%s", domainAlert.RuleID, lastErr, payload)
+	// Do not copy potentially sensitive command/script evidence into error logs.
+	logger.Errorf("Alert persistence failed after retries (rule=%s): %v", domainAlert.RuleID, lastErr)
 	return "", false, fmt.Errorf("persist alert: %w", lastErr)
 }
 

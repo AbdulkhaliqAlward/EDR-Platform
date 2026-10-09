@@ -1,3 +1,4 @@
+import MitrasLogo from '../MitrasLogo';
 /**
  * Professional Report View Component
  * Interactive preview of reports with charts and tables before export
@@ -135,6 +136,7 @@ export function ProfessionalReportView({
 
             {/* Preview Content — scrollable in modal, full-height in standalone page */}
             <div className={`p-6 space-y-6 ${hideActionBar ? '' : 'max-h-[600px] overflow-y-auto'}`}>
+                <div className="flex items-center gap-3"><MitrasLogo className="h-12 w-12 rounded-lg bg-white p-1" /><strong className="text-lg tracking-widest">MITRAS</strong></div>
                 {/* Executive Summary */}
                 {shouldShowSection('summary') && <ReportSection 
                         title="Executive Summary"
@@ -168,7 +170,7 @@ export function ProfessionalReportView({
                     <div className="p-4 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
                             During the period <strong>{new Date(data.period.from).toLocaleDateString()}</strong> to{' '}
-                            <strong>{new Date(data.period.to).toLocaleDateString()}</strong>, the EDR platform detected{' '}
+                            <strong>{new Date(data.period.to).toLocaleDateString()}</strong>, MITRAS detected{' '}
                             <strong>{data.summary.totalAlerts}</strong> security events across{' '}
                             <strong>{data.summary.totalDevices}</strong> monitored endpoints.
                             {data.summary.criticalCount > 0 && <> Critical attention is required for <strong>{data.summary.criticalCount}</strong> high-risk alerts.</>}

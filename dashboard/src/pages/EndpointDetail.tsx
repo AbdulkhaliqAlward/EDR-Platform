@@ -1600,7 +1600,7 @@ function ForensicsTab({ agentId }: { agentId: string }) {
 }
 
 const DEFAULT_SYSMON_XML = `<!--
-  Minimal Sysmon configuration for EDR Platform.
+  Minimal Sysmon configuration for MITRAS.
   This is intentionally conservative (low noise) and safe as a default.
   You can replace it with a stricter config later (e.g. SwiftOnSecurity).
 -->

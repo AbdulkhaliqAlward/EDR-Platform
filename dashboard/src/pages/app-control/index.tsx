@@ -67,7 +67,7 @@ export default function ApplicationControlPage() {
     const [activeTab, setActiveTab] = useState<TabId>('processes');
 
     useEffect(() => {
-        document.title = 'Application Control | EDR Platform';
+        document.title = 'Application Control | MITRAS';
     }, []);
 
     return (

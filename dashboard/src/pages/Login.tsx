@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LogIn, AlertCircle, ShieldCheck, ArrowLeft, Mail } from 'lucide-react';
 import { authApi, type MFAChallenge } from '../api/client';
-import ProtocolLogo from '../components/ProtocolLogo';
+import MitrasLogo from '../components/MitrasLogo';
 
 export default function Login() {
     const navigate = useNavigate();
+    useEffect(() => { document.title = 'Sign in | MITRAS'; }, []);
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
@@ -82,19 +83,9 @@ export default function Login() {
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(6,182,212,0.15) 0%, transparent 70%)' }}></div>
 
             <div className="max-w-md w-full relative z-10">
-                {/* Logo */}
-                <div className="flex justify-center items-center mb-10 w-full">
-                    <div className="flex items-center justify-center gap-5">
-                        <ProtocolLogo className="w-24 h-24 shrink-0 drop-shadow-[0_0_15px_rgba(6,182,212,0.4)]" idPrefix="login" />
-                        
-                        {/* Typography */}
-                        <div className="flex flex-col items-start justify-center border-l border-slate-300 dark:border-slate-700/50 pl-5">
-                            <span className="text-cyan-600 dark:text-cyan-400 text-xs font-bold tracking-[0.3em] uppercase mb-1">Protocol Soft</span>
-                            <div className="flex items-baseline gap-2">
-                                <span className="text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-slate-900 to-slate-500 dark:from-white dark:to-slate-400 tracking-tight uppercase">EDR</span>
-                                <span className="text-4xl font-light text-slate-700 dark:text-white uppercase">Platform</span>
-                            </div>
-                        </div>
+                <div className="flex justify-center mb-8">
+                    <div className="rounded-2xl bg-white px-8 py-4 shadow-sm ring-1 ring-slate-200/80">
+                        <MitrasLogo wordmark className="w-44 h-40" />
                     </div>
                 </div>
 
@@ -230,7 +221,7 @@ export default function Login() {
 
                 {/* Footer */}
                 <p className="text-center text-xs font-medium text-slate-500 mt-8 tracking-widest uppercase">
-                    EDR Platform v1.0.0 • Secure Node
+                    MITRAS v1.0.0 • Secure Node
                 </p>
             </div>
         </div>
