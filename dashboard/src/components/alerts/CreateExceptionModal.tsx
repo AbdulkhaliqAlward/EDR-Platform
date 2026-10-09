@@ -1,234 +1,192 @@
-// CreateExceptionModal — turns a false positive into a precise, reviewable
-// detection exception (rule-scoped by default, optionally host-scoped, with a
-// justification and an expiry). Pre-filled from the alert's own evidence.
-import { useMemo, useState } from 'react';
-import { AlertTriangle, Loader2, Plus, ShieldOff, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState, useId } from 'react';
+import { AlertTriangle, CheckCircle2, FileCheck2, Loader2, Monitor, Plus, ShieldOff, Trash2 } from 'lucide-react';
 import { Modal } from '../Modal';
-import {
-    alertsApi, detectionExceptionsApi,
-    type Alert, type ExceptionCondition,
-} from '../../api/client';
+import { alertsApi, authApi, detectionExceptionsApi, type Alert } from '../../api/client';
 import { apiErrorMessage } from '../../api/apiError';
-
-const EXCEPTION_FIELDS = [
-    'Image', 'ParentImage', 'CommandLine', 'ParentCommandLine', 'OriginalFileName', 'Hashes', 'User',
-    'IntegrityLevel', 'Company', 'Product', 'Description', 'CurrentDirectory', 'TargetFilename', 'ImageLoaded',
-    'TargetObject', 'Details', 'DestinationIp', 'DestinationHostname', 'DestinationPort', 'QueryName', 'PipeName',
-    'SourceImage', 'TargetImage', 'ScriptBlockText', 'Path',
-] as const;
-
-const OPS: ExceptionCondition['op'][] = ['equals', 'startswith', 'endswith', 'contains'];
-
-interface Candidate extends ExceptionCondition {
-    use: boolean;
-}
-
-/** Evidence → suggested conditions (exact image/parent by default). */
-function candidatesFromAlert(alert: Alert | null): Candidate[] {
-    if (!alert) return [];
-    const ctx = (alert.context_data ?? {}) as Record<string, unknown>;
-    const d = ((ctx.data ?? {}) as Record<string, unknown>);
-    const pick = (...keys: string[]) => {
-        for (const k of keys) {
-            const v = d[k] ?? ctx[k];
-            if (typeof v === 'string' && v.trim()) return v.trim();
-        }
-        return '';
-    };
-    const out: Candidate[] = [];
-    const add = (field: string, op: ExceptionCondition['op'], value: string, use: boolean) => {
-        if (value) out.push({ field, op, value, use });
-    };
-    const image = pick('executable', 'process_path');
-    add('Image', 'equals', image.includes('\\') ? image : '', true);
-    add('ParentImage', 'equals', pick('parent_executable'), true);
-    add('CommandLine', 'equals', pick('command_line'), false);
-    add('Hashes', 'contains', pick('sha256') ? `SHA256=${pick('sha256').toUpperCase()}` : '', false);
-    add('User', 'equals', pick('user_name'), false);
-    add('TargetFilename', 'equals', pick('target_filename'), false);
-    add('DestinationHostname', 'equals', pick('destination_hostname'), false);
-    add('QueryName', 'equals', pick('query_name'), false);
-    add('TargetObject', 'equals', pick('target_object', 'key_path'), false);
-    return out;
-}
+import { ExceptionEndpointPicker, type ExceptionEndpoint } from './ExceptionEndpointPicker';
+import {
+    buildExceptionInput, candidatesFromAlert, EXCEPTION_FIELDS, EXCEPTION_OPS, MAX_CONDITIONS,
+    validateExceptionDraft, type ExceptionCandidate, type ExceptionDraft,
+} from './exceptionForm';
 
 interface CreateExceptionModalProps {
     isOpen: boolean;
     onClose: () => void;
-    /** Pre-fill from this alert (rule, host, evidence). */
     alert?: Alert | null;
-    /** markedFalsePositive: the analyst asked to close the alert as a false positive. */
-    onCreated?: (markedFalsePositive: boolean) => void;
-    /** When false the caller updates the alert status itself (via onCreated). */
+    onCreated?: (markedFalsePositive: boolean) => void | Promise<void>;
     updateAlertStatus?: boolean;
 }
 
-export function CreateExceptionModal({ isOpen, onClose, alert = null, onCreated, updateAlertStatus = true }: CreateExceptionModalProps) {
-    const initial = useMemo(() => candidatesFromAlert(alert), [alert]);
-    const [conds, setConds] = useState<Candidate[]>(initial.length ? initial : [{ field: 'Image', op: 'equals', value: '', use: true }]);
-    const [name, setName] = useState(alert ? `FP: ${alert.rule_title}` : '');
-    const [ruleScope, setRuleScope] = useState<'rule' | 'all'>(alert ? 'rule' : 'all');
+export function CreateExceptionModal(props: CreateExceptionModalProps) {
+    // A new session resets the draft on reopen or when switching to a different alert.
+    if (!props.isOpen) return null;
+    return <ExceptionForm key={props.alert?.id || 'new'} {...props} />;
+}
+
+function ExceptionForm({ isOpen, onClose, alert = null, onCreated, updateAlertStatus = true }: CreateExceptionModalProps) {
+    const id = useId();
+    const initial = candidatesFromAlert(alert);
+    const [conds, setConds] = useState<ExceptionCandidate[]>(initial.length ? initial : [{ field: 'Image', op: 'equals', value: '', use: true }]);
+    const [name, setName] = useState(alert ? `FP: ${alert.rule_title}`.slice(0, 255) : '');
+    const [ruleScope, setRuleScope] = useState<'rule' | 'all'>('rule');
     const [ruleId, setRuleId] = useState(alert?.rule_id || '');
-    const [hostScope, setHostScope] = useState<'host' | 'all'>(alert ? 'host' : 'all');
+    const [hostScope, setHostScope] = useState<'host' | 'all'>(alert?.agent_id ? 'host' : 'all');
+    const [endpoint, setEndpoint] = useState<ExceptionEndpoint | null>(alert?.agent_id ? { id: alert.agent_id, hostname: alert.source_hostname || alert.agent_id } : null);
     const [reason, setReason] = useState('');
     const [expiryDays, setExpiryDays] = useState('90');
     const [markFP, setMarkFP] = useState(!!alert);
     const [saving, setSaving] = useState(false);
+    const [created, setCreated] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const inFlight = useRef(false);
+    const errorRef = useRef<HTMLParagraphElement>(null);
+    useEffect(() => { if (error) errorRef.current?.focus(); }, [error]);
+    const canManage = authApi.hasRole(['admin', 'security']);
+    const draft: ExceptionDraft = { name, reason, ruleScope, ruleId, hostScope, agentId: endpoint?.id || '', expiryDays, conditions: conds };
+    const selectedCount = conds.filter(condition => condition.use).length;
+    const allRuleIds = [...new Set([alert?.rule_id, ...(alert?.related_rule_ids || [])].filter((value): value is string => !!value))];
+    const tooBroad = ruleScope === 'all' && !conds.some(c => c.use && c.value.trim() && c.op === 'equals' && ['Image', 'Hashes'].includes(c.field));
+    const locked = saving || created;
+    const input = 'input min-w-0 disabled:opacity-60 disabled:cursor-not-allowed';
+    const label = 'mb-1.5 block text-xs font-semibold text-slate-600 dark:text-slate-300';
 
-    const selected = conds.filter(c => c.use && c.value.trim());
-    const anchored = selected.some(c => c.op === 'equals' && (c.field === 'Image' || c.field === 'Hashes'));
-    const tooBroad = ruleScope === 'all' && !anchored;
-
-    const update = (i: number, patch: Partial<Candidate>) => setConds(prev => prev.map((c, j) => (j === i ? { ...c, ...patch } : c)));
-
+    const update = (index: number, patch: Partial<ExceptionCandidate>) => setConds(previous => previous.map((condition, i) => i === index ? { ...condition, ...patch } : condition));
     const save = async () => {
+        if (inFlight.current || !canManage) return;
         setError(null);
-        if (!name.trim() || !reason.trim()) {
-            setError('A name and a justification are required.');
-            return;
+        if (!created) {
+            const validation = validateExceptionDraft(draft);
+            if (validation) { setError(validation); return; }
         }
-        if (selected.length === 0) {
-            setError('Select at least one condition.');
-            return;
-        }
-        if (ruleScope === 'rule' && !ruleId.trim()) {
-            setError('Enter the Sigma rule ID, or scope the exception to all rules.');
-            return;
-        }
+        inFlight.current = true;
         setSaving(true);
+        let exceptionSaved = created;
         try {
-            const days = Number(expiryDays);
-            await detectionExceptionsApi.create({
-                name: name.trim(),
-                rule_id: ruleScope === 'rule' ? ruleId.trim() : '',
-                rule_title: ruleScope === 'rule' ? (alert?.rule_title || '') : '',
-                agent_id: hostScope === 'host' && alert ? alert.agent_id : undefined,
-                conditions: selected.map(({ field, op, value }) => ({ field, op, value: value.trim() })),
-                reason: reason.trim(),
-                expires_at: days > 0 ? new Date(Date.now() + days * 86_400_000).toISOString() : undefined,
-                source_alert_id: alert?.id,
-            });
+            if (!exceptionSaved) {
+                await detectionExceptionsApi.create(buildExceptionInput(draft, alert));
+                exceptionSaved = true;
+                setCreated(true);
+            }
             if (markFP && alert && updateAlertStatus) {
                 await alertsApi.updateStatus(alert.id, 'false_positive', `Detection exception "${name.trim()}": ${reason.trim()}`);
             }
-            onCreated?.(markFP && !!alert);
+            await onCreated?.(markFP && !!alert);
             onClose();
         } catch (err) {
-            setError(apiErrorMessage(err, 'Could not create the exception'));
+            const message = apiErrorMessage(err, 'Could not save the exception.');
+            setError(exceptionSaved ? `The exception was created, but the follow-up update failed. ${message} Retry finishes the update without creating another exception.` : message);
         } finally {
+            inFlight.current = false;
             setSaving(false);
         }
     };
 
-    const footer = (
-        <div className="flex items-center justify-end gap-3">
-            <button type="button" onClick={onClose} disabled={saving} className="px-4 py-2 text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg">
-                Cancel
-            </button>
-            <button type="button" onClick={save} disabled={saving || tooBroad}
-                className="px-4 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg flex items-center gap-2 disabled:opacity-50">
-                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldOff className="w-4 h-4" />}
-                Create exception
+    const footer = <div className="flex flex-wrap items-center justify-between gap-3">
+        <span className="text-xs text-slate-500">{created ? 'Exception saved' : `${selectedCount} enabled condition${selectedCount === 1 ? '' : 's'}`}</span>
+        <div className="flex items-center gap-2">
+            <button type="button" onClick={onClose} disabled={saving} className="btn btn-secondary disabled:opacity-50">{created ? 'Close' : 'Cancel'}</button>
+            <button type="submit" form={`${id}-form`} disabled={saving || !canManage} className="btn btn-primary inline-flex items-center gap-2 disabled:opacity-50">
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : created ? <CheckCircle2 className="h-4 w-4" /> : <ShieldOff className="h-4 w-4" />}
+                {saving ? 'Saving…' : created ? 'Retry follow-up update' : 'Create exception'}
             </button>
         </div>
-    );
+    </div>;
 
-    const input = 'w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none';
-
-    return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Create detection exception" size="lg" footer={footer} closeOnOverlayClick={false}>
-            <div className="space-y-4">
-                <p className="text-xs text-slate-500">
-                    Matches of the rule are hidden only when the event satisfies <strong>every</strong> selected condition.
-                    Prefer exact paths; keep the exception scoped to one rule and, when possible, one endpoint.
-                    Suppressed matches are counted so the exception can be reviewed.
-                </p>
-
-                <div>
-                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Name</label>
-                    <input className={input} value={name} maxLength={255} onChange={e => setName(e.target.value)} />
+    return <Modal isOpen={isOpen} onClose={onClose} closeDisabled={saving} title="Create detection exception" size="xl" footer={footer} closeOnOverlayClick={false}>
+        <form id={`${id}-form`} noValidate onChange={() => setError(null)} onSubmit={event => { event.preventDefault(); void save(); }} className="min-w-0 space-y-5">
+            <div className="flex items-start gap-3 rounded-xl border border-indigo-200 bg-indigo-50/70 p-3 dark:border-indigo-800/50 dark:bg-indigo-950/30">
+                <ShieldOff className="mt-0.5 h-5 w-5 shrink-0 text-indigo-600 dark:text-indigo-400" />
+                <div className="min-w-0 text-xs leading-5 text-slate-600 dark:text-slate-300">
+                    <p className="font-semibold text-slate-900 dark:text-white">Suppress only activity you have verified as benign.</p>
+                    <p>Every enabled condition must match. Limit the rule, endpoint and lifetime; suppressed matches remain counted for review.</p>
                 </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                        <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Rule scope</label>
-                        <select className={input} value={ruleScope} onChange={e => setRuleScope(e.target.value as 'rule' | 'all')}>
-                            <option value="rule">{alert ? `Only "${alert.rule_title}"` : 'One rule'}</option>
-                            <option value="all">All rules (requires exact Image or hash)</option>
-                        </select>
-                        {ruleScope === 'rule' && !alert && (
-                            <input className={`${input} mt-2 font-mono`} placeholder="Sigma rule ID" value={ruleId} onChange={e => setRuleId(e.target.value)} />
-                        )}
-                    </div>
-                    <div>
-                        <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Endpoint scope</label>
-                        <select className={input} value={hostScope} onChange={e => setHostScope(e.target.value as 'host' | 'all')} disabled={!alert}>
-                            {alert && <option value="host">Only this endpoint</option>}
-                            <option value="all">All endpoints</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div>
-                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Conditions (all must match)</label>
-                    <div className="space-y-2">
-                        {conds.map((c, i) => (
-                            <div key={i} className="flex items-center gap-2">
-                                <input type="checkbox" checked={c.use} onChange={e => update(i, { use: e.target.checked })} />
-                                <select className={`${input} w-40 shrink-0`} value={c.field} onChange={e => update(i, { field: e.target.value })}>
-                                    {EXCEPTION_FIELDS.map(f => <option key={f} value={f}>{f}</option>)}
-                                </select>
-                                <select className={`${input} w-32 shrink-0`} value={c.op} onChange={e => update(i, { op: e.target.value as ExceptionCondition['op'] })}>
-                                    {OPS.map(o => <option key={o} value={o}>{o}</option>)}
-                                </select>
-                                <input className={`${input} font-mono text-xs`} value={c.value} onChange={e => update(i, { value: e.target.value })} />
-                                <button type="button" onClick={() => setConds(prev => prev.filter((_, j) => j !== i))} className="p-1.5 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded" title="Remove">
-                                    <Trash2 className="w-4 h-4" />
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-                    <button type="button" onClick={() => setConds(prev => [...prev, { field: 'CommandLine', op: 'contains', value: '', use: true }])}
-                        className="mt-2 text-xs text-indigo-600 dark:text-indigo-400 flex items-center gap-1 hover:underline">
-                        <Plus className="w-3.5 h-3.5" /> Add condition
-                    </button>
-                    {tooBroad && (
-                        <p className="mt-2 text-xs text-rose-600 dark:text-rose-400 flex items-center gap-1">
-                            <AlertTriangle className="w-3.5 h-3.5" /> An exception for all rules must include an exact Image path or file hash (equals).
-                        </p>
-                    )}
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div className="sm:col-span-2">
-                        <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Justification (audited)</label>
-                        <textarea className={`${input} h-20`} value={reason} maxLength={1000} onChange={e => setReason(e.target.value)}
-                            placeholder="Why this activity is benign (e.g. nightly backup agent, approved by IT change #123)" />
-                    </div>
-                    <div>
-                        <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">Expires</label>
-                        <select className={input} value={expiryDays} onChange={e => setExpiryDays(e.target.value)}>
-                            <option value="7">In 7 days</option>
-                            <option value="30">In 30 days</option>
-                            <option value="90">In 90 days</option>
-                            <option value="365">In 1 year</option>
-                            <option value="0">Never (review regularly)</option>
-                        </select>
-                    </div>
-                </div>
-
-                {alert && (
-                    <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
-                        <input type="checkbox" checked={markFP} onChange={e => setMarkFP(e.target.checked)} />
-                        Also mark this alert as a false positive
-                    </label>
-                )}
-
-                {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
             </div>
-        </Modal>
-    );
+            {!canManage && <p role="alert" className="text-sm text-amber-700 dark:text-amber-400">Creating exceptions requires the administrator or security role.</p>}
+            {created && <p role="status" className="text-sm text-emerald-700 dark:text-emerald-400">The exception is saved. Only the follow-up update remains.</p>}
+            <fieldset disabled={locked || !canManage} className="min-w-0 space-y-5 disabled:opacity-80">
+                <div>
+                    <label htmlFor={`${id}-name`} className={label}>Name</label>
+                    <input id={`${id}-name`} autoFocus className={input} value={name} maxLength={255} placeholder="e.g. Approved nightly backup" onChange={event => setName(event.target.value)} />
+                </div>
+                <section className="min-w-0 rounded-xl border border-slate-200 p-3 sm:p-4 dark:border-slate-700">
+                    <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white"><Monitor className="h-4 w-4 text-indigo-500" /> Scope</h3>
+                    <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div className="min-w-0">
+                            <label htmlFor={`${id}-rule-scope`} className={label}>Rule scope</label>
+                            <select id={`${id}-rule-scope`} className={input} value={ruleScope} onChange={event => setRuleScope(event.target.value as 'rule' | 'all')}>
+                                <option value="rule">One rule</option><option value="all">All rules</option>
+                            </select>
+                            {ruleScope === 'rule' && <div className="mt-3 min-w-0">
+                                <label htmlFor={`${id}-rule-id`} className={label}>Sigma rule ID</label>
+                                {alert ? <select id={`${id}-rule-id`} className={input} value={ruleId} onChange={event => setRuleId(event.target.value)}>
+                                    {!ruleId && <option value="">Select a rule</option>}
+                                    {allRuleIds.map(value => <option key={value} value={value}>{value === alert.rule_id ? alert.rule_title : value}</option>)}
+                                </select> : <input id={`${id}-rule-id`} className={`${input} font-mono`} value={ruleId} maxLength={255} placeholder="Enter the rule ID" onChange={event => setRuleId(event.target.value)} />}
+                            </div>}
+                            {ruleScope === 'all' && <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">Requires an exact Image or Hashes condition.</p>}
+                        </div>
+                        <div className="min-w-0">
+                            <label htmlFor={`${id}-endpoint-scope`} className={label}>Endpoint scope</label>
+                            <select id={`${id}-endpoint-scope`} className={input} value={hostScope} onChange={event => setHostScope(event.target.value as 'host' | 'all')}>
+                                <option value="host">Specific endpoint</option><option value="all">All endpoints</option>
+                            </select>
+                            {hostScope === 'host' ? <ExceptionEndpointPicker id={`${id}-endpoint`} selected={endpoint} onChange={setEndpoint} disabled={locked || !canManage} />
+                                : <p className="mt-2 text-xs text-slate-500">Applies to every endpoint when all conditions match.</p>}
+                        </div>
+                    </div>
+                </section>
+                <section className="min-w-0 rounded-xl border border-slate-200 p-3 sm:p-4 dark:border-slate-700">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Conditions <span className="font-normal text-slate-500">(all must match)</span></h3>
+                        <span className="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 dark:bg-slate-900">{conds.length} / {MAX_CONDITIONS}</span>
+                    </div>
+                    <div className="space-y-2">
+                        <p className="text-xs text-slate-500">Each enabled condition needs a field, an operator and a value.</p>
+                        {conds.map((condition, index) => <div key={index} data-condition-row className="grid min-w-0 grid-cols-[1.25rem_minmax(0,1fr)_2rem] items-start gap-2 rounded-lg border border-slate-200 bg-slate-50/80 p-2.5 dark:border-slate-700 dark:bg-slate-900/30">
+                            <input type="checkbox" aria-label={`Enable condition ${index + 1}`} checked={condition.use} onChange={event => update(index, { use: event.target.checked })} className="mt-7 h-3.5 w-3.5 accent-indigo-600" />
+                            <div className={`grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1.6fr)] ${condition.use ? '' : 'opacity-50'}`}>
+                                <div className="min-w-0"><label htmlFor={`${id}-field-${index}`} className={label}>Field</label>
+                                    <select id={`${id}-field-${index}`} className={input} value={condition.field} onChange={event => update(index, { field: event.target.value })}>
+                                        {EXCEPTION_FIELDS.map(field => <option key={field} value={field}>{field}</option>)}
+                                    </select>
+                                </div>
+                                <div className="min-w-0"><label htmlFor={`${id}-op-${index}`} className={label}>Operator</label>
+                                    <select id={`${id}-op-${index}`} className={input} value={condition.op} onChange={event => update(index, { op: event.target.value as ExceptionCandidate['op'] })}>
+                                        {EXCEPTION_OPS.map(op => <option key={op} value={op}>{({ equals: 'Equals', startswith: 'Starts with', endswith: 'Ends with', contains: 'Contains' })[op]}</option>)}
+                                    </select>
+                                </div>
+                                <div className="col-span-2 min-w-0 sm:col-span-1"><label htmlFor={`${id}-value-${index}`} className={label}>Value</label>
+                                    <input id={`${id}-value-${index}`} className={`${input} font-mono !text-xs`} value={condition.value} maxLength={1024} placeholder="Exact value or text to match" onChange={event => update(index, { value: event.target.value })} />
+                                </div>
+                            </div>
+                            <button type="button" aria-label={`Remove condition ${index + 1}`} onClick={() => setConds(previous => previous.filter((_, i) => i !== index))} className="mt-5 rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40"><Trash2 className="h-4 w-4" /></button>
+                        </div>)}
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <button type="button" disabled={conds.length >= MAX_CONDITIONS} onClick={() => setConds(previous => [...previous, { field: 'CommandLine', op: 'contains', value: '', use: true }])} className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 disabled:opacity-40 dark:text-indigo-400"><Plus className="h-3.5 w-3.5" /> Add condition</button>
+                        <span className="text-[11px] text-slate-500">Unchecked conditions are excluded.</span>
+                    </div>
+                    {tooBroad && <p className="mt-3 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400"><AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Add an exact Image or Hashes match, or select one rule.</p>}
+                </section>
+                <section className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.55fr)]">
+                    <div className="min-w-0"><label htmlFor={`${id}-reason`} className={label}>Justification (audited)</label>
+                        <textarea id={`${id}-reason`} className={`${input} min-h-24 resize-y`} value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} placeholder="Explain why this activity is benign and reference the approval or change ticket." />
+                    </div>
+                    <div className="min-w-0"><label htmlFor={`${id}-expiry`} className={label}>Expires</label>
+                        <select id={`${id}-expiry`} className={input} value={expiryDays} onChange={event => setExpiryDays(event.target.value)}>
+                            <option value="7">In 7 days</option><option value="30">In 30 days</option><option value="90">In 90 days</option><option value="365">In 1 year</option><option value="0">Never</option>
+                        </select>
+                        <p className="mt-2 text-xs leading-5 text-slate-500">{expiryDays === '0' ? 'No automatic expiry. Review this exception regularly.' : 'Suppression stops automatically when the exception expires.'}</p>
+                    </div>
+                </section>
+                {alert && <label className="flex items-start gap-2 rounded-lg bg-slate-50 p-3 text-xs text-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
+                    <input type="checkbox" checked={markFP} onChange={event => setMarkFP(event.target.checked)} className="mt-0.5 accent-indigo-600" />
+                    <FileCheck2 className="h-4 w-4 shrink-0 text-slate-400" /> Also mark this alert as a false positive
+                </label>}
+            </fieldset>
+            {error && <p ref={errorRef} tabIndex={-1} role="alert" className="break-words rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-400">{error}</p>}
+        </form>
+    </Modal>;
 }
 
 export default CreateExceptionModal;

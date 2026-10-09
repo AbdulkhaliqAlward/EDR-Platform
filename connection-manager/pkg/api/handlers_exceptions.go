@@ -179,11 +179,18 @@ func (h *Handlers) CreateDetectionException(c echo.Context) error {
 			return errorResponse(c, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid agent_id")
 		}
 		ex.AgentID = id.String()
-		if h.agentSvc != nil {
-			if ag, gerr := h.agentSvc.GetByID(ctx, id); gerr == nil && ag != nil {
-				ex.Hostname = ag.Hostname
-			}
+		if h.agentSvc == nil {
+			return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Endpoint lookup is not available")
 		}
+		ag, gerr := h.agentSvc.GetByID(ctx, id)
+		if errors.Is(gerr, repository.ErrNotFound) || (gerr == nil && ag == nil) {
+			return errorResponse(c, http.StatusBadRequest, "VALIDATION_ERROR", "Selected endpoint no longer exists")
+		}
+		if gerr != nil {
+			h.logger.WithError(gerr).Error("Detection exception endpoint lookup failed")
+			return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Could not verify the selected endpoint")
+		}
+		ex.Hostname = ag.Hostname
 	}
 	if s := strings.TrimSpace(req.SourceAlertID); s != "" {
 		id, perr := uuid.Parse(s)

@@ -23,7 +23,7 @@ interface AlertDetailPanelProps {
     alert: Alert | null;
     isOpen: boolean;
     onClose: () => void;
-    onStatusChange: (id: string, status: string) => void;
+    onStatusChange: (id: string, status: string, requireSuccess?: boolean) => void | Promise<void>;
     inlineMode?: boolean;
 }
 
@@ -289,7 +289,7 @@ export function AlertDetailPanel({
                                         Automation Rules
                                     </button>
                                 )}
-                                {authApi.canWriteAlerts() && alert.status !== 'false_positive' && (
+                                {authApi.hasRole(['admin', 'security']) && alert.status !== 'false_positive' && (
                                     <button
                                         onClick={() => setExceptionOpen(true)}
                                         className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
@@ -707,7 +707,7 @@ export function AlertDetailPanel({
             {exceptionOpen && (
                 <CreateExceptionModal isOpen={exceptionOpen} alert={alert} updateAlertStatus={false}
                     onClose={() => setExceptionOpen(false)}
-                    onCreated={(markedFP) => { if (markedFP) onStatusChange(alert.id, 'false_positive'); }} />
+                    onCreated={async (markedFP) => { if (markedFP) await onStatusChange(alert.id, 'false_positive', true); }} />
             )}
         </>
     );

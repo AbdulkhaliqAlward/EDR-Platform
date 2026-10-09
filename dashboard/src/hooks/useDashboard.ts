@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
+import { createAlertRefresh } from './alertRefresh';
 import {
     statsApi,
     alertsApi,
@@ -58,15 +59,16 @@ function calcThreatScore(stats: AlertStats | undefined): number {
 
 export function useDashboard(): DashboardData {
     const queryClient = useQueryClient();
-    const [liveAlerts, setLiveAlerts] = useState<Alert[]>([]);
+    const [streamAlerts, setStreamAlerts] = useState<Alert[]>([]);
     const [drawerAlert, setDrawerAlert] = useState<Alert | null>(null);
-    const statsInvalidateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [streamConnected, setStreamConnected] = useState(false);
 
     // ── Queries ───────────────────────────────────────────────
     const { data: alertStats, isLoading: statsLoading } = useQuery({
         queryKey: ['alertStats'],
         queryFn: statsApi.alerts,
-        refetchInterval: 1000,
+        refetchInterval: streamConnected ? 30_000 : 10_000,
+        refetchOnWindowFocus: true,
     });
 
     const { data: agentStats } = useQuery({
@@ -86,7 +88,8 @@ export function useDashboard(): DashboardData {
     const { data: recentAlertsData } = useQuery({
         queryKey: ['recentAlerts'],
         queryFn: () => alertsApi.list({ limit: 100 }),
-        refetchInterval: 1000,
+        refetchInterval: streamConnected ? 30_000 : 5_000,
+        refetchOnWindowFocus: true,
     });
 
     const { data: timelineData } = useQuery({
@@ -123,35 +126,40 @@ export function useDashboard(): DashboardData {
     const recentAlerts = useMemo(() => recentAlertsData?.alerts || [], [recentAlertsData]);
 
     // ── WebSocket stream ──────────────────────────────────────
-    useEffect(() => {
-        if (recentAlerts.length > 0 && liveAlerts.length === 0) {
-            setLiveAlerts(recentAlerts);
+    const liveAlerts = useMemo(() => {
+        const byId = new Map<string, Alert>();
+        for (const alert of [...streamAlerts, ...recentAlerts]) {
+            const previous = byId.get(alert.id);
+            if (!previous || Date.parse(alert.timestamp) >= Date.parse(previous.timestamp)) byId.set(alert.id, alert);
         }
-    }, [recentAlerts, liveAlerts.length]);
+        return [...byId.values()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 100);
+    }, [streamAlerts, recentAlerts]);
 
     useEffect(() => {
+        const pending = new Map<string, Alert>();
+        const refresh = createAlertRefresh(() => {
+            const batch = [...pending.values()].reverse();
+            pending.clear();
+            setStreamAlerts(previous => [...batch, ...previous.filter(alert => !batch.some(item => item.id === alert.id))].slice(0, 100));
+            const refetchType = document.visibilityState === 'visible' ? 'active' : 'none';
+            void queryClient.invalidateQueries({ queryKey: ['alertStats'], refetchType }, { cancelRefetch: false });
+            void queryClient.invalidateQueries({ queryKey: ['recentAlerts'], refetchType }, { cancelRefetch: false });
+        });
         const stream = createAlertStream(
             (alert) => {
-                setLiveAlerts((prev) => [alert, ...prev.slice(0, 99)]);
-
-                // Debounce: batch rapid WebSocket arrivals into a single
-                // stats refetch (150ms window) to avoid API hammering.
-                if (statsInvalidateTimer.current) {
-                    clearTimeout(statsInvalidateTimer.current);
-                }
-                statsInvalidateTimer.current = setTimeout(() => {
-                    queryClient.invalidateQueries({ queryKey: ['alertStats'] });
-                    queryClient.invalidateQueries({ queryKey: ['recentAlerts'] });
-                }, 150);
+                if (!alert?.id) return;
+                pending.set(alert.id, alert);
+                if (pending.size > 100) pending.delete(pending.keys().next().value!);
+                refresh.schedule();
             },
-            { severity: ['critical', 'high', 'medium', 'low'] }
+            { severity: ['critical', 'high', 'medium', 'low'] },
+            setStreamConnected,
         );
 
         return () => {
             stream.close();
-            if (statsInvalidateTimer.current) {
-                clearTimeout(statsInvalidateTimer.current);
-            }
+            refresh.dispose();
+            pending.clear();
         };
     }, [queryClient]);
 

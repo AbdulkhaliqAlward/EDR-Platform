@@ -1947,7 +1947,8 @@ export const agentPackagesApi = {
 
 export function createAlertStream(
     onMessage: (alert: Alert) => void,
-    filters?: { severity?: string[]; agent_id?: string; rule_id?: string }
+    filters?: { severity?: string[]; agent_id?: string; rule_id?: string },
+    onConnectionChange?: (connected: boolean) => void,
 ) {
     // Build WebSocket URL
     // VITE_WS_URL is the base (e.g. ws://host:port) — always append the stream path.
@@ -1979,12 +1980,17 @@ export function createAlertStream(
     const maxReconnectAttempts = 5;
     let reconnectTimeout: ReturnType<typeof setTimeout>;
     let pingInterval: ReturnType<typeof setInterval>;
+    let disposed = false;
 
     const connect = () => {
-        ws = new WebSocket(wsUrl);
+        if (disposed) return;
+        const socket = new WebSocket(wsUrl);
+        ws = socket;
 
         ws.onopen = () => {
+            if (disposed || ws !== socket) return;
             reconnectAttempts = 0;
+            onConnectionChange?.(true);
             console.log('WebSocket connected');
 
             // Subscribe with filters
@@ -2001,6 +2007,7 @@ export function createAlertStream(
         };
 
         ws.onmessage = (event) => {
+            if (disposed || ws !== socket) return;
             // The engine sends one JSON document per frame; older engines
             // newline-joined bursts into one frame. JSON never contains a raw
             // newline, so splitting is safe and handles both.
@@ -2019,10 +2026,14 @@ export function createAlertStream(
         };
 
         ws.onerror = (error) => {
+            if (disposed || ws !== socket) return;
+            onConnectionChange?.(false);
             console.error('WebSocket error:', error);
         };
 
         ws.onclose = (event) => {
+            if (disposed || ws !== socket) return;
+            onConnectionChange?.(false);
             console.log('WebSocket disconnected', { code: event.code, reason: event.reason, wasClean: event.wasClean });
             clearInterval(pingInterval);
 
@@ -2057,8 +2068,13 @@ export function createAlertStream(
     // Return cleanup function
     return {
         close: () => {
+            disposed = true;
             clearTimeout(reconnectTimeout);
             clearInterval(pingInterval);
+            ws.onmessage = null;
+            ws.onopen = null;
+            ws.onclose = null;
+            ws.onerror = null;
             ws.close();
         },
         getState: () => ws.readyState,

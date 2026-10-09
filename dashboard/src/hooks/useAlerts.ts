@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { alertsApi, agentsApi, createAlertStream, type Alert } from '../api/client';
 import { useToast } from '../components';
 import { useDebounce } from './useDebounce';
 import type { DateRange } from '../components/DateRangePicker';
+import { createAlertRefresh, rememberAlert } from './alertRefresh';
 
 export type SortField = 'timestamp' | 'severity' | 'risk_score';
 
@@ -51,7 +52,7 @@ export interface UseAlertsReturn {
     clearSelection: () => void;
 
     // Actions
-    handleStatusChange: (id: string, status: string) => void;
+    handleStatusChange: (id: string, status: string, requireSuccess?: boolean) => Promise<void>;
     handleBulkAction: (status: string) => void;
     isUpdating: boolean;
     isBulkUpdating: boolean;
@@ -65,7 +66,7 @@ export function useAlerts(): UseAlertsReturn {
     // Refs for stream handling
     const seenAlertIdsRef = useRef<Set<string>>(new Set());
     const pendingStreamIdsRef = useRef<Set<string>>(new Set());
-    const streamSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [streamConnected, setStreamConnected] = useState(false);
 
     // State
     const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
@@ -82,17 +83,17 @@ export function useAlerts(): UseAlertsReturn {
         search: '',
     });
 
-    const [dateRange, setDateRange] = useState<DateRange>({
+    const [dateRange, setDateRange] = useState<DateRange>(() => ({
         from: new Date(Date.now() - 24 * 60 * 60 * 1000),
         to: new Date(),
-    });
+    }));
 
     const debouncedSearch = useDebounce(filters.search, 300);
 
     // Close drawer on Escape
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setSelectedAlert(null);
+            if (e.key === 'Escape' && !document.querySelector('[role="dialog"][aria-modal="true"]')) setSelectedAlert(null);
         };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
@@ -106,10 +107,10 @@ export function useAlerts(): UseAlertsReturn {
         refetchInterval: 120000,
     });
 
-    const agentHostnameMap = agentListData?.data?.reduce((acc: Record<string, string>, agent) => {
+    const agentHostnameMap = useMemo(() => agentListData?.data?.reduce((acc: Record<string, string>, agent) => {
         acc[agent.id] = agent.hostname;
         return acc;
-    }, {}) || {};
+    }, {}) || {}, [agentListData]);
 
     // Fetch alerts
     const { data, isLoading, isError, error } = useQuery({
@@ -125,10 +126,11 @@ export function useAlerts(): UseAlertsReturn {
             sort: sortOrder === 'desc' ? `-${sortBy}` : sortBy,
             order: sortOrder,
         }),
-        refetchInterval: 1000,
+        refetchInterval: streamConnected ? 30_000 : 5_000,
+        refetchOnWindowFocus: true,
     });
 
-    const alerts = data?.alerts || [];
+    const alerts = useMemo(() => data?.alerts || [], [data?.alerts]);
     const total = data?.total || 0;
     const totalPages = Math.ceil(total / pageSize);
 
@@ -158,54 +160,49 @@ export function useAlerts(): UseAlertsReturn {
     // Track IDs already rendered from DB
     useEffect(() => {
         for (const alert of alerts) {
-            seenAlertIdsRef.current.add(alert.id);
+            rememberAlert(seenAlertIdsRef.current, alert.id);
         }
     }, [alerts]);
 
     // Realtime stream setup
     useEffect(() => {
-        const triggerDebouncedSync = () => {
-            if (streamSyncTimerRef.current) {
-                clearTimeout(streamSyncTimerRef.current);
-            }
-            streamSyncTimerRef.current = setTimeout(() => {
-                const newCount = pendingStreamIdsRef.current.size;
+        const pendingStreamIds = pendingStreamIdsRef.current;
+        const refresh = createAlertRefresh(() => {
+                const newCount = pendingStreamIds.size;
                 
                 if (newCount > 0) {
                     setNewAlertIds(prev => {
                         const next = new Set(prev);
-                        pendingStreamIdsRef.current.forEach(id => next.add(id));
+                        pendingStreamIds.forEach(id => rememberAlert(next, id, 500));
                         return next;
                     });
                 }
                 
-                pendingStreamIdsRef.current.clear();
+                pendingStreamIds.clear();
 
-                queryClient.invalidateQueries({ queryKey: ['alerts'] });
-                queryClient.invalidateQueries({ queryKey: ['alertStats'] });
+                const refetchType = document.visibilityState === 'visible' ? 'active' : 'none';
+                void queryClient.invalidateQueries({ queryKey: ['alerts'], refetchType }, { cancelRefetch: false });
+                void queryClient.invalidateQueries({ queryKey: ['alertStats'], refetchType }, { cancelRefetch: false });
 
-                if (newCount > 0) {
+                if (newCount > 0 && document.visibilityState === 'visible') {
                     showToast(`Received ${newCount} new alert${newCount > 1 ? 's' : ''}`, 'success');
                 }
-            }, 150);
-        };
+        });
 
         const stream = createAlertStream((alert) => {
-            if (!alert?.id || seenAlertIdsRef.current.has(alert.id)) {
-                return;
+            if (!alert?.id) return;
+            if (!seenAlertIdsRef.current.has(alert.id)) {
+                rememberAlert(seenAlertIdsRef.current, alert.id);
+                rememberAlert(pendingStreamIds, alert.id);
             }
-            seenAlertIdsRef.current.add(alert.id);
-            pendingStreamIdsRef.current.add(alert.id);
-            triggerDebouncedSync();
-        });
+            // Existing alert IDs can carry aggregation/status updates too.
+            refresh.schedule();
+        }, undefined, setStreamConnected);
 
         return () => {
             stream.close();
-            if (streamSyncTimerRef.current) {
-                clearTimeout(streamSyncTimerRef.current);
-                streamSyncTimerRef.current = null;
-            }
-            pendingStreamIdsRef.current.clear();
+            refresh.dispose();
+            pendingStreamIds.clear();
         };
     }, [queryClient, showToast]);
 
@@ -238,9 +235,15 @@ export function useAlerts(): UseAlertsReturn {
     });
 
     // Handlers
-    const handleStatusChange = useCallback((id: string, status: string) => {
-        updateStatusMutation.mutate({ id, status });
-        setSelectedAlert(null);
+    const handleStatusChange = useCallback(async (id: string, status: string, requireSuccess = false) => {
+        try {
+            await updateStatusMutation.mutateAsync({ id, status });
+            setSelectedAlert(null);
+        } catch (err) {
+            // The exception dialog needs a rejection to retry only its follow-up.
+            // Other action buttons already surface the mutation's error toast.
+            if (requireSuccess) throw err;
+        }
     }, [updateStatusMutation]);
 
     const handleBulkAction = useCallback((status: string) => {
