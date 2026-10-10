@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -60,6 +61,34 @@ func TestDetectionWorkerAcknowledgesOnlyAfterDurableDelivery(t *testing.T) {
 	require.NoError(t, engine.LoadRules([]*domain.SigmaRule{rule}))
 	ev, err := domain.NewLogEvent(map[string]interface{}{"event_type": "process", "agent_id": "agent", "data": map[string]interface{}{"executable": `C:\Temp\malicious.exe`}})
 	require.NoError(t, err)
+	assertDurableWorkerDelivery(t, engine, ev)
+}
+
+func TestLocalDiscoveryDurableDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		file, kind string
+		data       map[string]interface{}
+	}{
+		{"mitras_proc_local_account_discovery.yml", "process", map[string]interface{}{"executable": `C:\Windows\System32\net.exe`, "command_line": "net user"}},
+		{"mitras_ps_local_account_discovery.yml", "powershell", map[string]interface{}{"event_code": 4104, "action": "script_block", "script_block_text": "Get-LocalUser"}},
+		{"mitras_pm_local_account_discovery.yml", "powershell", map[string]interface{}{"event_code": 4103, "action": "module", "payload": "CommandInvocation(Get-LocalUser)"}},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			r, err := rules.NewRuleParser(false).ParseFile(filepath.Join("../../../sigma_rules/rules/edr_custom", tc.file))
+			require.NoError(t, err)
+			fc, err := cache.NewFieldResolutionCache(64)
+			require.NoError(t, err)
+			engine := detection.NewSigmaDetectionEngine(mapping.NewFieldMapper(fc), detection.NewModifierRegistry(nil), fc, detection.QualityConfig{MinConfidence: .6, EnableFilters: true, EnableContextValidation: true})
+			require.NoError(t, engine.LoadRules([]*domain.SigmaRule{r}))
+			ev, err := domain.NewLogEvent(map[string]interface{}{"event_type": tc.kind, "agent_id": "agent-7c3842b2-4593-49a4-9c6a-46a5d50c756a", "data": tc.data})
+			require.NoError(t, err)
+			assertDurableWorkerDelivery(t, engine, ev)
+		})
+	}
+}
+
+func assertDurableWorkerDelivery(t *testing.T, engine *detection.SigmaDetectionEngine, ev *domain.LogEvent) {
+	t.Helper()
 	ack := make(chan struct{})
 	ev.SetAck(func() { close(ack) })
 	writer := &deliveryWriter{make(chan struct{}), make(chan struct{})}

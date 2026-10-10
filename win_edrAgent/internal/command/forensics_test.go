@@ -1,6 +1,20 @@
 package command
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+func TestCancelledCollectionDoesNotStartPowerShell(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// CommandContext rejects a cancelled context before process creation.
+	_, err := (&Handler{}).collectEventLogAsJSON(ctx, "System", "system", 900000, 200)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled response must not outlive its parent: %v", err)
+	}
+}
 
 func TestCapForensicsMs(t *testing.T) {
 	if capForensicsMs(30_000) != 60_000 {

@@ -14,12 +14,12 @@ Baseline: clean `Main` at `691cfc37` before this work. Existing custom Atomic ru
 
 Official source revision: `388942adbd9641f4dfdcf079d7efe9a75ec0ac43` of [Atomic Red Team](https://github.com/redcanaryco/atomic-red-team/tree/388942adbd9641f4dfdcf079d7efe9a75ec0ac43).
 
-Input: `atomics/Indexes/Indexes-CSV/windows-index.csv`; SHA-256 `c19d1c2c333d3c32dcfdc37357580bc1d9f36f0ec56d189c52f91502a808058b`. The user's downloaded library path/version has not been supplied, so this is not claimed to be that exact library.
+Input: `atomics/Indexes/Indexes-CSV/windows-index.csv`; SHA-256 `c19d1c2c333d3c32dcfdc37357580bc1d9f36f0ec56d189c52f91502a808058b`. Follow-up: the user identified `C:\AtomicRedTeam\atomics` on their separate Windows endpoint. Their `Indexes/index.yaml` hash `08F8BD071D96261E12E520A8BBA4EF85DF33E611491F2435671D4F8FE94C49A4` exactly matches the same file downloaded from the pinned revision. This confirms the index, not every payload/definition byte or the actively loaded runner module. See `LOCAL_DISCOVERY_VALIDATION.md` for the supplied versions and targeted follow-up.
 
 Generated artifacts:
 
 - `atomic-windows-candidates.csv`: all **1,253 unique Windows test GUIDs** from the pinned index.
-- `atomic-windows-summary.json`: **2,180 eligible, compilable disk rules**, zero loader errors and zero compile rejections; **1,085** tests with an exact-technique candidate, **60** with parent-technique candidates only, **108** without a tagged candidate.
+- `atomic-windows-summary.json`: **2,183 eligible, compilable disk rules** after the local discovery follow-up, zero loader errors and zero compile rejections; **1,085** tests with an exact-technique candidate, **60** with parent-technique candidates only, **108** without a tagged candidate.
 
 These are candidate counts, **not detection coverage percentages**. A tag does not establish per-test coverage; missing a tag does not establish a detection failure. For example, an injection test may be detected by a rule tagged with a different technique. Even when a rule compiles, its required service/fields may not exist on the endpoint. Existing DB overrides, enabled states, exceptions and deployed versions are outside this disk inventory. CSV response status is deliberately unverified.
 
@@ -42,7 +42,7 @@ All references point to `sigma_engine_go/internal/application/detection/atomic_b
 
 ## Response and deployment integration
 
-Rules feed the existing ordinary/aggregate detector and durable alert delivery. They do not bypass response guardrails or install automatic containment policies. `connection-manager/internal/response` already supports exact `rule_ids`, per-endpoint cooldowns, the server automation switch, process identity validation and endpoint ownership. The mocked response tests exercise these controls; actual endpoint execution remains user-owned.
+Rules feed the existing ordinary/aggregate detector and durable alert delivery. They do not bypass response guardrails or install automatic containment policies. The local discovery follow-up adds CM migration 063 with a bounded evidence-collection policy for three exact local-discovery IDs; it runs after deployment only when server automation permits it. `connection-manager/internal/response` supports exact `rule_ids`, per-endpoint cooldowns, the server automation switch, process identity validation and endpoint ownership. The mocked response tests exercise these controls; actual endpoint execution remains user-owned.
 
 The new rules have new IDs and are eligible under the current medium/test rule-loading configuration. Rebuild/deploy Sigma and dashboard to use this work; validate new IDs in the runtime rule list and review DB enabled states/exceptions. Existing IDs are not overwritten by disk seeding. This continuation does not change `config.yaml`, agent policy, automation settings or live databases.
 
@@ -50,11 +50,11 @@ For the three PowerShell rules, require script block logging and delivered 4104 
 
 ## Continuation order and requirement status
 
-1. **Unknown due to missing context:** identify the user's actual Atomic revision and deployed telemetry configuration. Rerun the inventory against that revision's Windows index; inspect runtime rule states. Tool invocation from `sigma_engine_go`: `go run ./cmd/atomic-coverage -index <windows-index.csv> -revision <actual-commit> -out <new-report.csv>`.
+1. **Index verified, deployed state still unknown:** the user's supplied index hash matches the pinned source. Inspect runtime rule states and deployed telemetry using `scripts/Collect-AtomicReadiness.ps1` on the endpoint. Tool invocation from `sigma_engine_go` to refresh another inventory: `go run ./cmd/atomic-coverage -index <windows-index.csv> -revision <actual-commit> -out <new-report.csv>`.
 2. **Partial:** validate every candidate against per-test execution evidence. Start with the 108 untagged and 60 parent-only rows, checking behavior rather than adding technique tags just to improve counts. The eight fixtures above are the currently verified subset of this extension.
 3. **Not complete:** close required telemetry gaps before adding rules that depend on missing sources (provider-specific Windows logs, native injection/memory evidence, application logs or other operating systems). Category inference alone is not a collector.
 4. **Implemented but live-unverified:** exercise ingestion, persistence, notification/reconnect and response coordination with user-owned isolated endpoint runs. Record event/alert IDs, timestamps, the actual matched rule and response outcome for each test; distinguish blocked prerequisites, failed execution and no evidence from a detection miss.
-5. **Not configured by this task:** choose per-rule response policies after false-positive review. Use collection/analyst review for ambiguous discovery; require an explicit verified target and policy for termination/isolation. A detection is not proof a response succeeded.
+5. **Partially configured:** migration 063 now supplies evidence collection for the three local-discovery rule IDs. Other per-rule response policies still need false-positive review. Use collection/analyst review for ambiguous discovery; require an explicit verified target and policy for termination/isolation. A detection is not proof a response succeeded.
 6. **Complete:** transparent branding and the evidence-preservation fix; **partial:** full Atomic detection coverage; **unverified:** all-test end-to-end detection/response and production performance under load. No all-test or end-to-end completion claim is made.
 
 ## Checks actually executed

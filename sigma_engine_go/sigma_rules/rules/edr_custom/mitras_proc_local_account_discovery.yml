@@ -1,0 +1,26 @@
+title: Local Account and Group Enumeration Using Net
+id: 9f8f4f57-6d7e-4d23-a60a-319f7c36910a
+status: test
+description: Detects local account and local group enumeration without requiring a particular parent process. Administrative inventory can match; use investigation rather than automatic containment.
+author: MITRAS
+date: 2026-10-10
+references:
+    - https://github.com/redcanaryco/atomic-red-team/blob/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1087.001/T1087.001.yaml
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection_image:
+        Image|endswith:
+            - '\net.exe'
+            - '\net1.exe'
+    selection_query:
+        CommandLine|re: '(?i)\bnet1?(\.exe)?"?\s+(user|localgroup)(\s+"?[\w .-]+"?)?\s*$'
+    condition: selection_image and selection_query
+falsepositives:
+    - Authorized local account inventory and help desk administration
+level: medium
+tags:
+    - attack.discovery
+    - attack.t1087.001
+    - attack.t1069.001

@@ -1,0 +1,25 @@
+title: PowerShell Local Account Discovery Command Invocation
+id: 2b39a76c-d927-443d-93ac-2e8c0770b8cb
+status: test
+description: Detects executed local account discovery cmdlets when PowerShell module logging is available. Does not require or replace script block logging.
+author: MITRAS
+date: 2026-10-10
+references:
+    - https://github.com/redcanaryco/atomic-red-team/blob/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1087.001/T1087.001.yaml
+logsource:
+    product: windows
+    category: ps_module
+detection:
+    selection:
+        Payload|contains:
+            - 'CommandInvocation(Get-LocalUser)'
+            - 'CommandInvocation(Get-LocalGroup)'
+            - 'CommandInvocation(Get-LocalGroupMember)'
+    condition: selection
+falsepositives:
+    - Authorized local account inventory and help desk administration
+level: medium
+tags:
+    - attack.discovery
+    - attack.t1087.001
+    - attack.t1069.001

@@ -249,11 +249,16 @@ var Actions = []Action{
 	{Type: "scan_file", Label: "Scan file / folder", Group: "Investigation",
 		Params: []actionParam{{Key: "file_path", Label: "Path to scan", Required: true, AlertVar: "file_path", Kind: "path"}}},
 	{Type: "collect_logs", Label: "Collect event logs", Group: "Investigation",
-		Params: []actionParam{{Key: "log_types", Label: "Log channels", Kind: "log_channels"}}},
+		Params: []actionParam{
+			{Key: "log_types", Label: "Log channels", Kind: "log_channels"},
+			{Key: "max_events", Label: "Max events per channel (1–5000)", Kind: "int"},
+			{Key: "time_range", Label: "Lookback (e.g. 15m or 24h; max 168h)", Kind: "duration"},
+		}},
 	{Type: "collect_forensics", Label: "Collect forensics package", Group: "Investigation",
 		Params: []actionParam{
 			{Key: "log_types", Label: "Log channels", Kind: "log_channels"},
 			{Key: "max_events", Label: "Max events", Kind: "int"},
+			{Key: "time_range", Label: "Lookback (e.g. 15m or 24h; max 168h)", Kind: "duration"},
 		}},
 	{Type: "process_tree_snapshot", Label: "Process tree snapshot", Group: "Investigation"},
 	{Type: "persistence_scan", Label: "Persistence scan", Group: "Investigation"},
@@ -329,6 +334,12 @@ func validateParam(p actionParam, val string) error {
 	case "int":
 		if n, err := strconv.Atoi(val); err != nil || n <= 0 {
 			return fmt.Errorf("%s must be a positive whole number (got %q)", p.Label, val)
+		} else if p.Key == "max_events" && n > 5000 {
+			return fmt.Errorf("%s must not exceed 5000", p.Label)
+		}
+	case "duration":
+		if d, err := time.ParseDuration(val); err != nil || d < time.Minute || d > 168*time.Hour {
+			return fmt.Errorf("%s must be a duration between 1m and 168h", p.Label)
 		}
 	case "bool", "kill_mode":
 		// kill_mode: "true" = process tree, "false" = the process only.

@@ -1201,7 +1201,7 @@ func (h *Handler) collectForensics(ctx context.Context, params map[string]string
 				_ = ensureEventChannelEnabled(ctx, channel)
 
 				query := fmt.Sprintf("*[System[TimeCreated[timediff(@SystemTime) <= %d]]]", ms)
-				cmd := exec.CommandContext(ctx, wevt, "qe", channel, "/q:"+query, "/c:"+strconv.Itoa(maxEv), "/f:text")
+				cmd := exec.CommandContext(ctx, wevt, "qe", channel, "/q:"+query, "/c:"+strconv.Itoa(maxEv), "/f:text", "/rd:true")
 				output, lastErr = cmd.CombinedOutput()
 				if lastErr != nil {
 					// Channel missing? try fallback candidate instead of failing the whole command.
@@ -1210,17 +1210,9 @@ func (h *Handler) collectForensics(ctx context.Context, params map[string]string
 						continue
 					}
 
-					h.logger.Warnf("[C2] wevtutil xpath failed for %q (%q): %v — fallback /rd:true", logName, channel, lastErr)
-					cmd2 := exec.CommandContext(ctx, wevt, "qe", channel, "/c:"+strconv.Itoa(maxEv), "/f:text", "/rd:true")
-					output, lastErr = cmd2.CombinedOutput()
-					if lastErr != nil {
-						// still not found? try next candidate if any
-						if isChannelNotFound(lastErr, output) && len(candidates) > 1 {
-							h.logger.Warnf("[C2] Event channel missing for %q (%q) after fallback: %v — trying next", logName, channel, lastErr)
-							continue
-						}
-						continue
-					}
+					// A failed bounded query must not silently widen to the full log.
+					h.logger.Warnf("[C2] Bounded event query failed for %q: %v", channel, lastErr)
+					continue
 				}
 
 				ok = true
@@ -1340,7 +1332,7 @@ func (h *Handler) collectEventLogAsJSON(ctx context.Context, channel string, log
 	if strings.EqualFold(channel, "Security") {
 		psTTL = 90 * time.Second
 	}
-	psCtx, psCancel := context.WithTimeout(context.Background(), psTTL)
+	psCtx, psCancel := context.WithTimeout(ctx, psTTL)
 	defer psCancel()
 
 	script := fmt.Sprintf(`$ErrorActionPreference='Stop';
@@ -1365,7 +1357,7 @@ $out | ConvertTo-Json -Depth 6 -Compress;`, lookbackMs, channel, maxEvents, stri
 
 	out, err := exec.CommandContext(psCtx, ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("powershell get-winevent failed: %v: %s", err, string(out))
+		return nil, fmt.Errorf("powershell get-winevent failed: %w: %s", err, string(out))
 	}
 	raw := strings.TrimSpace(string(out))
 	if raw == "" {
