@@ -1,0 +1,31 @@
+title: PowerShell Browser Bookmark Enumeration or History Extraction
+id: e4cd3d76-dc06-42de-b639-b0d9d68c70bd
+status: test
+description: Detects recursive bookmark discovery and browser history reads. Investigate in context; legitimate profile migration can match.
+author: MITRAS
+date: 2026-10-10
+references:
+    - https://github.com/redcanaryco/atomic-red-team/blob/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1217/T1217.yaml
+logsource:
+    product: windows
+    category: ps_script
+detection:
+    selection_enumeration:
+        ScriptBlockText|contains|all:
+            - 'Get-ChildItem'
+            - '-Recurse'
+            - 'Bookmarks'
+    selection_read:
+        ScriptBlockText|contains: 'Get-Content'
+    selection_database:
+        ScriptBlockText|contains:
+            - '\User Data\Default\History'
+            - '\User Data\Default\Bookmarks'
+            - '\places.sqlite'
+    condition: selection_enumeration or (selection_read and selection_database)
+falsepositives:
+    - Approved profile migration and browser troubleshooting scripts
+level: medium
+tags:
+    - attack.discovery
+    - attack.t1217

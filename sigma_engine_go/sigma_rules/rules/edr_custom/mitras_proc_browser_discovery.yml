@@ -1,0 +1,33 @@
+title: Recursive Browser Bookmark Discovery Through Command Line
+id: 93d13ab9-cb39-4cdd-ad91-e01fce6aa360
+status: test
+description: Detects recursive browser bookmark searches with where or cmd. These commands require analyst context before containment.
+author: MITRAS
+date: 2026-10-10
+references:
+    - https://github.com/redcanaryco/atomic-red-team/blob/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1217/T1217.yaml
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection_where:
+        Image|endswith: '\where.exe'
+        CommandLine|contains: '/R '
+    selection_bookmarks:
+        CommandLine|contains:
+            - 'Bookmarks'
+            - 'places.sqlite'
+    selection_cmd:
+        Image|endswith: '\cmd.exe'
+        CommandLine|contains|all:
+            - 'dir '
+            - '/s'
+            - '/b'
+            - '\Favorites'
+    condition: (selection_where and selection_bookmarks) or selection_cmd
+falsepositives:
+    - Approved profile migration and help desk activity
+level: medium
+tags:
+    - attack.discovery
+    - attack.t1217

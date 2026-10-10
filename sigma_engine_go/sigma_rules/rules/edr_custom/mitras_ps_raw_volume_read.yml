@@ -1,0 +1,24 @@
+title: PowerShell Direct Volume Access Through FileStream
+id: 504ba1ba-905d-421f-bccd-151a28dbdd26
+status: test
+description: Detects PowerShell opening a raw DOS device with FileStream for reading. Does not depend on Atomic names or paths.
+author: MITRAS
+date: 2026-10-10
+references:
+    - https://github.com/redcanaryco/atomic-red-team/blob/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1006/T1006.yaml
+logsource:
+    product: windows
+    category: ps_script
+detection:
+    selection:
+        ScriptBlockText|contains|all:
+            - 'IO.FileStream'
+            - '\\\\.\\'
+            - 'Read'
+    condition: selection
+falsepositives:
+    - Authorized disk diagnostics, backup or forensic scripts
+level: medium
+tags:
+    - attack.defense-evasion
+    - attack.t1006

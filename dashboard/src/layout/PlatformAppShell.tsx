@@ -427,7 +427,7 @@ export const PlatformAppShell = memo(function PlatformAppShell({ children }: { c
                     </button>
 
                     <Link to="/" className="flex items-center gap-2 shrink-0 mr-2 sm:mr-4" onClick={() => setMobileOpen(false)}>
-                        <MitrasLogo className="w-10 h-10 shrink-0 rounded-lg bg-white p-1" />
+                        <MitrasLogo className="w-10 h-10 shrink-0 p-1 brightness-0 invert" />
                         <div className="hidden sm:flex flex-col leading-tight">
                             <span className="text-[8px] font-bold tracking-[0.18em] uppercase" style={{ color: 'var(--xc-brand-original)' }}>
                                 Endpoint Security

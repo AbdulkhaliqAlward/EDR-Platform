@@ -377,7 +377,7 @@ function generateHTMLReport(data: ReportData, template: string, title: string, f
 </head>
 <body>
     <div class="header">
-        <img src="${mitrasLogo}" alt="MITRAS" style="width:140px;height:auto;background:white;border-radius:12px" />
+        <img src="${mitrasLogo}" alt="MITRAS" style="width:140px;height:auto" />
         <h1>${title}</h1>
         <p class="meta">
             Generated: ${new Date(data.generatedAt).toLocaleString()}<br>

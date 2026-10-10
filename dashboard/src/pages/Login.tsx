@@ -84,7 +84,7 @@ export default function Login() {
 
             <div className="max-w-md w-full relative z-10">
                 <div className="flex justify-center mb-8">
-                    <div className="rounded-2xl bg-white px-8 py-4 shadow-sm ring-1 ring-slate-200/80">
+                    <div className="px-8 py-4">
                         <MitrasLogo wordmark className="w-44 h-40" />
                     </div>
                 </div>

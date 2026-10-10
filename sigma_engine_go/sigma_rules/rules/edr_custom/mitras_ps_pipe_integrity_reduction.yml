@@ -1,0 +1,27 @@
+title: PowerShell Named Pipe Mandatory Integrity Label Reduction
+id: a7b09fd5-d5f7-4ff0-9f91-3409b552a6f5
+status: test
+description: Detects a script creating named pipes and setting an untrusted mandatory integrity label using native security APIs.
+author: MITRAS
+date: 2026-10-10
+references:
+    - https://github.com/redcanaryco/atomic-red-team/blob/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1559/T1559.yaml
+logsource:
+    product: windows
+    category: ps_script
+detection:
+    selection_api:
+        ScriptBlockText|contains|all:
+            - 'NamedPipeServerStream'
+            - 'SetSecurityInfo'
+    selection_label:
+        ScriptBlockText|contains:
+            - 'S-1-16-0'
+            - 'ML;;NW;;;UN'
+    condition: selection_api and selection_label
+falsepositives:
+    - Deliberate low integrity IPC compatibility testing
+level: high
+tags:
+    - attack.execution
+    - attack.t1559

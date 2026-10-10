@@ -136,7 +136,7 @@ export function ProfessionalReportView({
 
             {/* Preview Content — scrollable in modal, full-height in standalone page */}
             <div className={`p-6 space-y-6 ${hideActionBar ? '' : 'max-h-[600px] overflow-y-auto'}`}>
-                <div className="flex items-center gap-3"><MitrasLogo className="h-12 w-12 rounded-lg bg-white p-1" /><strong className="text-lg tracking-widest">MITRAS</strong></div>
+                <div className="flex items-center gap-3"><MitrasLogo className="h-12 w-12 p-1" /><strong className="text-lg tracking-widest">MITRAS</strong></div>
                 {/* Executive Summary */}
                 {shouldShowSection('summary') && <ReportSection 
                         title="Executive Summary"

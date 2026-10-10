@@ -378,28 +378,24 @@ func (fm *FieldMapper) ResolveField(eventData map[string]interface{}, fieldName 
 	// Value-level caching (if desired) must be keyed by event identity (see SelectionEvaluator,
 	// which uses event.ComputeHash()).
 
-	// Helper function to unescape double backslashes
-	unescapeString := func(v interface{}) interface{} {
-		if s, ok := v.(string); ok && strings.Contains(s, "\\\\") {
-			return strings.ReplaceAll(s, "\\\\", "\\")
-		}
-		return v
-	}
+	// Values are already decoded at ingestion. Preserve literal backslashes in
+	// UNC/device paths, regular expressions and script source; decoding twice
+	// corrupts evidence and changes detection semantics.
 
 	// 1) Direct field access
 	if val, ok := eventData[fieldName]; ok {
-		return unescapeString(val), FieldTypeString, nil
+		return val, FieldTypeString, nil
 	}
 
 	// 2) Nested field access (dot notation)
 	if val := fm.getNested(eventData, fieldName); val != nil {
-		return unescapeString(val), FieldTypeString, nil
+		return val, FieldTypeString, nil
 	}
 
 	// 3) ECS mapping (Sigma -> ECS)
 	if ecsField, ok := fm.SigmaToECS(fieldName); ok {
 		if val := fm.getNested(eventData, ecsField); val != nil {
-			return unescapeString(val), FieldTypeString, nil
+			return val, FieldTypeString, nil
 		}
 	}
 
@@ -408,11 +404,11 @@ func (fm *FieldMapper) ResolveField(eventData map[string]interface{}, fieldName 
 		for _, alt := range mapping.Alternatives {
 			// Try direct
 			if val, ok := eventData[alt]; ok {
-				return unescapeString(val), mapping.DataType, nil
+				return val, mapping.DataType, nil
 			}
 			// Try nested
 			if val := fm.getNested(eventData, alt); val != nil {
-				return unescapeString(val), mapping.DataType, nil
+				return val, mapping.DataType, nil
 			}
 		}
 	}
@@ -420,12 +416,12 @@ func (fm *FieldMapper) ResolveField(eventData map[string]interface{}, fieldName 
 	// 5) EDR Agent data.* namespace resolution
 	if agentPath, ok := fm.sigmaToAgentData[fieldName]; ok {
 		if val := fm.getNested(eventData, agentPath); val != nil {
-			return unescapeString(val), FieldTypeString, nil
+			return val, FieldTypeString, nil
 		}
 	}
 	if agentPath, ok := fm.sigmaToAgentData[strings.ToLower(fieldName)]; ok {
 		if val := fm.getNested(eventData, agentPath); val != nil {
-			return unescapeString(val), FieldTypeString, nil
+			return val, FieldTypeString, nil
 		}
 	}
 
@@ -437,7 +433,7 @@ func (fm *FieldMapper) ResolveField(eventData map[string]interface{}, fieldName 
 				if s, isStr := val.(string); isStr && s == "" {
 					continue
 				}
-				return unescapeString(val), FieldTypeString, nil
+				return val, FieldTypeString, nil
 			}
 		}
 	}
@@ -447,7 +443,7 @@ func (fm *FieldMapper) ResolveField(eventData map[string]interface{}, fieldName 
 				if s, isStr := val.(string); isStr && s == "" {
 					continue
 				}
-				return unescapeString(val), FieldTypeString, nil
+				return val, FieldTypeString, nil
 			}
 		}
 	}
