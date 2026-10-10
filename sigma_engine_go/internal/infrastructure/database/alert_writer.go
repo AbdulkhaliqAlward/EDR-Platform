@@ -26,7 +26,9 @@ type AlertWriterConfig struct {
 // DefaultAlertWriterConfig returns default configuration.
 func DefaultAlertWriterConfig() AlertWriterConfig {
 	return AlertWriterConfig{
-		DeduplicationWindow: 5 * time.Minute,
+		// Sliding: measured from the LAST occurrence of the same rule on the
+		// same endpoint (bounded to 24 h per alert in UpsertWithDedup).
+		DeduplicationWindow: 30 * time.Minute,
 		// Low-latency defaults so alerts show up near real-time in the dashboard.
 		// Throughput is still protected by batching; the writer flushes at most every 100ms
 		// unless BatchSize is hit first.

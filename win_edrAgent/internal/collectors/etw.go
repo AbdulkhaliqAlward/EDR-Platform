@@ -143,19 +143,23 @@ func goFileIoEvent(evt *C.ParsedFileIoEvent) {
 		return
 	}
 
-	pid := uint32(evt.processId)
-	opcode := uint8(evt.opcode)
-	filePath := wcharToGo(&evt.filePath[0], 1024)
-
-	if filePath == "" {
+	op := fileIoOp{
+		pid:           uint32(evt.processId),
+		opcode:        uint8(evt.opcode),
+		createOptions: uint32(evt.createOptions),
+		fileObject:    uint64(evt.fileObject),
+		ttid:          uint64(evt.ttid),
+		at:            time.Now(),
+	}
+	if p := wcharToGo(&evt.filePath[0], 1024); p != "" {
+		// ETW kernel events report paths in device namespace:
+		// \Device\HarddiskVolume3\Users\foo\file.txt → C:\Users\foo\file.txt
+		op.path = kernelPathToWin32(p)
+	} else if op.opcode == fileIoCreate {
 		return
 	}
 
-	// ETW kernel events report paths in device namespace:
-	// \Device\HarddiskVolume3\Users\foo\file.txt → C:\Users\foo\file.txt
-	filePath = kernelPathToWin32(filePath)
-
-	collector.enqueueAsync(func() { collector.handleFileIo(pid, opcode, filePath) })
+	collector.enqueueAsync(func() { collector.handleFileIo(op) })
 }
 
 // kernelPathToWin32 converts a kernel device path to a Win32 drive-letter path.

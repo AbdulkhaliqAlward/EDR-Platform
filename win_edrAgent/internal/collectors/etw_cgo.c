@@ -152,8 +152,13 @@ static void parseImageLoadEvent(PEVENT_RECORD rec, ParsedImageLoadEvent* out) {
 // =====================================================================
 
 static void parseFileIoEvent(PEVENT_RECORD rec, ParsedFileIoEvent* out) {
-    if (tdhGetUnicode(rec, L"OpenPath", out->filePath, sizeof(out->filePath)) != 0) {
-        tdhGetUnicode(rec, L"FileName", out->filePath, sizeof(out->filePath));
+    tdhGetPointer(rec, L"FileObject", &out->fileObject);
+    tdhGetPointer(rec, L"TTID", &out->ttid);
+    if (out->opcode == 64) {
+        tdhGetULONG(rec, L"CreateOptions", &out->createOptions);
+        if (tdhGetUnicode(rec, L"OpenPath", out->filePath, sizeof(out->filePath)) != 0) {
+            tdhGetUnicode(rec, L"FileName", out->filePath, sizeof(out->filePath));
+        }
     }
 }
 
@@ -259,9 +264,10 @@ static void WINAPI stdcallEventCallback(PEVENT_RECORD eventRecord) {
         return;
     }
 
-    // ---- FILE I/O events (Create=64, Write=68, Delete=70, Rename=71) ----
+    // ---- FILE I/O events (Create=64, Delete=70, Rename=71) ----
+    // Write (68) events carry no path and are not forwarded.
     if (guidsEqual(provider, &FileIoProviderGuid)) {
-        if (opcode != 64 && opcode != 68 && opcode != 70 && opcode != 71) return;
+        if (opcode != 64 && opcode != 70 && opcode != 71) return;
 
         ParsedFileIoEvent evt;
         memset(&evt, 0, sizeof(evt));
@@ -272,7 +278,8 @@ static void WINAPI stdcallEventCallback(PEVENT_RECORD eventRecord) {
         parseFileIoEvent(eventRecord, &evt);
 
         if (evt.processId <= 4) return;
-        if (evt.filePath[0] == 0) return;  // No path — skip
+        if (opcode == 64 && evt.filePath[0] == 0) return;  // Create without a path
+        if (opcode != 64 && evt.fileObject == 0) return;    // Delete/Rename need the FileObject
 
         // Phase 1: Check if this is a named pipe operation.
         // Pipes use the same kernel FileIo provider but with paths under

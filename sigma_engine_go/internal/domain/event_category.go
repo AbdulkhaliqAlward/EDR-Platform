@@ -39,6 +39,10 @@ const (
 	EventCategoryPsScript EventCategory = "ps_script" // Script Block Logging, EventID 4104
 	EventCategoryPsModule EventCategory = "ps_module" // Module Logging, EventID 4103
 
+	// EventCategoryProcessInventory is the agent's start-up snapshot of
+	// processes already running (no Sigma category: never evaluated).
+	EventCategoryProcessInventory EventCategory = "process_inventory"
+
 	// EventCategoryClipboard is agent clipboard telemetry (no SigmaHQ category).
 	EventCategoryClipboard EventCategory = "clipboard"
 )

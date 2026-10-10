@@ -55,13 +55,18 @@ typedef struct {
     WCHAR     imagePath[1024];  // Full Unicode path to the loaded image
 } ParsedImageLoadEvent;
 
-// File I/O event (create, write, delete, rename).
+// File I/O event (create/open, delete, rename).
+// Only Create (64) carries a path; Delete (70) / Rename (71) carry the
+// FileObject, resolved in Go from the FileObject seen at Create time.
 typedef struct {
-    DWORD processId;
-    DWORD threadId;
-    BYTE  opcode;       // 64=Create, 68=Write, 70=Delete, 71=Rename
-    BYTE  _pad[3];
-    WCHAR filePath[1024];       // Full Unicode path of the target file
+    DWORD     processId;    // EventHeader.ProcessId (may be -1: resolve via ttid)
+    DWORD     threadId;
+    BYTE      opcode;       // 64=Create, 70=Delete, 71=Rename
+    BYTE      _pad[3];
+    ULONG     createOptions;  // Create: high byte = CreateDisposition
+    ULONGLONG fileObject;     // kernel FILE_OBJECT address (correlation key)
+    ULONGLONG ttid;           // issuing thread id
+    WCHAR     filePath[1024]; // Create: full Unicode path of the target file
 } ParsedFileIoEvent;
 
 // =======================================================================

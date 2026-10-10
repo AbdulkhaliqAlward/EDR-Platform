@@ -102,6 +102,8 @@ type AlertResponse struct {
 	// ── Analyst-friendly enrichment (computed, not stored) ──────────────────
 	HumanSummary   string `json:"human_summary,omitempty"`
 	SourceHostname string `json:"source_hostname,omitempty"`
+	// LastSeenAt is the latest occurrence merged into this alert (EventCount occurrences in total).
+	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
 // AlertsListResponse is the API response for listing alerts.
@@ -353,6 +355,7 @@ func toAlertResponseWithRiskLevels(alert *database.Alert, riskLevels scoring.Ris
 		FalsePositiveRisk: alert.FalsePositiveRisk,
 		CreatedAt:         alert.CreatedAt,
 		UpdatedAt:         alert.UpdatedAt,
+		LastSeenAt:        alert.LastSeenAt,
 		// Context-Aware Risk Scoring
 		RiskScore:       alert.RiskScore,
 		RiskLevel:       scoring.RiskLevelFromScore(alert.RiskScore, riskLevels),

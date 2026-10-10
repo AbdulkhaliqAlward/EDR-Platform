@@ -27,3 +27,17 @@ func TestPowerShellAgentEventsMapToSigmaCategories(t *testing.T) {
 		t.Fatal("Event Log 4104/4103 must map to ps_script/ps_module")
 	}
 }
+
+func TestProcessSnapshotIsNotProcessCreation(t *testing.T) {
+	snap, err := NewLogEvent(map[string]interface{}{"event_type": "process", "data": map[string]interface{}{"action": "snapshot", "name": "svchost.exe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Category != EventCategoryProcessInventory {
+		t.Fatalf("snapshot category = %s, want process_inventory", snap.Category)
+	}
+	start, _ := NewLogEvent(map[string]interface{}{"event_type": "process", "data": map[string]interface{}{"action": "process_creation"}})
+	if start.Category != EventCategoryProcessCreation {
+		t.Fatalf("process start category = %s", start.Category)
+	}
+}

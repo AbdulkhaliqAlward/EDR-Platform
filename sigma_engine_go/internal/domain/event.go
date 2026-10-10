@@ -469,8 +469,15 @@ func (e *LogEvent) inferCategory() EventCategory {
 	if et, ok := e.GetField("event_type"); ok && et != nil {
 		switch strings.ToLower(fmt.Sprintf("%v", et)) {
 		case "process":
-			if e.actionOf() == "process_termination" {
+			switch e.actionOf() {
+			case "process_termination":
 				return EventCategoryProcessTermination
+			case "snapshot", "inventory":
+				// Start-up inventory of processes that were ALREADY running:
+				// not a process creation. Evaluating it against
+				// process_creation rules re-raised alerts for every running
+				// process on each agent restart.
+				return EventCategoryProcessInventory
 			}
 			return EventCategoryProcessCreation
 		case "network":

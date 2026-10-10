@@ -45,6 +45,8 @@ type Alert struct {
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// LastSeenAt is the most recent occurrence merged into this alert.
+	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
 // AlertFilters contains filter options for querying alerts.

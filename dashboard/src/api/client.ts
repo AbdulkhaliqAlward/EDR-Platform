@@ -328,6 +328,8 @@ export interface Alert {
     resolved_at?: string;
     created_at: string;
     updated_at: string;
+    /** Latest occurrence merged into this alert (event_count occurrences in total). */
+    last_seen_at?: string;
     // Analyst-friendly enrichment (computed by server)
     human_summary?: string;
     source_hostname?: string;

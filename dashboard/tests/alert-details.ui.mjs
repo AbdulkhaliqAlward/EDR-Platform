@@ -62,17 +62,26 @@ try {
         await page.getByText('Process image (Image)', { exact: true }).waitFor();
         assert.equal(await value('Process name').innerText(), 'Not available');
         assert.equal(await value('Target path \\(TargetFilename\\)').innerText(), target);
-        await page.getByRole('button', { name: 'Events', exact: true }).click();
-        assert.equal(await value('Process name').innerText(), 'Not available');
+        await page.getByRole('tab', { name: 'Event', exact: true }).click();
+        // Every collected field is listed; the matched field is marked.
+        await page.getByRole('searchbox', { name: 'Search event fields' }).waitFor();
+        assert.equal(await value('Target file').innerText(), target);
+        assert.equal(await page.getByLabel('Matched by the rule').count() >= 1, true);
         assert.equal(await page.getByText('false', { exact: true }).count(), 1);
         assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'event panel overflows');
         await page.screenshot({ path: join(artifacts, `events-${width}-${dark ? 'dark' : 'light'}.png`), fullPage: true, animations: 'disabled' });
+        await page.getByRole('searchbox', { name: 'Search event fields' }).fill('35592');
+        assert.equal(await value('PID').innerText(), '35592');
+        assert.equal(await page.getByText('Target file', { exact: true }).count(), 0, 'search filters rows');
         await page.getByRole('button', { name: 'Show full JSON' }).click();
         await page.getByRole('button', { name: 'Hide full JSON' }).waitFor();
-        await page.getByRole('button', { name: /Context/ }).click();
+        await page.getByRole('tab', { name: 'Process', exact: true }).click();
         await page.getByText('Lineage unavailable', { exact: true }).waitFor();
-        await page.getByText('Burst data unavailable.', { exact: true }).waitFor();
+        assert.equal(await value('Process name').innerText(), 'Not available');
         assert.equal(await page.getByText('Microsoft.PowerShell.Commands.Utility.dll', { exact: true }).count(), 0);
+        await page.getByRole('tab', { name: 'Detection', exact: true }).click();
+        await page.getByText('Burst data unavailable.', { exact: true }).waitFor();
+        await page.getByText('What the rule matched', { exact: true }).waitFor();
         assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'context panel overflows');
     }
     await page.goto(`${origin}/verify?known`);
@@ -80,7 +89,7 @@ try {
     assert.equal(await value('Process name').innerText(), 'powershell.exe');
     assert.equal(await value('Command line').innerText(), 'Get-CimInstance Win32_LogicalDisk');
     assert.deepEqual(errors, []);
-    console.log(`PASS: real alert panel, Summary/Events/Context, JSON toggle, missing/known process, 390/1280px light/dark. Screenshots: ${artifacts}`);
+    console.log(`PASS: real alert panel, Overview/Event/Process/Detection tabs, field search, matched marker, JSON toggle, missing/known process, 390/1280px light/dark. Screenshots: ${artifacts}`);
 } finally {
     await browser?.close();
     await server.close();

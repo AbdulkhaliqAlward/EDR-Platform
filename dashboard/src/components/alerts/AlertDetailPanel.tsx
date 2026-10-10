@@ -1,7 +1,15 @@
-import { useState } from 'react';
+// AlertDetailPanel — one alert, organised for triage:
+//   header   → severity (rule level), risk, status, occurrences, host, actions
+//   Overview → what happened, recommended action, triggering activity, endpoint
+//   Event    → every collected field (grouped, searchable, copyable) + raw JSON
+//   Process  → process lineage
+//   Detection→ rule, MITRE ATT&CK, matched fields, related rules, risk scoring
+//   Response → playbooks, false-positive exception, response history
+// Only the active tab is rendered (cheap on large events).
+import { useMemo, useState, type ReactNode } from 'react';
 import {
-    Check, Clock, CheckCircle, XCircle, AlertTriangle,
-    TrendingUp, Info, ChevronDown, ChevronUp, Shield, Play, Settings, ShieldOff, History
+    AlertTriangle, Check, CheckCircle, ChevronDown, ChevronUp, Clock, ExternalLink, History,
+    Info, Monitor, Play, RotateCcw, Settings, Shield, ShieldOff, Terminal, User, XCircle,
 } from 'lucide-react';
 import { Modal } from '../';
 import { useNavigate } from 'react-router-dom';
@@ -16,6 +24,7 @@ import type { Alert } from '../../api/client';
 import { RunPlaybookModal } from '../automation/RunPlaybookModal';
 import { AlertResponseHistory } from '../automation/AlertResponseHistory';
 import { AlertEvidencePanel } from './AlertEvidencePanel';
+import { AlertFieldsView } from './AlertFieldsView';
 import { alertEvidence, displaySnapshot } from './alertEvidence';
 import { CreateExceptionModal } from './CreateExceptionModal';
 import { useAutomationSettings } from '../../hooks/useAutomationSettings';
@@ -28,653 +37,372 @@ interface AlertDetailPanelProps {
     inlineMode?: boolean;
 }
 
-type TabId = 'summary' | 'context' | 'event' | 'mitre' | 'aggregation' | 'actions';
+type TabId = 'overview' | 'event' | 'process' | 'detection' | 'response';
 
-export function AlertDetailPanel({
-    alert,
-    isOpen,
-    onClose,
-    onStatusChange,
-    inlineMode = false,
-}: AlertDetailPanelProps) {
-    const [activeTab, setActiveTab] = useState<TabId>('summary');
+const TABS: { id: TabId; label: string }[] = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'event', label: 'Event' },
+    { id: 'process', label: 'Process' },
+    { id: 'detection', label: 'Detection' },
+    { id: 'response', label: 'Response' },
+];
+
+const RECOMMENDED: Record<string, { text: string; style: string }> = {
+    critical: { text: 'Investigate immediately — potential active threat', style: 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300' },
+    high: { text: 'Investigate within 1 hour', style: 'bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-800 text-orange-700 dark:text-orange-300' },
+    medium: { text: 'Review when possible — may be benign', style: 'bg-yellow-50 dark:bg-yellow-950/30 border-yellow-200 dark:border-yellow-800 text-yellow-700 dark:text-yellow-300' },
+    low: { text: 'Low priority — review during routine triage', style: 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300' },
+};
+
+const fmt = (v?: string) => {
+    if (!v) return '';
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? v : d.toLocaleString();
+};
+
+/** MITRE technique id → attack.mitre.org URL (T1059.001 → /T1059/001/). */
+const mitreUrl = (t: string) => `https://attack.mitre.org/techniques/${t.toUpperCase().replace('.', '/')}/`;
+
+function SectionLabel({ children }: { children: ReactNode }) {
+    return <h3 className="text-[10px] text-slate-400 uppercase tracking-wider font-bold mb-2">{children}</h3>;
+}
+
+function FactGrid({ facts }: { facts: [string, string, boolean?][] }) {
+    const shown = facts.filter(([, v]) => v);
+    if (!shown.length) return null;
+    return (
+        <dl className="grid min-w-0 grid-cols-1 sm:grid-cols-[150px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
+            {shown.map(([label, value, mono]) => (
+                <div key={label} className="contents">
+                    <dt className="text-slate-500">{label}</dt>
+                    <dd dir="auto" className={`min-w-0 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-all ${mono ? 'font-mono' : ''}`}>{value}</dd>
+                </div>
+            ))}
+        </dl>
+    );
+}
+
+export function AlertDetailPanel({ alert, isOpen, onClose, onStatusChange, inlineMode = false }: AlertDetailPanelProps) {
+    const [activeTab, setActiveTab] = useState<TabId>('overview');
     const [showRawJson, setShowRawJson] = useState(false);
     const [runPlaybookOpen, setRunPlaybookOpen] = useState(false);
     const [exceptionOpen, setExceptionOpen] = useState(false);
     const [historyKey, setHistoryKey] = useState(0);
     const { settings: automation } = useAutomationSettings();
     const navigate = useNavigate();
+    const evidence = useMemo(() => (alert ? alertEvidence(alert) : null), [alert]);
 
-    const handleNavigateWithContext = (path: string) => {
-        if (!alert) return;
-        navigate(path, {
-            state: {
-                alertId: alert.id,
-                alertDetails: {
-                    severity: alert.severity,
-                    ruleName: alert.rule_title,
-                    ruleId: alert.related_rule_ids?.length === 1 ? alert.related_rule_ids[0] : alert.rule_id,
-                    mitreTechniques: alert.mitre_techniques,
-                    agentId: alert.agent_id,
-                    title: alert.rule_title,
-                    description: alert.human_summary,
-                    riskScore: alert.risk_score
-                }
-            }
-        });
-    };
+    if (!alert || !evidence) return null;
 
-    if (!alert) return null;
-
-    const hasContext = !!(alert.context_snapshot);
     const snapshot = displaySnapshot(alert);
     const breakdown = alert.score_breakdown || snapshot?.score_breakdown;
+    const ctx = alert.context_data ?? alert.event_data;
+    const source = (alert.context_data?.source ?? {}) as NonNullable<NonNullable<Alert['context_data']>['source']>;
+    const host = alert.source_hostname || source.hostname || '';
+    const canWrite = authApi.canWriteAlerts();
+    const canManageExceptions = authApi.hasRole(['admin', 'security']);
+    const occurrences = alert.event_count || 1;
+    const lastSeen = alert.last_seen_at && alert.last_seen_at !== alert.timestamp ? alert.last_seen_at : '';
+    const script = evidence.pick('script_block_text') || evidence.pick('payload');
 
-    const hasAggregation = !!(alert as Alert & { match_count?: number }).match_count || !!(alert as Alert & { related_rules?: string[] }).related_rules?.length;
-    const tabs = [
-        { id: 'summary' as TabId, label: 'Summary' },
-        { id: 'context' as TabId, label: '⚡ Context', highlight: hasContext },
-        { id: 'event' as TabId, label: 'Events' },
-        { id: 'mitre' as TabId, label: 'MITRE' },
-        ...(hasAggregation ? [{ id: 'aggregation' as TabId, label: '🔗 Aggreg.' }] : []),
-        ...(authApi.canWriteAlerts() ? [{ id: 'actions' as TabId, label: 'Actions' }] : []),
-    ];
+    const goAutomation = () => navigate('/itsm/automations', {
+        state: {
+            alertId: alert.id,
+            alertDetails: {
+                severity: alert.severity, ruleName: alert.rule_title,
+                ruleId: alert.related_rule_ids?.length === 1 ? alert.related_rule_ids[0] : alert.rule_id,
+                mitreTechniques: alert.mitre_techniques, agentId: alert.agent_id, title: alert.rule_title,
+                description: alert.human_summary, riskScore: alert.risk_score,
+            },
+        },
+    });
+
+    // ── Header ───────────────────────────────────────────────────────────
+    const statusButton = (status: string, label: string, Icon: typeof Check, tone: string) => (
+        <button key={status} type="button" onClick={() => onStatusChange(alert.id, status)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${tone}`}>
+            <Icon className="w-3.5 h-3.5" /> {label}
+        </button>
+    );
+    const neutral = 'border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800';
+    const statusActions = !canWrite ? [] : alert.status === 'open'
+        ? [statusButton('acknowledged', 'Acknowledge', Check, neutral), statusButton('in_progress', 'Investigate', Clock, neutral)]
+        : alert.status === 'acknowledged' || alert.status === 'in_progress'
+            ? [statusButton('resolved', 'Resolve', CheckCircle, 'border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'),
+               statusButton('false_positive', 'False positive', XCircle, neutral)]
+            : [statusButton('open', 'Reopen', RotateCcw, neutral)];
+
+    const header = (
+        <div className="px-4 pt-4 pb-3 border-b border-slate-200 dark:border-slate-700 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+                <span className={`badge text-[11px] font-bold ${severityColors[alert.severity]}`}
+                    title="Severity is the Sigma rule level assigned by the rule author; the risk score adds host context.">
+                    {alert.severity.toUpperCase()}
+                </span>
+                <span className={`badge text-[11px] ${statusColors[alert.status]}`}>{alert.status.replace(/_/g, ' ')}</span>
+                {alert.risk_score !== undefined && <RiskScoreBadge score={alert.risk_score} riskLevel={alert.risk_level} />}
+                <span className="text-xs text-slate-500" title={lastSeen ? `First ${fmt(alert.timestamp)} · last ${fmt(lastSeen)}` : fmt(alert.timestamp)}>
+                    {occurrences > 1 ? `${occurrences} occurrences` : '1 occurrence'}
+                </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                <div className="flex items-center gap-1.5 min-w-0 text-slate-600 dark:text-slate-300"><Monitor className="w-3.5 h-3.5 shrink-0 text-slate-400" /><span className="truncate" title={alert.agent_id}>{host || 'Unknown host'}</span></div>
+                <div className="flex items-center gap-1.5 min-w-0 text-slate-600 dark:text-slate-300"><User className="w-3.5 h-3.5 shrink-0 text-slate-400" /><span className="truncate">{evidence.pick('user_name') || 'Unknown user'}</span></div>
+                <div className="flex items-center gap-1.5 min-w-0 text-slate-600 dark:text-slate-300"><Terminal className="w-3.5 h-3.5 shrink-0 text-slate-400" /><span className="truncate" title={evidence.image}>{evidence.processName || 'Process not captured'}</span></div>
+            </div>
+            {(statusActions.length > 0) && <div className="flex flex-wrap gap-2">{statusActions}</div>}
+        </div>
+    );
+
+    // ── Tabs ─────────────────────────────────────────────────────────────
+    const tabBar = (
+        <div role="tablist" aria-label="Alert details" className="flex border-b border-slate-200 dark:border-slate-700 px-2 overflow-x-auto">
+            {TABS.map(t => (
+                <button key={t.id} type="button" role="tab" aria-selected={activeTab === t.id}
+                    onClick={() => setActiveTab(t.id)}
+                    className={`tab whitespace-nowrap ${activeTab === t.id ? 'tab-active' : ''}`}>
+                    {t.label}
+                </button>
+            ))}
+        </div>
+    );
+
+    const overview = (
+        <div className="space-y-4">
+            {alert.human_summary && (
+                <div className="rounded-xl p-3.5 bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 flex items-start gap-3">
+                    <Info className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                        <p className="text-[10px] text-indigo-500 dark:text-indigo-400 uppercase tracking-wider font-bold mb-1">What happened</p>
+                        <p dir="auto" className="text-sm font-medium text-slate-800 dark:text-slate-100 break-words">{alert.human_summary}</p>
+                    </div>
+                </div>
+            )}
+            <div className={`rounded-lg p-2.5 border flex items-center gap-2 text-sm font-medium ${(RECOMMENDED[alert.severity] || RECOMMENDED.medium).style}`}>
+                <Shield className="w-4 h-4 shrink-0" />
+                <span>{(RECOMMENDED[alert.severity] || RECOMMENDED.medium).text}</span>
+            </div>
+            <AlertEvidencePanel alert={alert} />
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                <SectionLabel>Endpoint &amp; timing</SectionLabel>
+                <FactGrid facts={[
+                    ['Host', host],
+                    ['IP address', String(alert.context_data?.ip_address || source.ip_address || ''), true],
+                    ['Operating system', [source.os_type, source.os_version && source.os_version !== 'unknown' ? source.os_version : ''].filter(Boolean).join(' ')],
+                    ['Agent version', source.agent_version || '', true],
+                    ['Agent ID', alert.agent_id, true],
+                    ['Detected', fmt(alert.timestamp)],
+                    ['Last occurrence', fmt(lastSeen)],
+                    ['Occurrences', String(occurrences)],
+                    ['Assigned to', alert.assigned_to || ''],
+                    ['Acknowledged', fmt(alert.acknowledged_at)],
+                    ['Resolved', fmt(alert.resolved_at)],
+                ]} />
+            </div>
+            {alert.tags && Object.keys(alert.tags).length > 0 && (
+                <div>
+                    <SectionLabel>Tags</SectionLabel>
+                    <div className="flex flex-wrap gap-1.5">
+                        {Object.entries(alert.tags).map(([k, v]) => (
+                            <span key={k} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                                <span className="text-slate-400">{k}:</span>{v}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+            )}
+            {alert.notes && (
+                <div className="rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/10 p-3">
+                    <SectionLabel>Analyst notes</SectionLabel>
+                    <p dir="auto" className="text-sm text-slate-700 dark:text-slate-300 break-words">{alert.notes}</p>
+                </div>
+            )}
+        </div>
+    );
+
+    const eventTab = (
+        <div className="space-y-4">
+            {occurrences > 1 && (
+                <p className="text-xs text-slate-500">
+                    This alert groups {occurrences} occurrences of the rule on this endpoint; the fields below describe the first one.
+                </p>
+            )}
+            {script && (
+                <div className="rounded-lg bg-slate-900 p-3">
+                    <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">PowerShell {evidence.pick('action') === 'module' ? 'module log' : 'script block'}</p>
+                    <pre dir="ltr" className="text-xs text-emerald-300 font-mono whitespace-pre-wrap break-all max-h-80 overflow-auto">{script}</pre>
+                </div>
+            )}
+            <AlertFieldsView context={ctx} matchedFields={alert.matched_fields} />
+            {(alert.event_ids?.length || 0) > 0 && (
+                <div>
+                    <SectionLabel>Event IDs ({alert.event_ids!.length})</SectionLabel>
+                    <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                        {alert.event_ids!.map(id => (
+                            <span key={id} className="font-mono text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-2 py-0.5 rounded">{id}</span>
+                        ))}
+                    </div>
+                </div>
+            )}
+            {ctx && (
+                <div>
+                    <button type="button" onClick={() => setShowRawJson(v => !v)}
+                        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+                        {showRawJson ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                        {showRawJson ? 'Hide full JSON' : 'Show full JSON'}
+                    </button>
+                    {showRawJson && (
+                        <pre dir="ltr" className="mt-2 p-3 bg-slate-100 dark:bg-slate-900 rounded-lg overflow-auto max-h-96 text-[11px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-all">
+                            {JSON.stringify(ctx, null, 2)}
+                        </pre>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+
+    const processTab = (
+        <div className="space-y-4">
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                <SectionLabel>Process</SectionLabel>
+                <FactGrid facts={[
+                    ['Process name', evidence.processName || 'Not available'],
+                    ['Image', evidence.image, true],
+                    ['PID', evidence.pick('pid')],
+                    ['Command line', evidence.pick('command_line'), true],
+                    ['Parent image', evidence.pick('parent_executable') || evidence.pick('parent_name'), true],
+                    ['Parent PID', evidence.pick('ppid')],
+                    ['Parent command line', evidence.pick('parent_command_line'), true],
+                ]} />
+            </div>
+            {snapshot ? (
+                <>
+                    {snapshot.lineage_suspicion && (
+                        <div className="rounded-lg p-3 border border-slate-200 dark:border-slate-700 flex items-center gap-3 text-sm">
+                            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
+                            <span><span className="font-bold uppercase tracking-wider text-[11px]">Lineage suspicion: </span>{snapshot.lineage_suspicion}</span>
+                        </div>
+                    )}
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                        <LineageTree snapshot={snapshot} />
+                    </div>
+                    {occurrences > 1 && <p className="text-xs text-slate-500">Lineage was captured during risk scoring and may describe a different occurrence of this grouped alert.</p>}
+                </>
+            ) : (
+                <p className="text-sm text-slate-500">No process lineage was captured for this alert.</p>
+            )}
+        </div>
+    );
+
+    const detectionTab = (
+        <div className="space-y-4">
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                <SectionLabel>Detection rule</SectionLabel>
+                <FactGrid facts={[
+                    ['Rule', alert.rule_title],
+                    ['Rule ID', alert.rule_id, true],
+                    ['Level (severity)', alert.severity],
+                    ['Category', alert.category],
+                    ['Confidence', alert.confidence !== undefined ? `${(alert.confidence * 100).toFixed(0)}%` : ''],
+                    ['Rules matched on the event', alert.match_count ? String(alert.match_count) : ''],
+                ]} />
+            </div>
+            {((alert.mitre_tactics?.length || 0) + (alert.mitre_techniques?.length || 0)) > 0 && (
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-2">
+                    <SectionLabel>MITRE ATT&amp;CK</SectionLabel>
+                    <div className="flex flex-wrap gap-1.5">
+                        {alert.mitre_tactics?.map(t => <span key={t} className="badge badge-warning">{t}</span>)}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                        {alert.mitre_techniques?.map(t => (
+                            <a key={t} href={mitreUrl(t)} target="_blank" rel="noopener noreferrer"
+                                className="badge badge-info inline-flex items-center gap-1 hover:underline">
+                                {t}<ExternalLink className="w-3 h-3" />
+                            </a>
+                        ))}
+                    </div>
+                </div>
+            )}
+            {alert.matched_fields && Object.keys(alert.matched_fields).length > 0 && (
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                    <SectionLabel>What the rule matched</SectionLabel>
+                    <FactGrid facts={Object.entries(alert.matched_fields).map(([k, v]) => [k, json_safe(v), true] as [string, string, boolean])} />
+                </div>
+            )}
+            {(alert.related_rules?.length || 0) > 0 && (
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                    <SectionLabel>Other rules matched on the same event</SectionLabel>
+                    <ul className="space-y-1">
+                        {alert.related_rules!.map((r, i) => <li key={i} className="text-xs text-slate-700 dark:text-slate-300">{r}</li>)}
+                    </ul>
+                </div>
+            )}
+            {alert.risk_score !== undefined && (
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3">
+                    <SectionLabel>Risk score</SectionLabel>
+                    <div className="flex items-center gap-3">
+                        <RiskScoreBadge score={alert.risk_score} riskLevel={alert.risk_level} />
+                        <div className="text-sm">
+                            <p className="font-semibold text-slate-800 dark:text-slate-100">{alert.risk_score}/100 — {getRiskScoreStyle(alert.risk_score).label}</p>
+                            {alert.false_positive_risk !== undefined && (
+                                <p className="text-xs text-slate-500">False-positive likelihood: {(alert.false_positive_risk * 100).toFixed(0)}%</p>
+                            )}
+                        </div>
+                        {breakdown?.ueba_signal && breakdown.ueba_signal !== 'none' && <UEBASignalBadge signal={breakdown.ueba_signal} />}
+                    </div>
+                    {breakdown && <ScoreBreakdownPanel breakdown={breakdown} totalScore={alert.risk_score ?? breakdown.final_score} />}
+                </div>
+            )}
+            {snapshot && (
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+                    <UEBAPanel snapshot={snapshot} />
+                </div>
+            )}
+            {snapshot?.missing_context_fields && snapshot.missing_context_fields.length > 0 && (
+                <p className="text-xs text-slate-500">Context not captured: {snapshot.missing_context_fields.join(', ')}</p>
+            )}
+        </div>
+    );
+
+    const responseTab = (
+        <div className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => setRunPlaybookOpen(true)}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+                    <Play className="w-4 h-4" /> Run playbook
+                </button>
+                {canManageExceptions && alert.status !== 'false_positive' && (
+                    <button type="button" onClick={() => setExceptionOpen(true)} title="Mark as false positive and create a precise detection exception"
+                        className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border ${neutral}`}>
+                        <ShieldOff className="w-4 h-4 text-amber-500" /> False positive…
+                    </button>
+                )}
+                {automation?.enabled !== false && (
+                    <button type="button" onClick={goAutomation} className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border ${neutral}`}>
+                        <Settings className="w-4 h-4 text-blue-500" /> Automation rules
+                    </button>
+                )}
+            </div>
+            {automation && !automation.enabled && (
+                <p className="text-xs text-slate-500">Automated response is turned off platform-wide{automation.locked ? ' by server configuration' : ''}; playbooks run only manually.</p>
+            )}
+            <div>
+                <SectionLabel><span className="inline-flex items-center gap-1.5"><History className="w-3.5 h-3.5" /> Response history</span></SectionLabel>
+                <AlertResponseHistory alertId={alert.id} refreshKey={historyKey} />
+            </div>
+        </div>
+    );
 
     const innerContent = (
         <>
-            {/* Tabs */}
-            <div className="flex border-b border-slate-200 dark:border-slate-700 px-4 mb-0 overflow-x-auto">
-                {tabs.map((tab) => (
-                    <button
-                        key={tab.id}
-                        onClick={() => setActiveTab(tab.id)}
-                        className={`tab whitespace-nowrap ${activeTab === tab.id ? 'tab-active' : ''} ${tab.highlight ? 'relative' : ''}`}
-                    >
-                        {tab.label}
-                        {tab.highlight && activeTab !== tab.id && (
-                            <span className="absolute top-1 right-0 w-2 h-2 rounded-full bg-red-500" />
-                        )}
-                    </button>
-                ))}
-            </div>
-            <div className="p-4">
-
-                {/* Summary Tab */}
-                {activeTab === 'summary' && (
-                    <div className="space-y-4 animate-slide-up-fade">
-                        {/* What Happened — human-readable summary */}
-                        {alert.human_summary && (
-                            <div className="rounded-xl p-3.5 bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 flex items-start gap-3">
-                                <Info className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
-                                <div>
-                                    <p className="text-[10px] text-indigo-500 dark:text-indigo-400 uppercase tracking-wider font-bold mb-1">What Happened</p>
-                                    <p className="text-sm font-medium text-slate-800 dark:text-slate-100">{alert.human_summary}</p>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Recommended Action */}
-                        {(() => {
-                            const actionMap: Record<string, { icon: string; text: string; style: string }> = {
-                                critical: { icon: '🔴', text: 'Investigate immediately — potential active threat', style: 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300' },
-                                high: { icon: '🟠', text: 'Investigate within 1 hour', style: 'bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-800 text-orange-700 dark:text-orange-300' },
-                                medium: { icon: '🟡', text: 'Review when possible — may be benign', style: 'bg-yellow-50 dark:bg-yellow-950/30 border-yellow-200 dark:border-yellow-800 text-yellow-700 dark:text-yellow-300' },
-                                low: { icon: '🟢', text: 'Low priority — review during routine triage', style: 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300' },
-                            };
-                            const action = actionMap[alert.severity] || actionMap.medium;
-                            return (
-                                <div className={`rounded-lg p-2.5 border flex items-center gap-2 text-sm font-medium ${action.style}`}>
-                                    <Shield className="w-4 h-4 shrink-0" />
-                                    <span>{action.icon} {action.text}</span>
-                                </div>
-                            );
-                        })()}
-
-                        {/* What ran / triggered the detection */}
-                        <AlertEvidencePanel alert={alert} />
-
-                        {/* Risk Score hero */}
-                        {alert.risk_score !== undefined && (
-                            <div className={`rounded-xl p-4 flex items-center gap-4 ${alert.risk_score >= 90
-                                    ? 'bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800'
-                                    : alert.risk_score >= 70
-                                        ? 'bg-orange-50 dark:bg-orange-950/30 border border-orange-200 dark:border-orange-800'
-                                        : alert.risk_score >= 40
-                                            ? 'bg-yellow-50 dark:bg-yellow-950/30 border border-yellow-200 dark:border-yellow-800'
-                                            : 'bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800'
-                                }`}>
-                                <div className="shrink-0">
-                                    <RiskScoreBadge score={alert.risk_score} riskLevel={alert.risk_level} />
-                                </div>
-                                <div>
-                                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                                        Risk Score: {alert.risk_score}/100 — {getRiskScoreStyle(alert.risk_score).label}
-                                    </p>
-                                    {alert.false_positive_risk !== undefined && (
-                                        <p className="text-xs text-slate-500" title="Estimated probability that this alert is a false alarm based on process signature and known-good patterns">
-                                            False Positive Risk: {(alert.false_positive_risk * 100).toFixed(0)}% chance this is a false alarm
-                                        </p>
-                                    )}
-                                    {breakdown?.ueba_signal && breakdown.ueba_signal !== 'none' && (
-                                        <div className="mt-1">
-                                            <UEBASignalBadge signal={breakdown.ueba_signal} />
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Core fields grid */}
-                        <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-                            <div className="col-span-2">
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Rule</label>
-                                <p className="font-semibold text-slate-900 dark:text-white text-sm mt-0.5">{alert.rule_title}</p>
-                                {alert.rule_id && <p className="font-mono text-[10px] text-slate-400 mt-0.5 truncate" title={alert.rule_id}>{alert.rule_id}</p>}
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Category</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">{alert.category || '—'}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Severity</label>
-                                <p className="mt-0.5" title="Severity is the Sigma rule level assigned by the rule author; the risk score adds host context."><span className={`badge text-[11px] font-bold ${severityColors[alert.severity]}`}>{alert.severity.toUpperCase()}</span>
-                                    <span className="ml-1.5 text-[10px] text-slate-400">rule level</span></p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Status</label>
-                                <p className="mt-0.5"><span className={`badge text-[11px] ${statusColors[alert.status]}`}>{alert.status.replace(/_/g, ' ')}</span></p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Confidence</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5 font-semibold">{alert.confidence !== undefined ? `${(alert.confidence * 100).toFixed(1)}%` : '—'}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Event Count</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5 font-semibold">{alert.event_count}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Detected At</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">{new Date(alert.timestamp).toLocaleString()}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Source Host</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5 font-semibold">{alert.source_hostname || alert.context_data?.source?.hostname || '—'}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">IP Address</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5 font-mono">{alert.context_data?.ip_address || alert.context_data?.source?.ip_address || '—'}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Operating System</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">
-                                    {alert.context_data?.source?.os_type
-                                        ? `${alert.context_data.source.os_type}${alert.context_data.source.os_version && alert.context_data.source.os_version !== 'unknown' ? ' ' + alert.context_data.source.os_version : ''}`
-                                        : '—'}
-                                </p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Agent Version</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5 font-mono">{alert.context_data?.source?.agent_version || '—'}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Agent ID</label>
-                                <p className="font-mono text-[10px] text-slate-400 mt-0.5 truncate" title={alert.agent_id}>{alert.agent_id}</p>
-                            </div>
-                            {alert.assigned_to && (
-                                <div>
-                                    <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Assigned To</label>
-                                    <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">{alert.assigned_to}</p>
-                                </div>
-                            )}
-                            {alert.acknowledged_at && (
-                                <div>
-                                    <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Acknowledged At</label>
-                                    <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">{new Date(alert.acknowledged_at).toLocaleString()}</p>
-                                </div>
-                            )}
-                            {alert.resolved_at && (
-                                <div>
-                                    <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Resolved At</label>
-                                    <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">{new Date(alert.resolved_at).toLocaleString()}</p>
-                                </div>
-                            )}
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Created</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">{new Date(alert.created_at).toLocaleString()}</p>
-                            </div>
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Updated</label>
-                                <p className="text-slate-700 dark:text-slate-300 text-sm mt-0.5">{new Date(alert.updated_at).toLocaleString()}</p>
-                            </div>
-                        </div>
-
-                        {/* Tags */}
-                        {alert.tags && Object.keys(alert.tags).length > 0 && (
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-1.5">Tags</label>
-                                <div className="flex flex-wrap gap-1.5">
-                                    {Object.entries(alert.tags).map(([k, v]) => (
-                                        <span key={k} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-                                            <span className="text-slate-400">{k}:</span>{v}
-                                        </span>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Notes */}
-                        {alert.notes && (
-                            <div className="rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/10 p-3">
-                                <label className="text-[10px] text-amber-600 dark:text-amber-400 uppercase tracking-wider font-bold block mb-1">Analyst Notes</label>
-                                <p className="text-sm text-slate-700 dark:text-slate-300">{alert.notes}</p>
-                            </div>
-                        )}
-
-                        {/* Response */}
-                        <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 space-y-3">
-                            <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block">Response Actions</label>
-                            <div className="flex flex-wrap gap-3">
-                                <button
-                                    onClick={() => setRunPlaybookOpen(true)}
-                                    className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
-                                >
-                                    <Play className="w-4 h-4 text-green-500" />
-                                    Run Playbook
-                                </button>
-                                {automation?.enabled !== false && (
-                                    <button
-                                        onClick={() => handleNavigateWithContext('/itsm/automations')}
-                                        className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
-                                    >
-                                        <Settings className="w-4 h-4 text-blue-500" />
-                                        Automation Rules
-                                    </button>
-                                )}
-                                {authApi.hasRole(['admin', 'security']) && alert.status !== 'false_positive' && (
-                                    <button
-                                        onClick={() => setExceptionOpen(true)}
-                                        className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
-                                        title="Mark as false positive and create a precise detection exception"
-                                    >
-                                        <ShieldOff className="w-4 h-4 text-amber-500" />
-                                        False Positive…
-                                    </button>
-                                )}
-                            </div>
-                            {automation && !automation.enabled && (
-                                <p className="text-xs text-slate-500">Automated response is turned off platform-wide{automation.locked ? ' by server configuration' : ''}; playbooks run only manually.</p>
-                            )}
-                            <div>
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold flex items-center gap-1.5 mb-2">
-                                    <History className="w-3.5 h-3.5" /> Response history
-                                </span>
-                                <AlertResponseHistory alertId={alert.id} refreshKey={historyKey} />
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* Context Tab — Process Lineage + UEBA + Score Breakdown */}
-                {activeTab === 'context' && (
-                    <div className="space-y-6">
-                        {!hasContext ? (
-                            <div className="text-center py-8">
-                                <Info className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-                                <p className="text-sm text-slate-500">
-                                    No context snapshot available for this alert.<br />
-                                    <span className="text-xs">Recorded event evidence is available in the Events tab when captured.</span>
-                                </p>
-                            </div>
-                        ) : (
-                            <>
-                                <p className="text-xs text-slate-500">Context captured during risk evaluation. For aggregated alerts, this may describe a different occurrence from the event shown in Events.</p>
-                                {/* Process Command Line */}
-                                {snapshot!.process_cmd_line && (
-                                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-900 p-3">
-                                        <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-1.5">Command Line</label>
-                                        <code className="text-xs text-emerald-400 font-mono break-all whitespace-pre-wrap">{snapshot!.process_cmd_line}</code>
-                                    </div>
-                                )}
-
-                                {/* Lineage suspicion verdict */}
-                                {snapshot!.lineage_suspicion && (() => {
-                                    const sus = snapshot!.lineage_suspicion.toLowerCase();
-                                    const tone =
-                                        sus === 'high' ? 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
-                                        : sus === 'medium' ? 'bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-800 text-orange-700 dark:text-orange-300'
-                                        : sus === 'low' ? 'bg-yellow-50 dark:bg-yellow-950/30 border-yellow-200 dark:border-yellow-800 text-yellow-700 dark:text-yellow-300'
-                                        : 'bg-slate-50 dark:bg-slate-900/30 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300';
-                                    return (
-                                        <div className={`rounded-lg p-3 border flex items-center gap-3 ${tone}`}>
-                                            <AlertTriangle className="w-4 h-4 shrink-0" />
-                                            <div className="text-sm">
-                                                <span className="font-bold uppercase tracking-wider text-[11px]">Lineage Suspicion: </span>
-                                                <span className="font-semibold">{snapshot!.lineage_suspicion}</span>
-                                            </div>
-                                        </div>
-                                    );
-                                })()}
-
-                                {/* Process Lineage */}
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
-                                    <LineageTree snapshot={snapshot!} />
-                                </div>
-
-                                {/* Correlation graph signal */}
-                                {snapshot!.correlation && (snapshot!.correlation.edges_added !== undefined || snapshot!.correlation.primary_type) && (
-                                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
-                                        <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Correlation Graph</label>
-                                        <div className="grid grid-cols-3 gap-3">
-                                            {snapshot!.correlation.edges_added !== undefined && (
-                                                <div>
-                                                    <p className="text-[10px] text-slate-400 uppercase tracking-wider">Edges Added</p>
-                                                    <p className="text-lg font-bold text-indigo-600 dark:text-indigo-400">{snapshot!.correlation.edges_added}</p>
-                                                </div>
-                                            )}
-                                            {snapshot!.correlation.primary_type && (
-                                                <div>
-                                                    <p className="text-[10px] text-slate-400 uppercase tracking-wider">Primary Type</p>
-                                                    <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">{snapshot!.correlation.primary_type.replace(/_/g, ' ')}</p>
-                                                </div>
-                                            )}
-                                            {snapshot!.correlation.strongest_score !== undefined && (
-                                                <div>
-                                                    <p className="text-[10px] text-slate-400 uppercase tracking-wider">Strongest Score</p>
-                                                    <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">{(snapshot!.correlation.strongest_score * 100).toFixed(1)}%</p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* UEBA & Burst Signals */}
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
-                                    <UEBAPanel snapshot={snapshot!} />
-                                </div>
-
-                                {/* Score Breakdown */}
-                                {breakdown && (
-                                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4">
-                                        <ScoreBreakdownPanel
-                                            breakdown={breakdown}
-                                            totalScore={alert.risk_score ?? breakdown.final_score}
-                                        />
-                                    </div>
-                                )}
-
-                                {/* Missing context fields */}
-                                {snapshot!.missing_context_fields && snapshot!.missing_context_fields.length > 0 && (
-                                    <div className="text-xs text-slate-400 border border-slate-200 dark:border-slate-700 rounded-lg p-3">
-                                        <span className="font-bold text-slate-500">Missing context: </span>
-                                        {snapshot!.missing_context_fields.join(', ')}
-                                    </div>
-                                )}
-
-                                {/* Scored At */}
-                                {snapshot?.scored_at && (
-                                    <p className="text-xs text-slate-400 text-right">
-                                        Context scored at {new Date(snapshot.scored_at).toLocaleString()}
-                                    </p>
-                                )}
-                            </>
-                        )}
-                    </div>
-                )}
-
-                {/* Event Details Tab */}
-                {activeTab === 'event' && (
-                    <div className="space-y-4 animate-slide-up-fade">
-                        {/* Matched Fields */}
-                        {alert.matched_fields && Object.keys(alert.matched_fields).length > 0 && (
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Matched Detection Fields</label>
-                                <div className="space-y-1.5">
-                                    {Object.entries(alert.matched_fields).map(([key, val]) => (
-                                        <div key={key} className="grid min-w-0 grid-cols-1 sm:grid-cols-[144px_minmax(0,1fr)] gap-1 sm:gap-3 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-sm">
-                                            <span className="font-mono text-indigo-600 dark:text-indigo-400 text-xs shrink-0 mt-0.5 w-32 truncate" title={key}>{key}</span>
-                                            <span className="font-mono text-slate-700 dark:text-slate-300 text-xs min-w-0 whitespace-pre-wrap break-all">{json_safe(val)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                        {/* Event IDs */}
-                        {((alert as Alert & { event_ids?: string[] }).event_ids?.length || 0) > 0 && (
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Correlated Event IDs</label>
-                                <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
-                                    {(alert as Alert & { event_ids?: string[] }).event_ids!.map(id => (
-                                        <span key={id} className="font-mono text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-2 py-0.5 rounded">{id}</span>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                        {/* Simplified event key fields + toggleable raw JSON.
-                            The by-id endpoint returns the agent envelope under
-                            `context_data` (with a nested `data` sub-map for
-                            collector-specific fields). Older summaries used
-                            `event_data`; we read both for backward compat. */}
-                        {(alert.context_data || alert.event_data) && (() => {
-                            const ctx = (alert.context_data ?? {}) as Record<string, unknown>;
-                            const { pick } = alertEvidence(alert);
-                            const fields = [
-                                ['event_id', 'Event ID'], ['timestamp', 'Event timestamp (source)'],
-                                ['batch_id', 'Batch ID'], ['channel', 'Event log channel'],
-                                ['ppid', 'Parent PID'], ['user_sid', 'User SID'],
-                                ['is_elevated', 'Elevated'], ['signature_status', 'Signature status'],
-                                ['signature_issuer', 'Signer'], ['script_path', 'Script path'],
-                            ];
-                            const rendered = fields.map(([key, label]) => ({ key, label, val: pick(key) })).filter(f => f.val !== '');
-
-                            const kafka = {
-                                topic: ctx._kafka_topic,
-                                partition: ctx._kafka_partition,
-                                offset: ctx._kafka_offset,
-                                time: ctx._kafka_time,
-                                key: ctx._kafka_key,
-                            };
-                            const hasKafka = Object.values(kafka).some(v => v !== undefined && v !== null && v !== '');
-
-                            const rawSource = alert.context_data ?? alert.event_data;
-
-                            return (
-                                <div>
-                                    <AlertEvidencePanel alert={alert} />
-                                    <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mt-4 mb-2">Event metadata</label>
-                                    <div className="space-y-1.5 mb-3">
-                                        {rendered.map(({ key, label, val }) => (
-                                            <div key={key} className="grid min-w-0 grid-cols-1 sm:grid-cols-[144px_minmax(0,1fr)] gap-1 sm:gap-3 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-sm">
-                                                <span className="text-indigo-600 dark:text-indigo-400 text-xs shrink-0 mt-0.5 w-36" title={key}>{label}</span>
-                                                <span className="font-mono text-slate-700 dark:text-slate-300 text-xs min-w-0 whitespace-pre-wrap break-all">{String(val)}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-
-                                    {hasKafka && (
-                                        <div className="mb-3">
-                                            <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Kafka Pipeline Metadata</label>
-                                            <div className="grid grid-cols-2 gap-1.5 text-xs">
-                                                {kafka.topic !== undefined && (
-                                                    <div className="flex items-start gap-2 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg">
-                                                        <span className="text-slate-400 w-20 shrink-0">topic</span>
-                                                        <span className="font-mono text-slate-700 dark:text-slate-300 break-all">{String(kafka.topic)}</span>
-                                                    </div>
-                                                )}
-                                                {kafka.partition !== undefined && (
-                                                    <div className="flex items-start gap-2 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg">
-                                                        <span className="text-slate-400 w-20 shrink-0">partition</span>
-                                                        <span className="font-mono text-slate-700 dark:text-slate-300">{String(kafka.partition)}</span>
-                                                    </div>
-                                                )}
-                                                {kafka.offset !== undefined && (
-                                                    <div className="flex items-start gap-2 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg">
-                                                        <span className="text-slate-400 w-20 shrink-0">offset</span>
-                                                        <span className="font-mono text-slate-700 dark:text-slate-300">{String(kafka.offset)}</span>
-                                                    </div>
-                                                )}
-                                                {kafka.time !== undefined && (
-                                                    <div className="flex items-start gap-2 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg">
-                                                        <span className="text-slate-400 w-20 shrink-0">time</span>
-                                                        <span className="font-mono text-slate-700 dark:text-slate-300 break-all">{String(kafka.time)}</span>
-                                                    </div>
-                                                )}
-                                                {kafka.key !== undefined && (
-                                                    <div className="flex items-start gap-2 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg col-span-2">
-                                                        <span className="text-slate-400 w-20 shrink-0">key</span>
-                                                        <span className="font-mono text-slate-700 dark:text-slate-300 break-all">{String(kafka.key)}</span>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    <button
-                                        onClick={() => setShowRawJson(!showRawJson)}
-                                        className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors mb-2"
-                                    >
-                                        {showRawJson ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                                        {showRawJson ? 'Hide full JSON' : 'Show full JSON'}
-                                    </button>
-                                    {showRawJson && rawSource && (
-                                        <pre className="p-3 bg-slate-100 dark:bg-slate-900 rounded-lg overflow-auto max-h-64 text-[11px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-all">
-                                            {JSON.stringify(rawSource, null, 2)}
-                                        </pre>
-                                    )}
-                                </div>
-                            );
-                        })()}
-                    </div>
-                )}
-
-                {/* Aggregation Tab */}
-                {activeTab === 'aggregation' && (
-                    <div className="space-y-5 animate-slide-up-fade">
-                        <div className="grid grid-cols-2 gap-4">
-                            {(alert as Alert & { match_count?: number }).match_count !== undefined && (
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 text-center">
-                                    <p className="text-3xl font-extrabold text-indigo-600 dark:text-indigo-400">{(alert as Alert & { match_count?: number }).match_count}</p>
-                                    <p className="text-xs text-slate-500 mt-1 uppercase tracking-wider">Rule Matches</p>
-                                </div>
-                            )}
-                            {(alert as Alert & { combined_confidence?: number }).combined_confidence !== undefined && (
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 text-center">
-                                    <p className="text-3xl font-extrabold text-emerald-600 dark:text-emerald-400">{((alert as Alert & { combined_confidence?: number }).combined_confidence! * 100).toFixed(0)}%</p>
-                                    <p className="text-xs text-slate-500 mt-1 uppercase tracking-wider">Combined Confidence</p>
-                                </div>
-                            )}
-                        </div>
-                        {(alert as Alert & { severity_promoted?: boolean }).severity_promoted && (
-                            <div className="flex items-center gap-3 p-3 rounded-lg bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800">
-                                <TrendingUp className="w-5 h-5 text-orange-500 shrink-0" />
-                                <div>
-                                    <p className="text-sm font-semibold text-orange-700 dark:text-orange-300">Severity Promoted</p>
-                                    <p className="text-xs text-orange-600 dark:text-orange-400">
-                                        Original: {(alert as Alert & { original_severity?: string }).original_severity?.toUpperCase() || '—'} → Promoted: {alert.severity.toUpperCase()}
-                                    </p>
-                                </div>
-                            </div>
-                        )}
-                        {((alert as Alert & { related_rules?: string[] }).related_rules?.length || 0) > 0 && (
-                            <div>
-                                <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Related Rules Detected</label>
-                                <div className="space-y-1.5">
-                                    {(alert as Alert & { related_rules?: string[] }).related_rules!.map((r, i) => (
-                                        <div key={i} className="font-mono text-xs bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 px-3 py-1.5 rounded-lg">{r}</div>
-                                    ))}
-                                    {alert.related_rule_ids?.map(id => (
-                                        <div key={id} className="font-mono text-[10px] text-slate-400 px-3 break-all">{id}</div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                )}
-
-                {/* MITRE ATT&CK Tab */}
-                {activeTab === 'mitre' && (
-                    <div className="space-y-4 animate-slide-up-fade">
-                        <div>
-                            <label className="text-xs text-slate-500 uppercase tracking-wider">Tactics</label>
-                            <div className="flex flex-wrap gap-2 mt-2">
-                                {(alert.mitre_tactics || []).length > 0 ? (
-                                    alert.mitre_tactics?.map((tactic) => (
-                                        <span key={tactic} className="badge badge-warning">{tactic}</span>
-                                    ))
-                                ) : (
-                                    <span className="text-sm text-slate-400">No tactics identified</span>
-                                )}
-                            </div>
-                        </div>
-                        <div>
-                            <label className="text-xs text-slate-500 uppercase tracking-wider">Techniques</label>
-                            <div className="flex flex-wrap gap-2 mt-2">
-                                {(alert.mitre_techniques || []).length > 0 ? (
-                                    alert.mitre_techniques?.map((technique) => (
-                                        <span key={technique} className="badge badge-info">{technique}</span>
-                                    ))
-                                ) : (
-                                    <span className="text-sm text-slate-400">No techniques identified</span>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* Actions Tab */}
-                {activeTab === 'actions' && (
-                    <div className="space-y-4 animate-slide-up-fade">
-                        <p className="text-sm text-slate-600 dark:text-slate-400">
-                            Update the alert status to track investigation progress.
-                        </p>
-                        <div className="grid grid-cols-2 gap-3">
-                            {alert.status === 'open' && (
-                                <>
-                                    <button
-                                        onClick={() => onStatusChange(alert.id, 'acknowledged')}
-                                        className="btn btn-primary flex items-center justify-center gap-2"
-                                    >
-                                        <Check className="w-4 h-4" />
-                                        Acknowledge
-                                    </button>
-                                    <button
-                                        onClick={() => onStatusChange(alert.id, 'in_progress')}
-                                        className="btn btn-warning flex items-center justify-center gap-2"
-                                    >
-                                        <Clock className="w-4 h-4" />
-                                        Start Investigation
-                                    </button>
-                                </>
-                            )}
-                            {(alert.status === 'acknowledged' || alert.status === 'in_progress') && (
-                                <>
-                                    <button
-                                        onClick={() => onStatusChange(alert.id, 'resolved')}
-                                        className="btn btn-success flex items-center justify-center gap-2"
-                                    >
-                                        <CheckCircle className="w-4 h-4" />
-                                        Resolve
-                                    </button>
-                                    <button
-                                        onClick={() => onStatusChange(alert.id, 'false_positive')}
-                                        className="btn btn-secondary flex items-center justify-center gap-2"
-                                    >
-                                        <XCircle className="w-4 h-4" />
-                                        False Positive
-                                    </button>
-                                </>
-                            )}
-                            {(alert.status === 'resolved' || alert.status === 'false_positive') && (
-                                <button
-                                    onClick={() => onStatusChange(alert.id, 'open')}
-                                    className="btn btn-secondary flex items-center justify-center gap-2"
-                                >
-                                    <AlertTriangle className="w-4 h-4" />
-                                    Reopen
-                                </button>
-                            )}
-                        </div>
-                    </div>
-                )}
+            {header}
+            {tabBar}
+            <div className="p-4" role="tabpanel">
+                {activeTab === 'overview' && overview}
+                {activeTab === 'event' && eventTab}
+                {activeTab === 'process' && processTab}
+                {activeTab === 'detection' && detectionTab}
+                {activeTab === 'response' && responseTab}
             </div>
             {runPlaybookOpen && (
                 <RunPlaybookModal key={alert.id} alert={alert} isOpen={runPlaybookOpen}
@@ -691,7 +419,7 @@ export function AlertDetailPanel({
     if (inlineMode) return innerContent;
 
     return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Alert Details" size="lg">
+        <Modal isOpen={isOpen} onClose={onClose} title="Alert Details" size="xl">
             {innerContent}
         </Modal>
     );

@@ -466,6 +466,12 @@ code, pre, .font-mono {
   border-bottom-color: var(--edr-cyan);
 }
 
+/* Light theme: the cyan accent is too faint on white (WCAG contrast). */
+html:not(.dark) .tab-active {
+  color: #0e7490;
+  border-bottom-color: #0e7490;
+}
+
 /* ============================================================
    HEALTH BAR
    ============================================================ */

@@ -144,7 +144,7 @@ export default function Alerts() {
 
                     {/* Drawer panel */}
                     <div
-                        className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-2xl flex flex-col bg-white dark:bg-slate-900 shadow-2xl border-l border-slate-200 dark:border-slate-700"
+                        className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-3xl flex flex-col bg-white dark:bg-slate-900 shadow-2xl border-l border-slate-200 dark:border-slate-700"
                         style={{ animation: 'slideInRight 0.2s ease-out' }}
                     >
                         {/* Header */}
