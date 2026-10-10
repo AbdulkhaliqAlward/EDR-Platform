@@ -466,3 +466,30 @@ Final verification for this recovery: CM and Sigma Linux/amd64 CGO-disabled buil
 passed; final certificate-cache regression passed after bounded eviction change.
 Disposable PostgreSQL was stopped; git diff --check and final Bash syntax check
 passed. Changes remain local and unstaged on Main; HEAD remains 28d0958c.
+
+## 2026-10-10 — Single-rule alert persistence blocker after ingress recovery
+
+Baseline clean Main/6cfe11e7. User deployed preceding recovery changes. New Ubuntu
+diagnostics at 13:23–13:24 UTC show healthy dependencies, advancing heartbeat,
+fresh Events and Kafka publication. Sigma detects four alerts but cannot store
+them: related_rule_ids SQL NULL violates migration 020's NOT NULL. Four workers
+retry these failed deliveries; Events stays 543, Published 0, Kafka lag 118466.
+This is a persistence blocker, not evidence of absent rules for the user's tests.
+
+See docs/detection/ALERT_PERSISTENCE_RECOVERY.md. Single-match aggregated detection
+correctly has no secondary IDs (nil Go slice). pgx writes this as explicit NULL,
+bypassing the empty-array DB default. Fixed both PostgresAlertRepository.Create
+and UpsertWithDedup by normalizing nil to an empty slice, preserving nonempty IDs,
+primary identity, NOT NULL constraint, operator settings and delivery ordering.
+No migration or change to response/agent/rules is needed.
+
+New actual detector → generator → AlertWriter → isolated PostgreSQL regression
+failed with the same SQLSTATE before the fix, then passed insert/merge and the
+post-commit notification callback. Six nil/empty/nonempty Create/Upsert cases and
+merge preservation passed. Full database/Kafka/handlers/alert packages passed
+with isolated DB enabled; targeted vet and Linux Sigma build passed. Previous
+DB identity tests populated secondary IDs and did not cover this single-match
+case. Live browser delivery, exact Atomic test matches and endpoint response
+still need confirmation after deployment. No commit, push or deployment here;
+the production .env modification shown in diagnostics is untouched. Do not reset
+Kafka offsets; monitor backlog draining after rebuilding only sigma-engine.

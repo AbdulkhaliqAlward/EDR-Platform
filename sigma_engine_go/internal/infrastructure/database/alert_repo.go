@@ -30,6 +30,7 @@ func NewPostgresAlertRepository(pool *pgxpool.Pool) *PostgresAlertRepository {
 
 // Create inserts a new alert into the database.
 func (r *PostgresAlertRepository) Create(ctx context.Context, alert *Alert) (*Alert, error) {
+	normalizeRelatedRuleIDs(alert)
 	matchedFieldsJSON, _ := json.Marshal(alert.MatchedFields)
 	contextDataJSON, _ := json.Marshal(alert.ContextData)
 	contextSnapshotJSON, _ := json.Marshal(alert.ContextSnapshot)
@@ -94,6 +95,7 @@ func (r *PostgresAlertRepository) Create(ctx context.Context, alert *Alert) (*Al
 // Returns (alert, true, nil)  → new alert inserted.
 // Returns (alert, false, nil) → existing alert incremented (deduplicated).
 func (r *PostgresAlertRepository) UpsertWithDedup(ctx context.Context, alert *Alert, dedupWindow time.Duration) (*Alert, bool, error) {
+	normalizeRelatedRuleIDs(alert)
 	matchedFieldsJSON, _ := json.Marshal(alert.MatchedFields)
 	contextDataJSON, _ := json.Marshal(alert.ContextData)
 	contextSnapshotJSON, _ := json.Marshal(alert.ContextSnapshot)
@@ -230,6 +232,16 @@ func (r *PostgresAlertRepository) UpsertWithDedup(ctx context.Context, alert *Al
 		return nil, false, err
 	}
 	return resultAlert, isNew, nil
+}
+
+// Single-rule detections have no secondary rule IDs. pgx encodes a nil slice
+// as SQL NULL, which bypasses the column default and violates NOT NULL. Keep
+// the empty set explicit in both inserts and returned/callback records. The
+// primary identity remains in rule_id; never fabricate a secondary match.
+func normalizeRelatedRuleIDs(alert *Alert) {
+	if alert.RelatedRuleIDs == nil {
+		alert.RelatedRuleIDs = []string{}
+	}
 }
 
 // MergeContextSnapshot shallow-merges patch into an alert's context_snapshot
