@@ -5,9 +5,12 @@ import (
 	"errors"
 	"github.com/edr-platform/sigma-engine/internal/application/detection"
 	"github.com/edr-platform/sigma-engine/internal/application/mapping"
+	"github.com/edr-platform/sigma-engine/internal/application/rules"
 	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/database"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+	"strings"
 	"testing"
 )
 
@@ -15,6 +18,39 @@ type source struct {
 	database.RuleRepository
 	rows []*database.Rule
 	err  error
+}
+
+func TestLegacySeededRuleLoadsAndDetects(t *testing.T) {
+	for _, condition := range []string{"selection", "all of them", "1 of selection*"} {
+		t.Run(condition, func(t *testing.T) { testLegacyRule(t, condition) })
+	}
+}
+
+func testLegacyRule(t *testing.T, condition string) {
+	r := row()
+	r.Content = strings.Replace(r.Content, "condition: selection", "condition: "+condition, 1)
+	original, err := rules.NewRuleParser(true).ParseContent(r.Content)
+	require.NoError(t, err)
+	legacy, err := yaml.Marshal(original) // exact historical seeding representation
+	require.NoError(t, err)
+	r.Content = string(legacy)
+	parsed, err := Parse(r)
+	require.NoError(t, err)
+	require.Contains(t, parsed.Detection.Selections, "selection")
+	engine := detection.NewSigmaDetectionEngine(mapping.NewFieldMapper(nil), detection.NewModifierRegistry(nil), nil, detection.QualityConfig{MinConfidence: 0.01})
+	runtime := New(&source{rows: []*database.Rule{r}}, engine, nil, []string{"windows"})
+	require.NoError(t, runtime.Refresh(context.Background()))
+	for _, tc := range []struct {
+		image   string
+		matches int
+	}{{`C:\fixture.exe`, 1}, {`C:\other.exe`, 0}} {
+		event, err := domain.NewLogEvent(map[string]interface{}{"event_type": "process", "data": map[string]interface{}{"action": "process_creation", "executable": tc.image}})
+		require.NoError(t, err)
+		require.Len(t, engine.Detect(event), tc.matches)
+	}
+	r.Enabled = false
+	require.NoError(t, runtime.Refresh(context.Background()))
+	require.Zero(t, engine.RuleCount(), "legacy compatibility must preserve disabled state")
 }
 
 func (s *source) LoadAll(context.Context) ([]*database.Rule, error) { return s.rows, s.err }

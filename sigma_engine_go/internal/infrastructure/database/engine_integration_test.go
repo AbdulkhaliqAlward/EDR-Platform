@@ -5,6 +5,7 @@ import (
 	"github.com/edr-platform/sigma-engine/internal/application/baselines"
 	"github.com/edr-platform/sigma-engine/internal/application/detection"
 	"github.com/edr-platform/sigma-engine/internal/application/mapping"
+	"github.com/edr-platform/sigma-engine/internal/application/rules"
 	"github.com/edr-platform/sigma-engine/internal/application/rulesync"
 	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/database"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 	"os"
 	"strings"
 	"testing"
@@ -122,6 +124,33 @@ func TestPostgresRuleEditsActivateInDetector(t *testing.T) {
 	require.NoError(t, repo.Delete(ctx, row.ID))
 	require.NoError(t, runtime.Refresh(ctx))
 	require.Equal(t, 0, engine.RuleCount())
+}
+
+func TestPostgresLegacyRuleRecoveryPreservesOperatorEdits(t *testing.T) {
+	pool := isolatedDB(t)
+	ctx := context.Background()
+	repo := database.NewPostgresRuleRepository(pool)
+	parsed, err := rules.NewRuleParser(true).ParseContent(content)
+	require.NoError(t, err)
+	legacy, err := yaml.Marshal(parsed)
+	require.NoError(t, err)
+	row, err := repo.Create(ctx, &database.Rule{ID: parsed.ID, Title: "Analyst title", Content: string(legacy), Enabled: true, Severity: "medium", Status: "stable", Product: "windows", Category: "process_creation", Source: "official", Version: 3})
+	require.NoError(t, err)
+	engine := detection.NewSigmaDetectionEngine(mapping.NewFieldMapper(nil), detection.NewModifierRegistry(nil), nil, detection.QualityConfig{MinConfidence: 0.01})
+	runtime := rulesync.New(repo, engine, nil, nil)
+	event, err := domain.NewLogEvent(map[string]interface{}{"event_type": "process", "data": map[string]interface{}{"executable": `C:\fixture.exe`}})
+	require.NoError(t, err)
+	require.NoError(t, runtime.Refresh(ctx))
+	require.Len(t, engine.Detect(event), 1)
+	stored, err := repo.GetByID(ctx, row.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(legacy), stored.Content, "recovery must not overwrite stored content")
+	require.Equal(t, "Analyst title", stored.Title)
+	require.Equal(t, "medium", stored.Severity)
+	require.Equal(t, 3, stored.Version)
+	require.NoError(t, repo.Disable(ctx, row.ID))
+	require.NoError(t, runtime.Refresh(ctx))
+	require.Empty(t, engine.Detect(event))
 }
 func TestPostgresBaselineBatchRetryAndRestart(t *testing.T) {
 	pool := isolatedDB(t)

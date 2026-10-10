@@ -29,30 +29,59 @@ type RedisConfig struct {
 
 // NewRedisClient creates a new Redis client.
 func NewRedisClient(cfg *RedisConfig, logger *logrus.Logger) (*RedisClient, error) {
+	return newRedisClient(context.Background(), cfg, logger)
+}
+
+func newRedisClient(parent context.Context, cfg *RedisConfig, logger *logrus.Logger) (*RedisClient, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:         cfg.Addr,
-		Password:     cfg.Password,
-		DB:           cfg.DB,
-		PoolSize:     cfg.PoolSize,
-		PoolTimeout:  cfg.PoolTimeout,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		Addr:                  cfg.Addr,
+		Password:              cfg.Password,
+		DB:                    cfg.DB,
+		PoolSize:              cfg.PoolSize,
+		PoolTimeout:           cfg.PoolTimeout,
+		ReadTimeout:           cfg.ReadTimeout,
+		WriteTimeout:          cfg.WriteTimeout,
+		ContextTimeoutEnabled: true,
 	})
 
 	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
-	logger.Info("Connected to Redis", "addr", cfg.Addr)
+	logger.WithField("addr", cfg.Addr).Info("Connected to Redis")
 
 	return &RedisClient{
 		client: client,
 		logger: logger,
 	}, nil
+}
+
+// WaitForRedis retries startup while Redis loads its persisted dataset. No
+// request handlers may start with a permanently nil security dependency.
+func WaitForRedis(ctx context.Context, cfg *RedisConfig, logger *logrus.Logger) (*RedisClient, error) {
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("Redis startup deadline: %w (last error: %v)", err, lastErr)
+		}
+		client, err := newRedisClient(ctx, cfg, logger)
+		if err == nil {
+			return client, nil
+		}
+		lastErr = err
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("Redis startup deadline: %w (last error: %v)", ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
 }
 
 // Close closes the Redis connection.

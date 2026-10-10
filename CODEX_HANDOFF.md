@@ -425,3 +425,44 @@ Actual verification: full Sigma detection/Kafka/handlers tests and build passed;
 Added scripts/Collect-AtomicReadiness.ps1, syntax-checked read-only diagnostics for the user's endpoint. It records module/logging metadata, bounded matching event metadata (text opt-in), library hashes/definitions and recent runner log; never runs Atomic, changes settings or uploads anything. Inventory refreshed to 2183 eligible compiled rules, zero parse/compile rejection; candidate counts unchanged and not treated as coverage evidence.
 
 Remaining: deploy new services/agent and migration, verify runtime rule IDs/policy, start a new PowerShell session after logging policy takes effect, correlate actual endpoint records with Events/Alerts/response results, and close remaining Atomic coverage/telemetry gaps. Full-test and deployed end-to-end operation remain unverified. Changes remain local; no commit or push.
+
+## 2026-10-10 — Evidence-based recovery of deployed ingestion and stored rules
+
+Baseline clean Main/28d0958c. User supplied Ubuntu diagnostics and an additional
+startup log. Confirmed: at 07:54:02Z Redis returned LOADING while restoring its
+dataset; CM discarded its client and never retried. Four hours later StreamEvents
+and Heartbeat were still rejected for stale revocation checks despite Redis being
+healthy. Independently, Sigma rejected legacy seeded rule content for missing
+condition selections and loaded only 630 rules in the supplied snapshot. Kafka
+lag zero was historical progress, not proof of current ingress.
+
+Full recovered evidence, paths, changes, executed checks, Ubuntu deployment
+commands and ordered live acceptance criteria: docs/detection/INGESTION_RECOVERY.md.
+
+Implemented: bounded required Redis startup with resource cleanup; per-certificate
+revocation freshness (no boot grace or cross-certificate trust); bounded readiness
+checks and Compose readiness probe; canonical Sigma seeding and strict legacy
+content compatibility without overwriting DB rows/operator settings; runtime
+active/rejected/filtered counts. Added scripts/Collect-ServerDiagnostics.sh for
+read-only Ubuntu diagnostics (the earlier PowerShell script is Windows-only).
+
+Verification: regression reproduced legacy parse failure before fix; all 2183
+eligible shipped rules round-trip through canonical/legacy stored formats and
+compile with unchanged detection semantics. Real disposable PostgreSQL legacy
+recovery and full Sigma DB tests passed; Sigma rules/rulesync/detection/Kafka/
+handlers/entrypoint tests passed. CM cache/server/API/Kafka/response tests passed,
+including loopback Redis LOADING recovery, deadline failure, revocation outage
+and readiness cases. Local-discovery worker tests now cover both stored formats
+for all three sources with fake durable-delivery barriers. Response dispatch is
+mocked; no live endpoint actions. Targeted vet/build and Bash syntax checks pass.
+
+No deployment, commit, push, new rule-enable override, certificate replacement,
+Redis purge or broker offset reset. Live endpoint ingestion, browser notification
+latency and actual command results must be checked after deployment; full Atomic
+coverage and live end-to-end completion are not claimed. Older audit FK failures
+and canceled count queries in the log remain separate uninvestigated findings.
+
+Final verification for this recovery: CM and Sigma Linux/amd64 CGO-disabled builds
+passed; final certificate-cache regression passed after bounded eviction change.
+Disposable PostgreSQL was stopped; git diff --check and final Bash syntax check
+passed. Changes remain local and unstaged on Main; HEAD remains 28d0958c.

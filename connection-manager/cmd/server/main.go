@@ -165,9 +165,10 @@ func main() {
 		"http_port": cfg.Server.HTTPPort,
 	}).Info("Configuration loaded")
 
-	// Initialize Redis client (optional — server runs in degraded mode if unavailable)
-	var redisClient *cache.RedisClient
-	if c, err := cache.NewRedisClient(&cache.RedisConfig{
+	// Redis is required for revocation, JWT blocklisting and admission controls.
+	// Wait through dataset loading, then fail startup so the supervisor retries.
+	redisStartupCtx, cancelRedisStartup := context.WithTimeout(context.Background(), 30*time.Second)
+	redisClient, redisErr := cache.WaitForRedis(redisStartupCtx, &cache.RedisConfig{
 		Addr:         cfg.Redis.Addr,
 		Password:     cfg.Redis.Password,
 		DB:           cfg.Redis.DB,
@@ -175,13 +176,12 @@ func main() {
 		PoolTimeout:  cfg.Redis.PoolTimeout,
 		ReadTimeout:  cfg.Redis.ReadTimeout,
 		WriteTimeout: cfg.Redis.WriteTimeout,
-	}, logger); err != nil {
-		logger.Warnf("Redis unavailable, running in degraded mode (dedup, rate limit, agent status, and JWT blocklist disabled): %v", err)
-		redisClient = nil
-	} else {
-		redisClient = c
-		defer redisClient.Close()
+	}, logger)
+	cancelRedisStartup()
+	if redisErr != nil {
+		logger.Fatalf("Required Redis dependency unavailable; refusing to start: %v", redisErr)
 	}
+	defer redisClient.Close()
 
 	// ── Encrypted KeyStore Bootstrap ─────────────────────────────────────
 	// All private keys (ca.key, server.key, jwt_private.pem) are stored
@@ -548,6 +548,24 @@ func main() {
 	apiCfg := cfg.API
 	apiCfg.Port = cfg.Server.HTTPPort
 	restAPIServer := api.NewServer(&apiCfg, logger, edrMetrics)
+	readinessChecks := map[string]func(context.Context) error{
+		"redis": func(ctx context.Context) error { return redisClient.Client().Ping(ctx).Err() },
+		"database": func(ctx context.Context) error {
+			if dbPool == nil {
+				return fmt.Errorf("database unavailable")
+			}
+			return dbPool.Health(ctx)
+		},
+	}
+	if cfg.Kafka.Enabled {
+		readinessChecks["kafka"] = func(ctx context.Context) error {
+			if kafkaProducer == nil {
+				return fmt.Errorf("Kafka unavailable")
+			}
+			return kafkaProducer.HealthCheck(ctx)
+		}
+	}
+	restAPIServer.SetReadinessChecks(readinessChecks)
 	// Prometheus metrics on same server (lifecycle managed with REST API).
 	restAPIServer.Echo().GET(cfg.Monitoring.MetricsPath, echo.WrapHandler(promhttp.Handler()))
 

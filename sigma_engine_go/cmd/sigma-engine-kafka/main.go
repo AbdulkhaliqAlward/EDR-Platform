@@ -31,8 +31,6 @@ import (
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/logger"
 	rulecache "github.com/edr-platform/sigma-engine/pkg/rules"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -489,10 +487,13 @@ func seedRulesToDB(ctx context.Context, pool *pgxpool.Pool, ruleIndex *rules.Rul
 
 		dbRule := domainRuleToDBRule(sr)
 		if dbRule == nil {
+			if atomic.AddInt64(&errCount, 1) == 1 {
+				firstErr = fmt.Sprintf("%s: Sigma serialization failed", sr.ID)
+			}
 			continue
 		}
 
-		_, err := pool.Exec(ctx, upsertSQL,
+		result, err := pool.Exec(ctx, upsertSQL,
 			dbRule.ID, dbRule.Title, dbRule.Description, dbRule.Author, dbRule.Content,
 			dbRule.Enabled, dbRule.Status,
 			dbRule.Product, dbRule.Category, dbRule.Service, dbRule.Severity,
@@ -505,21 +506,22 @@ func seedRulesToDB(ctx context.Context, pool *pgxpool.Pool, ruleIndex *rules.Rul
 			}
 			continue
 		}
-		atomic.AddInt64(&inserted, 1)
+		atomic.AddInt64(&inserted, result.RowsAffected())
 	}
 
 	if errCount > 0 {
 		logger.Warnf("Seed errors: %d failures. First: %s", errCount, firstErr)
 	}
-	logger.Infof("✅ Seeded %d/%d rules into database", inserted, len(ruleIndex.Rules))
+	logger.Infof("Inserted %d new rules from %d disk candidates; existing rows preserved; failures: %d", inserted, len(ruleIndex.Rules), errCount)
 }
 
 // domainRuleToDBRule converts a domain.SigmaRule to a database.Rule.
 func domainRuleToDBRule(sr *domain.SigmaRule) *database.Rule {
-	// Re-serialize to YAML for the content column
-	content, err := yaml.Marshal(sr)
+	// Persist the Sigma schema, not the internal selection AST.
+	content, err := rules.MarshalSigmaRule(sr)
 	if err != nil {
-		content = []byte(sr.Title) // fallback
+		logger.Warnf("Cannot serialize rule %s for seeding: %v", sr.ID, err)
+		return nil
 	}
 
 	// Map severity: domain uses "level" (e.g., "high"), DB uses "severity"

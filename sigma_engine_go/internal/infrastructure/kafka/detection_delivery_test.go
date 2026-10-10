@@ -10,10 +10,12 @@ import (
 	"github.com/edr-platform/sigma-engine/internal/application/detection"
 	"github.com/edr-platform/sigma-engine/internal/application/mapping"
 	"github.com/edr-platform/sigma-engine/internal/application/rules"
+	"github.com/edr-platform/sigma-engine/internal/application/rulesync"
 	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/cache"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/database"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 type deliveryWriter struct{ entered, release chan struct{} }
@@ -76,13 +78,23 @@ func TestLocalDiscoveryDurableDelivery(t *testing.T) {
 		t.Run(tc.file, func(t *testing.T) {
 			r, err := rules.NewRuleParser(false).ParseFile(filepath.Join("../../../sigma_rules/rules/edr_custom", tc.file))
 			require.NoError(t, err)
-			fc, err := cache.NewFieldResolutionCache(64)
+			canonical, err := rules.MarshalSigmaRule(r)
 			require.NoError(t, err)
-			engine := detection.NewSigmaDetectionEngine(mapping.NewFieldMapper(fc), detection.NewModifierRegistry(nil), fc, detection.QualityConfig{MinConfidence: .6, EnableFilters: true, EnableContextValidation: true})
-			require.NoError(t, engine.LoadRules([]*domain.SigmaRule{r}))
-			ev, err := domain.NewLogEvent(map[string]interface{}{"event_type": tc.kind, "agent_id": "agent-7c3842b2-4593-49a4-9c6a-46a5d50c756a", "data": tc.data})
+			legacy, err := yaml.Marshal(r)
 			require.NoError(t, err)
-			assertDurableWorkerDelivery(t, engine, ev)
+			for name, content := range map[string][]byte{"canonical": canonical, "legacy": legacy} {
+				t.Run(name, func(t *testing.T) {
+					storedRule, err := rulesync.Parse(&database.Rule{ID: r.ID, Content: string(content)})
+					require.NoError(t, err)
+					fc, err := cache.NewFieldResolutionCache(64)
+					require.NoError(t, err)
+					engine := detection.NewSigmaDetectionEngine(mapping.NewFieldMapper(fc), detection.NewModifierRegistry(nil), fc, detection.QualityConfig{MinConfidence: .6, EnableFilters: true, EnableContextValidation: true})
+					require.NoError(t, engine.LoadRules([]*domain.SigmaRule{storedRule}))
+					ev, err := domain.NewLogEvent(map[string]interface{}{"event_type": tc.kind, "agent_id": "agent-7c3842b2-4593-49a4-9c6a-46a5d50c756a", "data": tc.data})
+					require.NoError(t, err)
+					assertDurableWorkerDelivery(t, engine, ev)
+				})
+			}
 		})
 	}
 }

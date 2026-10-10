@@ -18,10 +18,11 @@ import (
 
 // Server represents the REST API server.
 type Server struct {
-	echo    *echo.Echo
-	config  *config.APIConfig
-	logger  *logrus.Logger
-	metrics *metrics.Metrics
+	echo            *echo.Echo
+	config          *config.APIConfig
+	logger          *logrus.Logger
+	metrics         *metrics.Metrics
+	readinessChecks map[string]func(context.Context) error
 }
 
 // NewServer creates a new REST API server.
@@ -95,7 +96,6 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	v1.GET("/agent/ca", handlers.ServeCA)
 	// Optional public Sysmon config endpoint (no auth required)
 	v1.GET("/agent/sysmon/config", handlers.ServeSysmonConfig)
-
 
 	// Auth endpoints (no auth required for login)
 	auth := v1.Group("/auth")
@@ -340,12 +340,32 @@ func (s *Server) healthCheck(c echo.Context) error {
 	})
 }
 
-// readyCheck returns server readiness status.
+// SetReadinessChecks must be called before Start. Probe responses expose only
+// dependency state; connection details and credentials are never returned.
+func (s *Server) SetReadinessChecks(checks map[string]func(context.Context) error) {
+	s.readinessChecks = checks
+}
+
+// readyCheck reports actual dependencies instead of unconditional success.
 func (s *Server) readyCheck(c echo.Context) error {
-	// TODO: Check database, Redis, Kafka connectivity
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"status":    "ready",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 3*time.Second)
+	defer cancel()
+	code, state := http.StatusOK, "ready"
+	components := map[string]string{}
+	if len(s.readinessChecks) == 0 {
+		code, state = http.StatusServiceUnavailable, "not_ready"
+	}
+	for name, check := range s.readinessChecks {
+		components[name] = "ok"
+		if check == nil || check(ctx) != nil {
+			components[name] = "unavailable"
+			code, state = http.StatusServiceUnavailable, "not_ready"
+		}
+	}
+	return c.JSON(code, map[string]interface{}{
+		"status":     state,
+		"components": components,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 	})
 }
 

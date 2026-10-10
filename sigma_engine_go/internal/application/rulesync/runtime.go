@@ -42,16 +42,30 @@ func Parse(row *database.Rule) (*domain.SigmaRule, error) {
 	if row == nil {
 		return nil, fmt.Errorf("missing rule")
 	}
-	rule, err := rules.NewRuleParser(true).ParseContent(row.Content)
-	if err != nil {
-		// Older seeding serialized the parsed domain form instead of Sigma YAML.
-		var legacy domain.SigmaRule
-		decoder := yaml.NewDecoder(strings.NewReader(row.Content))
-		var extra interface{}
-		if len(row.Content) > rules.DefaultMaxRuleSize || decoder.Decode(&legacy) != nil || decoder.Decode(&extra) != io.EOF || legacy.Validate() != nil {
+	if len(row.Content) > rules.DefaultMaxRuleSize {
+		return nil, fmt.Errorf("rule exceeds maximum size")
+	}
+	content := row.Content
+	// Recognize the exact historical AST before normal parsing. Conditions such
+	// as "all of them" can compile against a bogus selection named "selections",
+	// so waiting for a condition error is insufficient.
+	var legacy domain.SigmaRule
+	decoder := yaml.NewDecoder(strings.NewReader(content))
+	decoder.KnownFields(true)
+	var extra interface{}
+	if decoder.Decode(&legacy) == nil && decoder.Decode(&extra) == io.EOF && len(legacy.Detection.Selections) > 0 {
+		if err := legacy.Validate(); err != nil {
 			return nil, err
 		}
-		rule = &legacy
+		serialized, err := rules.MarshalSigmaRule(&legacy)
+		if err != nil {
+			return nil, err
+		}
+		content = string(serialized)
+	}
+	rule, err := rules.NewRuleParser(true).ParseContent(content)
+	if err != nil {
+		return nil, err
 	}
 	if rule.ID != "" && !strings.EqualFold(rule.ID, row.ID) {
 		return nil, fmt.Errorf("content ID differs from the stored rule ID")
@@ -159,19 +173,24 @@ func (r *Runtime) Refresh(ctx context.Context) error {
 		return nil
 	}
 	var active []*domain.SigmaRule
+	enabled, rejected, filtered := 0, 0, 0
 	for _, row := range rows {
 		if row == nil || !row.Enabled {
 			continue
 		}
+		enabled++
 		rule, err := Parse(row)
 		if err != nil {
+			rejected++
 			logger.Warnf("Stored rule %s rejected by runtime: %v", row.ID, err)
 			continue
 		}
 		if !r.quality.Allows(rule) {
+			filtered++
 			continue
 		}
 		if len(r.products) > 0 && rule.LogSource.Product != nil && !r.products[strings.ToLower(*rule.LogSource.Product)] {
+			filtered++
 			continue
 		}
 		active = append(active, rule)
@@ -180,6 +199,7 @@ func (r *Runtime) Refresh(ctx context.Context) error {
 		return err
 	}
 	r.fingerprint, r.loaded = fingerprint, true
+	logger.Infof("Rule runtime snapshot: stored=%d enabled=%d active=%d rejected=%d filtered=%d", len(rows), enabled, len(active), rejected, filtered)
 	return nil
 }
 

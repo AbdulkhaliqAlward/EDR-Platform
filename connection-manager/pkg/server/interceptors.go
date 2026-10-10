@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,32 +41,36 @@ const (
 type Interceptor struct {
 	cfg         *config.Config
 	logger      *logrus.Logger
-	redis       *cache.RedisClient
+	redis       certRevocationChecker
 	jwtManager  *security.JWTManager
 	rateLimiter *cache.RateLimiter
 	crlCache    *repository.CRLCache // DB-backed in-memory CRL (optional)
 	auditLogger *audit.Logger        // non-blocking security event logger (nil-safe)
 
-	// Local cert revocation cache — synced from Redis periodically.
-	// When Redis is down, this cache enables fail-closed behavior:
-	// if the cache is stale (> revocationCacheMaxAge), reject connections.
-	revokedCerts     sync.Map   // fingerprint → struct{}
-	lastCacheSync    atomic.Int64 // unix timestamp of last successful Redis sync
+	// Only successful checks for THIS fingerprint grant a bounded outage grace.
+	revokedCerts sync.Map // fingerprint → struct{}
+	checkedMu    sync.Mutex
+	checkedCerts map[string]time.Time
+}
+
+type certRevocationChecker interface {
+	IsCertRevoked(context.Context, string) (bool, error)
 }
 
 const revocationCacheMaxAge = 5 * time.Minute // max staleness before fail-closed
 
-// NewInterceptor creates a new interceptor and starts the revocation cache sync loop.
+// NewInterceptor creates an interceptor with no assumed revocation freshness.
 func NewInterceptor(cfg *config.Config, logger *logrus.Logger, redis *cache.RedisClient, jwtManager *security.JWTManager) *Interceptor {
 	i := &Interceptor{
-		cfg:         cfg,
-		logger:      logger,
-		redis:       redis,
-		jwtManager:  jwtManager,
-		rateLimiter: cache.NewRateLimiter(redis, cfg.RateLimit.EventsPerSecond, cfg.RateLimit.BurstMultiplier),
+		cfg:          cfg,
+		logger:       logger,
+		jwtManager:   jwtManager,
+		rateLimiter:  cache.NewRateLimiter(redis, cfg.RateLimit.EventsPerSecond, cfg.RateLimit.BurstMultiplier),
+		checkedCerts: make(map[string]time.Time),
 	}
-	// Seed the timestamp so we don't immediately fail-closed on boot.
-	i.lastCacheSync.Store(time.Now().Unix())
+	if redis != nil {
+		i.redis = redis
+	}
 	return i
 }
 
@@ -356,14 +359,26 @@ func (i *Interceptor) validateClientCertificate(ctx context.Context) (string, er
 			// Redis error — fall through to local cache check below
 			i.logger.WithError(err).Warn("Redis cert revocation check failed — falling back to local cache")
 		} else {
-			// Redis responded successfully — update local cache and timestamp
-			i.lastCacheSync.Store(time.Now().Unix())
+			// A successful lookup cannot refresh trust for another certificate.
 			if revoked {
+				i.checkedMu.Lock()
+				delete(i.checkedCerts, fingerprint)
+				i.checkedMu.Unlock()
 				i.revokedCerts.Store(fingerprint, struct{}{})
 				return "", status.Error(codes.Unauthenticated, "certificate revoked")
 			}
 			// Not revoked — ensure it's not in local cache either
 			i.revokedCerts.Delete(fingerprint)
+			i.checkedMu.Lock()
+			if _, exists := i.checkedCerts[fingerprint]; !exists && len(i.checkedCerts) >= 4096 {
+				// Eviction only removes outage grace; it never grants trust.
+				for old := range i.checkedCerts {
+					delete(i.checkedCerts, old)
+					break
+				}
+			}
+			i.checkedCerts[fingerprint] = time.Now()
+			i.checkedMu.Unlock()
 			// Record last_seen_at asynchronously — never block gRPC call
 			if i.crlCache != nil {
 				go i.crlCache.RecordLastSeen(fingerprint)
@@ -378,12 +393,17 @@ func (i *Interceptor) validateClientCertificate(ctx context.Context) (string, er
 	}
 
 	// Check cache staleness — if too old, fail-closed for security
-	lastSync := time.Unix(i.lastCacheSync.Load(), 0)
-	if time.Since(lastSync) > revocationCacheMaxAge {
+	i.checkedMu.Lock()
+	lastSync, checked := i.checkedCerts[fingerprint]
+	if checked && time.Since(lastSync) > revocationCacheMaxAge {
+		delete(i.checkedCerts, fingerprint)
+	}
+	i.checkedMu.Unlock()
+	if !checked || time.Since(lastSync) > revocationCacheMaxAge {
 		i.logger.WithFields(logrus.Fields{
-			"agent_id":        agentID,
-			"cache_age":       time.Since(lastSync).Round(time.Second).String(),
-			"max_cache_age":   revocationCacheMaxAge.String(),
+			"agent_id":           agentID,
+			"previously_checked": checked,
+			"max_cache_age":      revocationCacheMaxAge.String(),
 		}).Warn("Cert revocation cache stale and Redis unavailable — REJECTING connection (fail-closed)")
 		// Still fail-closed, but Unavailable: the certificate is not known to be
 		// bad, so the agent must retry rather than treat its identity as invalid.

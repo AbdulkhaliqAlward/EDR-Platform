@@ -302,12 +302,19 @@ func (p *EventProducer) Close() error {
 
 // HealthCheck verifies the producer can connect to Kafka.
 func (p *EventProducer) HealthCheck(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	// Try to connect to the first broker
 	conn, err := kafka.DialContext(ctx, "tcp", p.config.Brokers[0])
 	if err != nil {
 		return fmt.Errorf("failed to connect to Kafka: %w", err)
 	}
 	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return err
+		}
+	}
 
 	// Get controller to verify cluster is responsive
 	_, err = conn.Controller()
