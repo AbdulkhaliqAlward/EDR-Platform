@@ -3,6 +3,7 @@
 // the binary is genuinely signed.
 import { FileCode, ShieldCheck, ShieldQuestion, ShieldX, Terminal } from 'lucide-react';
 import type { Alert } from '../../api/client';
+import { alertEvidence, evidenceDate } from './alertEvidence';
 
 const sigBadge = (status: string, signer: string) => {
     switch (status) {
@@ -19,20 +20,16 @@ const sigBadge = (status: string, signer: string) => {
 };
 
 export function AlertEvidencePanel({ alert }: { alert: Alert }) {
-    const ctx = (alert.context_data ?? {}) as Record<string, unknown>;
-    const d = (ctx.data ?? {}) as Record<string, unknown>;
-    const legacy = (alert.event_data ?? {}) as Record<string, unknown>;
-    const s = (k: string): string => {
-        const v = d[k] ?? ctx[k] ?? legacy[k];
-        return v === undefined || v === null ? '' : String(v);
-    };
+    const { pick: s, image, processName, target, eventType } = alertEvidence(alert);
 
     const script = s('script_block_text') || s('payload');
-    const image = s('executable') || s('process_path');
     const rows: [string, string, boolean?][] = [
-        ['Process', image || s('name') || s('process_name')],
+        ['Event type', eventType],
+        ['Action', s('action')],
+        ['Process name', processName || 'Not available'],
+        ['Process image (Image)', image || 'Not available', true],
         ['PID', s('pid')],
-        ['Started', s('process_start_time') ? new Date(s('process_start_time')).toLocaleString() : ''],
+        ['Started', evidenceDate(s('process_start_time'))],
         ['Command line', s('command_line'), true],
         ['Parent process', s('parent_executable') || s('parent_name')],
         ['Parent command line', s('parent_command_line'), true],
@@ -41,7 +38,7 @@ export function AlertEvidencePanel({ alert }: { alert: Alert }) {
         ['Original file name', s('original_file_name')],
         ['Product', [s('company'), s('product')].filter(Boolean).join(' — ')],
         ['SHA-256', s('sha256'), true],
-        ['Target file', s('target_filename') || s('path'), true],
+        ['Target path (TargetFilename)', target, true],
         ['Destination', [s('destination_hostname') || s('destination_ip'), s('destination_port')].filter(Boolean).join(':')],
         ['DNS query', s('query_name')],
         ['Registry key', s('target_object') || s('key_path'), true],
@@ -56,6 +53,7 @@ export function AlertEvidencePanel({ alert }: { alert: Alert }) {
                 <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Triggering activity</span>
                 {s('signature_status') && <span className="ml-auto text-xs">{sigBadge(s('signature_status'), s('signature_issuer'))}</span>}
             </div>
+            {!image && <p className="text-xs text-slate-500">The process image was not captured in this event. The target path identifies the affected file or directory, not the process.</p>}
             {script && (
                 <div className="rounded-lg bg-slate-900 p-3">
                     <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1.5">
@@ -69,11 +67,11 @@ export function AlertEvidencePanel({ alert }: { alert: Alert }) {
                     {s('truncated') === 'true' && <p className="text-[10px] text-slate-500 mt-1">Source telemetry was truncated by the collector.</p>}
                 </div>
             )}
-            <dl className="grid grid-cols-1 sm:grid-cols-[150px_1fr] gap-x-3 gap-y-1.5 text-xs">
+            <dl className="grid min-w-0 grid-cols-1 sm:grid-cols-[150px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
                 {shown.map(([label, value, mono]) => (
                     <div key={label} className="contents">
                         <dt className="text-slate-500">{label}</dt>
-                        <dd className={`text-slate-800 dark:text-slate-200 break-all ${mono ? 'font-mono' : ''}`}>{value}</dd>
+                        <dd dir="auto" className={`min-w-0 text-slate-800 dark:text-slate-200 whitespace-pre-wrap break-all ${mono ? 'font-mono' : ''}`}>{value}</dd>
                     </div>
                 ))}
             </dl>

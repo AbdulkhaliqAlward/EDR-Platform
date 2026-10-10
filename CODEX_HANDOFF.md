@@ -493,3 +493,40 @@ case. Live browser delivery, exact Atomic test matches and endpoint response
 still need confirmation after deployment. No commit, push or deployment here;
 the production .env modification shown in diagnostics is untouched. Do not reset
 Kafka offsets; monitor backlog draining after rebuilding only sigma-engine.
+
+## 2026-10-10 — Alert evidence presentation and missing-context handling
+
+Baseline: clean Main/be0abf2b. User supplied alert JSON proves file data.name was
+being displayed as the creating process, even when process_name=unknown and
+process_path was empty. Other records contain an explicit powershell.exe actor.
+No attribution across these different events is justified.
+
+Changes:
+- dashboard/src/components/alerts/alertEvidence.ts centralizes scalar, event-aware
+  presentation: Image aliases and process_name are distinct from file name/path;
+  generic name is a process fallback only for explicit process event types.
+  Current raw context is not filled from another legacy event or scoring snapshot.
+- AlertEvidencePanel and AlertDetailPanel use the same evidence in Summary and
+  Events, label Image and TargetFilename, show missing identity explicitly, retain
+  false/zero metadata, wrap long paths responsively, and preserve raw JSON access.
+- Historical file-name-only snapshots matching the represented file target are
+  suppressed in the display copy; stored evidence is untouched. Context explicitly
+  identifies its scoring-time scope (possibly a different aggregate occurrence).
+- risk_scorer.go snapshot builder now stores actor aliases, not file target names.
+  Detection logic, scoring calculations and response guards were not changed.
+- ProcessLineageTree no longer calls absent lineage normal. UEBAPanel handles
+  missing score_breakdown and burst data without crashing or displaying NaN.
+  The first browser regression exposed this pre-existing missing-context crash;
+  it passed after the targeted correction.
+
+Verification executed: 5 new Node evidence regressions and 7 existing exception
+form tests passed. Real React alert-panel Chromium fixture passed Summary/Events/
+Context and raw JSON toggle, missing/known actor cases, partial snapshot, 390px
+and 1280px in light/dark, no horizontal page overflow or JS errors. Screenshots
+in system TEMP/mitras-alert-details. Full Go scoring package tests and targeted
+vet passed. Dashboard production build passed (existing Recharts circular-chunk
+warnings); TypeScript and focused ESLint passed after context handling fixes.
+Reusable test: npm run test:alert-details. No live endpoint actions, deployment,
+commit or push. Deploy dashboard and sigma-engine to apply UI and new snapshot
+fixes; no agent rebuild or DB migration required. Missing historical actor data
+cannot be reconstructed by this presentation fix. Live deployment remains unverified.

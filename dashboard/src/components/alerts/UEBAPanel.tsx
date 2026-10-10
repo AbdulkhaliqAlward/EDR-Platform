@@ -14,33 +14,33 @@ export function UEBAPanel({ snapshot }: UEBAPanelProps) {
             <div>
                 <span className="text-xs text-slate-500 uppercase tracking-wider block mb-2">Behavioral Signal</span>
                 <div className="flex flex-wrap gap-2">
-                    <UEBASignalBadge signal={bd.ueba_signal} />
-                    {bd.ueba_signal === 'anomaly' && (
+                    <UEBASignalBadge signal={bd?.ueba_signal || 'unknown'} />
+                    {bd?.ueba_signal === 'anomaly' && (
                         <span className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400 font-medium">
                             +{bd.ueba_bonus} pts added to risk score
                         </span>
                     )}
-                    {bd.ueba_signal === 'normal' && (
+                    {bd?.ueba_signal === 'normal' && (
                         <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400 font-medium">
                             −{bd.ueba_discount} pts subtracted (FP discount)
                         </span>
                     )}
                 </div>
-                {bd.ueba_reason && <p className="text-xs text-slate-600 dark:text-slate-400 mt-2">{bd.ueba_reason}</p>}
+                {bd?.ueba_reason && <p className="text-xs text-slate-600 dark:text-slate-400 mt-2">{bd.ueba_reason}</p>}
             </div>
 
             {/* Temporal Burst — distinct detections on this host */}
             <div>
                 <span className="text-xs text-slate-500 uppercase tracking-wider block mb-2">Distinct detections on this host</span>
                 <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-1.5">
+                    {Number.isFinite(snapshot.burst_count) && Number.isFinite(snapshot.burst_window_sec) ? <div className="flex flex-wrap items-center gap-1.5">
                         <Activity className={`w-4 h-4 ${snapshot.burst_count > 3 ? 'text-orange-500' : 'text-slate-400'}`} />
                         <span className={`font-semibold text-sm ${snapshot.burst_count > 3 ? 'text-orange-600 dark:text-orange-400' : 'text-slate-700 dark:text-slate-300'}`}>
                             {snapshot.burst_count} rule{snapshot.burst_count !== 1 ? 's' : ''}
                         </span>
                         <span className="text-xs text-slate-500">in {Math.round(snapshot.burst_window_sec / 60)} min window</span>
-                    </div>
-                    {bd.burst_bonus > 0 && (
+                    </div> : <span className="text-xs text-slate-400">Burst data unavailable.</span>}
+                    {bd && bd.burst_bonus > 0 && (
                         <span className="badge bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-200">
                             +{bd.burst_bonus} Burst Bonus
                         </span>

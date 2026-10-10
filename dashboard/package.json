@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test:exceptions": "node --test src/components/alerts/exceptionForm.test.mjs src/hooks/alertRefresh.test.mjs && node tests/detection-exceptions.ui.mjs",
+    "test:alert-details": "node --test src/components/alerts/alertEvidence.test.mjs && node tests/alert-details.ui.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -65,7 +65,8 @@ interface LineageTreeProps {
 }
 
 export function LineageTree({ snapshot }: LineageTreeProps) {
-    const suspicionLevel = snapshot.lineage_suspicion;
+    const hasLineage = !!(snapshot.ancestor_chain?.length || snapshot.process_name || snapshot.process_path || snapshot.parent_name || snapshot.grandparent_name);
+    const suspicionLevel = hasLineage ? snapshot.lineage_suspicion : 'unknown';
     const isSuspicious = suspicionLevel === 'critical' || suspicionLevel === 'high';
 
     const suspicionBadge: Record<string, string> = {
@@ -81,7 +82,8 @@ export function LineageTree({ snapshot }: LineageTreeProps) {
         high: '🟠 Suspicious parent process',
         medium: '⚠️ Unusual parent process',
         low: '✅ Low suspicion',
-        none: '✅ Normal process chain',
+        none: 'No suspicious lineage identified',
+        unknown: 'Lineage unavailable',
     };
 
     // Build the chain from ancestor_chain if available, else fallback to flat fields
@@ -151,9 +153,9 @@ export function LineageTree({ snapshot }: LineageTreeProps) {
                             </div>
                         </div>
                     )}
-                    {snapshot.process_name && (
+                    {(snapshot.process_name || snapshot.process_path) && (
                         <ProcessNode
-                            name={snapshot.process_name}
+                            name={snapshot.process_name || 'Process name unavailable'}
                             path={snapshot.process_path}
                             integrity={snapshot.integrity_level}
                             isElevated={snapshot.is_elevated}
@@ -161,7 +163,7 @@ export function LineageTree({ snapshot }: LineageTreeProps) {
                             isTarget={true}
                         />
                     )}
-                    {!snapshot.grandparent_name && !snapshot.parent_name && !snapshot.process_name && (
+                    {!hasLineage && (
                         <p className="text-sm text-slate-400 italic">No lineage data captured for this alert.</p>
                     )}
                 </div>

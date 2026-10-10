@@ -855,9 +855,9 @@ func buildContextSnapshot(
 		ScoreBreakdown:   breakdown,
 	}
 
-	// Process image from event
-	snap.ProcessName = extractString(input.Event.RawData, "name")
-	snap.ProcessPath = extractString(input.Event.RawData, "executable")
+	// Generic name/path describe the target in file/registry events, not the actor.
+	// This affects snapshot presentation only; scoring and response policy stay intact.
+	snap.ProcessName, snap.ProcessPath = snapshotProcessIdentity(input.Event.RawData)
 	snap.ProcessCmdLine = extractString(input.Event.RawData, "command_line")
 
 	// Privilege fields
@@ -912,6 +912,38 @@ func buildContextSnapshot(
 	snap.RelatedRules = input.MatchResult.RelatedRuleTitles()
 
 	return snap
+}
+
+func snapshotProcessIdentity(raw map[string]interface{}) (string, string) {
+	first := func(keys ...string) string {
+		sources := []map[string]interface{}{raw}
+		if nested, ok := raw["data"].(map[string]interface{}); ok {
+			sources = []map[string]interface{}{nested, raw}
+		}
+		for _, source := range sources {
+			for _, key := range keys {
+				if value, ok := source[key].(string); ok {
+					value = strings.TrimSpace(value)
+					if value != "" && !strings.EqualFold(value, "unknown") {
+						return value
+					}
+				}
+			}
+		}
+		return ""
+	}
+	image := first("executable", "process_path", "image_path", "Image")
+	name := first("process_name")
+	if name == "" && image != "" {
+		name = image[strings.LastIndexAny(image, `\/`)+1:]
+	}
+	if name == "" {
+		switch strings.ToLower(first("event_type")) {
+		case "process", "process_creation", "process_termination":
+			name = first("name")
+		}
+	}
+	return name, image
 }
 
 // dualUseBinaries are Windows binaries routinely abused for execution or

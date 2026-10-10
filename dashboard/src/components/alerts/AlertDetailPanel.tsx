@@ -16,6 +16,7 @@ import type { Alert } from '../../api/client';
 import { RunPlaybookModal } from '../automation/RunPlaybookModal';
 import { AlertResponseHistory } from '../automation/AlertResponseHistory';
 import { AlertEvidencePanel } from './AlertEvidencePanel';
+import { alertEvidence, displaySnapshot } from './alertEvidence';
 import { CreateExceptionModal } from './CreateExceptionModal';
 import { useAutomationSettings } from '../../hooks/useAutomationSettings';
 
@@ -66,7 +67,7 @@ export function AlertDetailPanel({
     if (!alert) return null;
 
     const hasContext = !!(alert.context_snapshot);
-    const snapshot = alert.context_snapshot;
+    const snapshot = displaySnapshot(alert);
     const breakdown = alert.score_breakdown || snapshot?.score_breakdown;
 
     const hasAggregation = !!(alert as Alert & { match_count?: number }).match_count || !!(alert as Alert & { related_rules?: string[] }).related_rules?.length;
@@ -321,11 +322,12 @@ export function AlertDetailPanel({
                                 <Info className="w-10 h-10 text-slate-300 mx-auto mb-3" />
                                 <p className="text-sm text-slate-500">
                                     No context snapshot available for this alert.<br />
-                                    <span className="text-xs">Context scoring requires Sprint 3+ backend deployment.</span>
+                                    <span className="text-xs">Recorded event evidence is available in the Events tab when captured.</span>
                                 </p>
                             </div>
                         ) : (
                             <>
+                                <p className="text-xs text-slate-500">Context captured during risk evaluation. For aggregated alerts, this may describe a different occurrence from the event shown in Events.</p>
                                 {/* Process Command Line */}
                                 {snapshot!.process_cmd_line && (
                                     <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-900 p-3">
@@ -428,9 +430,9 @@ export function AlertDetailPanel({
                                 <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Matched Detection Fields</label>
                                 <div className="space-y-1.5">
                                     {Object.entries(alert.matched_fields).map(([key, val]) => (
-                                        <div key={key} className="flex items-start gap-3 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-sm">
+                                        <div key={key} className="grid min-w-0 grid-cols-1 sm:grid-cols-[144px_minmax(0,1fr)] gap-1 sm:gap-3 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-sm">
                                             <span className="font-mono text-indigo-600 dark:text-indigo-400 text-xs shrink-0 mt-0.5 w-32 truncate" title={key}>{key}</span>
-                                            <span className="font-mono text-slate-700 dark:text-slate-300 text-xs break-all">{json_safe(val)}</span>
+                                            <span className="font-mono text-slate-700 dark:text-slate-300 text-xs min-w-0 whitespace-pre-wrap break-all">{json_safe(val)}</span>
                                         </div>
                                     ))}
                                 </div>
@@ -454,42 +456,15 @@ export function AlertDetailPanel({
                             `event_data`; we read both for backward compat. */}
                         {(alert.context_data || alert.event_data) && (() => {
                             const ctx = (alert.context_data ?? {}) as Record<string, unknown>;
-                            const inner = (ctx.data ?? {}) as Record<string, unknown>;
-                            const legacy = (alert.event_data ?? {}) as Record<string, unknown>;
-                            // Prefer nested data → top-level context_data → legacy event_data.
-                            const pick = (k: string): unknown =>
-                                inner[k] ?? ctx[k] ?? legacy[k];
-
-                            const fields: { key: string; label: string }[] = [
-                                { key: 'name', label: 'Process Name' },
-                                { key: 'executable', label: 'Executable Path' },
-                                { key: 'command_line', label: 'Command Line' },
-                                { key: 'parent_command_line', label: 'Parent Command Line' },
-                                { key: 'original_file_name', label: 'Original File Name' },
-                                { key: 'sha256', label: 'SHA-256' },
-                                { key: 'process_start_time', label: 'Process Start Time' },
-                                { key: 'pid', label: 'PID' },
-                                { key: 'ppid', label: 'Parent PID' },
-                                { key: 'parent_name', label: 'Parent Name' },
-                                { key: 'parent_executable', label: 'Parent Path' },
-                                { key: 'user_name', label: 'User' },
-                                { key: 'user_sid', label: 'User SID' },
-                                { key: 'integrity_level', label: 'Integrity Level' },
-                                { key: 'is_elevated', label: 'Elevated' },
-                                { key: 'signature_status', label: 'Signature Status' },
-                                { key: 'signature_issuer', label: 'Signer' },
-                                { key: 'script_path', label: 'Script Path' },
-                                { key: 'channel', label: 'Event Log Channel' },
-                                { key: 'action', label: 'Action' },
-                                { key: 'event_type', label: 'Event Type' },
-                                { key: 'event_id', label: 'Event ID' },
-                                { key: 'timestamp', label: 'Event Timestamp' },
-                                { key: 'batch_id', label: 'Batch ID' },
+                            const { pick } = alertEvidence(alert);
+                            const fields = [
+                                ['event_id', 'Event ID'], ['timestamp', 'Event timestamp (source)'],
+                                ['batch_id', 'Batch ID'], ['channel', 'Event log channel'],
+                                ['ppid', 'Parent PID'], ['user_sid', 'User SID'],
+                                ['is_elevated', 'Elevated'], ['signature_status', 'Signature status'],
+                                ['signature_issuer', 'Signer'], ['script_path', 'Script path'],
                             ];
-
-                            const rendered = fields
-                                .map(f => ({ ...f, val: pick(f.key) }))
-                                .filter(f => f.val !== undefined && f.val !== null && f.val !== '');
+                            const rendered = fields.map(([key, label]) => ({ key, label, val: pick(key) })).filter(f => f.val !== '');
 
                             const kafka = {
                                 topic: ctx._kafka_topic,
@@ -504,12 +479,13 @@ export function AlertDetailPanel({
 
                             return (
                                 <div>
-                                    <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mb-2">Key Event Details</label>
+                                    <AlertEvidencePanel alert={alert} />
+                                    <label className="text-[10px] text-slate-400 uppercase tracking-wider font-bold block mt-4 mb-2">Event metadata</label>
                                     <div className="space-y-1.5 mb-3">
                                         {rendered.map(({ key, label, val }) => (
-                                            <div key={key} className="flex items-start gap-3 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-sm">
+                                            <div key={key} className="grid min-w-0 grid-cols-1 sm:grid-cols-[144px_minmax(0,1fr)] gap-1 sm:gap-3 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-sm">
                                                 <span className="text-indigo-600 dark:text-indigo-400 text-xs shrink-0 mt-0.5 w-36" title={key}>{label}</span>
-                                                <span className="font-mono text-slate-700 dark:text-slate-300 text-xs break-all">{String(val)}</span>
+                                                <span className="font-mono text-slate-700 dark:text-slate-300 text-xs min-w-0 whitespace-pre-wrap break-all">{String(val)}</span>
                                             </div>
                                         ))}
                                     </div>
