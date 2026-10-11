@@ -30,6 +30,21 @@ const SECTIONS: { id: string; title: string; when?: (t: string) => boolean; fiel
         ],
     },
     {
+        // Forwarded Windows Event Log record (Security / System / Defender …).
+        id: 'eventlog', title: 'Windows event log', when: t => t === 'eventlog', fields: [
+            ['channel', 'Channel'], ['provider_name', 'Provider'], ['EventID', 'Event ID'], ['record_id', 'Record ID', true],
+            ['computer', 'Computer'], ['event_time', 'Recorded at'],
+            ['SubjectUserName', 'Actor'], ['SubjectDomainName', 'Actor domain'], ['SubjectUserSid', 'Actor SID', true],
+            ['TargetUserName', 'Target account'], ['TargetDomainName', 'Target domain'], ['TargetSid', 'Target SID', true],
+            ['MemberName', 'Member'], ['MemberSid', 'Member SID', true], ['SamAccountName', 'SAM account'],
+            ['ServiceName', 'Service'], ['ImagePath', 'Service binary', true], ['ServiceFileName', 'Service binary', true],
+            ['StartType', 'Start type'], ['AccountName', 'Service account'], ['TaskName', 'Task'], ['TaskContent', 'Task definition', true],
+            ['LogonType', 'Logon type'], ['IpAddress', 'Source IP', true], ['WorkstationName', 'Workstation'], ['TargetLogonId', 'Logon ID', true],
+            ['Threat Name', 'Threat'], ['Severity Name', 'Threat severity'], ['Path', 'Threat path', true], ['Action Name', 'Defender action'],
+            ['ObjectName', 'Object', true], ['ShareName', 'Share'], ['RelativeTargetName', 'Share path', true],
+        ],
+    },
+    {
         id: 'process', title: 'Process', fields: [
             ['process_name', 'Process name'], ['executable', 'Image', true], ['process_path', 'Image', true],
             ['pid', 'PID'], ['process_start_time', 'Started'], ['command_line', 'Command line', true],

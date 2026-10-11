@@ -65,3 +65,50 @@ For the three PowerShell rules, require script block logging and delivered 4104 
 - Dashboard `npm run build`: passed, with the existing Recharts circular chunk warnings. The first build result was lost when the command session disappeared; it was rerun with captured logs to obtain a confirmed exit code.
 - Isolated Chrome/Vite login fixture: 390px and 1280px, light and dark, all passed decoded image alpha=0 at the corner, transparent wrapper, expected dark filter and no horizontal page overflow. Light and dark screenshots inspected; artifacts are in system TEMP `mitras-transparent-logo`. A virtual-entry preload warning occurred in the fixture; the actual page loaded and assertions passed. Report/nav/favicon changes were source/build checked, not separately browser-tested.
 - No live Atomic run, production load benchmark or end-to-end endpoint check was executed. There is no new claim that all current malicious events or all Atomic tests are detectable.
+
+## Windows Event Log forwarding (option A) — 2026-10-11
+
+Problem: 121 Security, 56 System and 14 Defender eligible Sigma rules (plus firewall, BITS, WMI, Code Integrity, Task Scheduler and Terminal Services rules) could never fire. The agent did not forward those channels live, and the engine did not resolve their EventData fields.
+
+**Agent**
+- `internal/collectors/eventlog_windows.go`: a new collector that forwards an explicit list of event IDs as `event_type: eventlog`.
+  - The list is derived from the IDs the eligible rules use.
+  - Each record carries channel, provider, `EventID`/`event_code`, record ID, computer, original time, a summary, and every EventData/UserData field under its original Windows name.
+  - Each subscription has a persisted bookmark.
+  - Each channel has a token-bucket rate limit and a drop counter.
+  - Values are capped at 8 KiB and field count at 128.
+  - XPath queries hold at most 15 IDs.
+  - 4624 is limited to logon types 9 and 10.
+  - Deliberately not forwarded: 4688, 5156/5157, DNS 3008 (already covered by ETW), 7036 and 4768/4769 (volume).
+- `internal/auditpolicy`: enables only the missing success/failure flags for 7 subcategories through the Audit API, which is locale-independent.
+  - It enables `SeSecurityPrivilege` first.
+  - It never removes administrator settings.
+  - It records the original values under `HKLM\SOFTWARE\EDR\Agent\AuditPolicyEnabledByAgent`.
+  - Both uninstall paths revert exactly those values.
+- Config flag: `collectors.disable_eventlog_collection` (forwarding is on by default).
+
+**Engine**
+- The field mapper now resolves `data.<SigmaFieldName>` with exact case after the existing mappings. Example: `ImagePath`, `SamAccountName`, `ServiceName`.
+- `eventlog` events are routed by service only. The engine no longer infers a Sysmon category from provider event codes, which would have sent BITS 3 or TerminalServices 21 to network/WMI rules.
+
+**Dashboard:** a "Windows event log" section in alert details.
+
+**Verification**
+- Unit tests (agent):
+  - parsing EventData and UserData
+  - field/value bounds and protection of system fields
+  - query splitting
+  - rate limit and severity
+  - no bookmark advance when a record isn't delivered
+  - audit flag merging (never removes) and marker round trip
+- Engine test `TestEventLogServiceRules`:
+  - three real SigmaHQ rules (System 7045, Security 4720, Defender 5001)
+  - positive, near-miss and wrong-channel cases
+  - it failed before the field-mapper fix
+- On the Windows dev host:
+  - every XPath was accepted by `wevtutil`; Security syntax was checked against System because the shell wasn't elevated
+  - real System, Defender, BITS, WMI, Firewall and TerminalServices records parsed, including a real Defender 1117
+  - the Audit API returned "privilege not held" in a non-elevated shell, after fixing a BOOLEAN-return nil dereference the live test exposed
+- Agent built with `CGO_ENABLED=0` using a temporary stub (since removed). The C/ETW parts are unchanged and compile only in agent-builder.
+
+**Not verified:** a live run as SYSTEM, the Security channel live, and end-to-end alerts on the user's endpoint. See option B.

@@ -71,9 +71,58 @@ foreach ($channel in @('Microsoft-Windows-PowerShell/Operational','PowerShellCor
     } catch { $entry['query_error'] = $_.Exception.Message }
     $report.channels += $entry
 }
+# ── Agent event-log forwarding readiness (read-only) ──────────────────────────
+# The agent forwards selected Security/System/Defender records and enables the
+# audit subcategories they need. This only reads the resulting state.
+$agentLog = [ordered]@{ service = $null; audit_subcategories = @(); enabled_by_agent = $null; channels = @(); bookmarks = @() }
+try { $svc = Get-Service -Name EDRAgent -ErrorAction Stop; $agentLog.service = [ordered]@{status=[string]$svc.Status; start_type=[string]$svc.StartType} } catch { $agentLog.service = 'not installed' }
+$subcategories = [ordered]@{
+    'Security System Extension (4697)'        = '{0CCE9211-69AE-11D9-BED3-505054503030}'
+    'Other Object Access Events (4698-4702)'  = '{0CCE9227-69AE-11D9-BED3-505054503030}'
+    'User Account Management (4720-4726)'     = '{0CCE9235-69AE-11D9-BED3-505054503030}'
+    'Security Group Management (4728/4732)'   = '{0CCE9237-69AE-11D9-BED3-505054503030}'
+    'Audit Policy Change (4719)'              = '{0CCE922F-69AE-11D9-BED3-505054503030}'
+    'Logon (4624/4625/4648)'                  = '{0CCE9215-69AE-11D9-BED3-505054503030}'
+    'Credential Validation (4776)'            = '{0CCE923F-69AE-11D9-BED3-505054503030}'
+}
+foreach ($name in $subcategories.Keys) {
+    $row = [ordered]@{subcategory=$name; guid=$subcategories[$name]}
+    try {
+        $csv = (& auditpol.exe /get /subcategory:$($subcategories[$name]) /r) | Where-Object { $_ } | ConvertFrom-Csv
+        $row['setting'] = ($csv | Select-Object -First 1).'Inclusion Setting'
+    } catch { $row['error'] = $_.Exception.Message }
+    $agentLog.audit_subcategories += $row
+}
+try { $agentLog.enabled_by_agent = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\EDR\Agent' -Name AuditPolicyEnabledByAgent -ErrorAction Stop).AuditPolicyEnabledByAgent } catch { $agentLog.enabled_by_agent = $null }
+$forwarded = [ordered]@{
+    'Security' = @(4697,4698,4702,4720,4726,4732,4719,1102,4625,4648)
+    'System' = @(7045,7040,104)
+    'Microsoft-Windows-Windows Defender/Operational' = @(1116,1117,5001,5007,5010,5012,5013)
+    'Microsoft-Windows-TaskScheduler/Operational' = @(106,129,140,141)
+}
+foreach ($channel in $forwarded.Keys) {
+    $row = [ordered]@{channel=$channel}
+    try {
+        $info = Get-WinEvent -ListLog $channel -ErrorAction Stop
+        $row['enabled'] = $info.IsEnabled; $row['record_count'] = $info.RecordCount
+        $events = @(Get-WinEvent -FilterHashtable @{LogName=$channel;Id=$forwarded[$channel];StartTime=$Since} -MaxEvents $MaxEvents -ErrorAction SilentlyContinue)
+        $row['records_since'] = $events.Count
+        $row['ids_seen'] = @($events | Group-Object Id | ForEach-Object { [ordered]@{id=[int]$_.Name; count=$_.Count} })
+    } catch { $row['error'] = $_.Exception.Message }
+    $agentLog.channels += $row
+}
+$stateDir = 'C:\ProgramData\EDR\state'
+if (Test-Path -LiteralPath $stateDir) {
+    $agentLog.bookmarks = @(Get-ChildItem -LiteralPath $stateDir -Filter 'evt_bookmark_*.xml' -ErrorAction SilentlyContinue |
+        ForEach-Object { [ordered]@{file=$_.Name; last_write_utc=$_.LastWriteTimeUtc.ToString('o')} })
+}
+$report['agent_eventlog'] = $agentLog
+
 $executionLog = Join-Path $env:TEMP 'Invoke-AtomicTest-ExecutionLog.csv'
 if (Test-Path -LiteralPath $executionLog) {
-    $report['recent_execution_log'] = @(Import-Csv -LiteralPath $executionLog | Select-Object -Last 50)
+    # Full GUIDs and times (the console table truncates them).
+    $report['recent_execution_log'] = @(Import-Csv -LiteralPath $executionLog | Select-Object -Last 50 |
+        Select-Object 'Execution Time (UTC)', Technique, 'Test Number', 'Test Name', GUID, Username)
 }
 $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $out.FullName 'readiness.json') -Encoding UTF8
 Write-Output "Read-only diagnostics saved to $($out.FullName). Nothing was uploaded. Review the files before sharing."

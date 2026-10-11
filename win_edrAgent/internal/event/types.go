@@ -24,6 +24,9 @@ const (
 	EventTypeWMI           EventType = "wmi"
 	EventTypePowerShell    EventType = "powershell" // Script Block / Module logging (Microsoft-Windows-PowerShell/Operational)
 	EventTypeClipboard     EventType = "clipboard"
+	// EventTypeEventLog is a forwarded Windows Event Log record (Security,
+	// System, Defender, …); the server routes it to Sigma service rules.
+	EventTypeEventLog EventType = "eventlog"
 	EventTypeVulnerability EventType = "vulnerability_finding"
 	EventTypeSoftwareInventory EventType = "software_inventory"
 )

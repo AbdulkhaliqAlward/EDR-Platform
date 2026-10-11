@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/edr-platform/win-agent/internal/command"
 
+	"github.com/edr-platform/win-agent/internal/auditpolicy"
 	"github.com/edr-platform/win-agent/internal/collectors"
 	"github.com/edr-platform/win-agent/internal/responder"
 	"github.com/edr-platform/win-agent/internal/signatures"
@@ -298,6 +299,35 @@ func startPlatformCollectors(ctx context.Context, a *Agent) {
 		}()
 	} else {
 		logger.Info("PowerShell logging collector disabled by config")
+	}
+
+	// Windows Event Log forwarding: Security / System / Defender records for
+	// Sigma service rules (service install, account/group changes, task
+	// registration, log clearing, Defender detections and tampering).
+	if !cfg.Collectors.DisableEventLogCollection {
+		// Security records such as 4697 (service install) and 4698 (task
+		// registration) exist only when their audit subcategory is enabled.
+		if changed, err := auditpolicy.Ensure(); err != nil {
+			logger.Warnf("Audit policy: %v (changed: %v)", err, changed)
+		} else if len(changed) > 0 {
+			logger.Infof("Audit policy: enabled %v (reverted on uninstall)", changed)
+		}
+		evl := collectors.NewEventLogCollector(eventChan, logger, `C:\ProgramData\EDR\state`, nil)
+		a.RegisterDropSource("eventlog", evl.Dropped)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Errorf("Event log collector panicked and was safely recovered: %v", r)
+				}
+			}()
+			if err := evl.Start(ctx); err != nil {
+				logger.Warnf("Event log collector failed to start: %v", err)
+			} else {
+				logger.Info("Event log collector started (Security/System/Defender telemetry)")
+			}
+		}()
+	} else {
+		logger.Info("Event log collector disabled by config")
 	}
 
 	if cfg.Collectors.VulnScanEnabled {

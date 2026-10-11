@@ -538,6 +538,13 @@ func (e *LogEvent) inferCategory() EventCategory {
 			// Clipboard telemetry is not file activity; evaluating it against
 			// file_event rules would produce spurious matches.
 			return EventCategoryClipboard
+		case "eventlog":
+			// Forwarded Windows Event Log records (Security/System/Defender…)
+			// are routed to Sigma rules by service, derived from the channel.
+			// Their EventIDs are provider codes, not Sysmon codes: inferring a
+			// category from them would send e.g. BITS 3 or TerminalServices 21
+			// to network/WMI rules.
+			return EventCategoryUnknown
 		}
 	}
 

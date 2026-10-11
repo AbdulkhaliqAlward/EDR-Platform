@@ -51,3 +51,15 @@ test('script text is excluded from the table (shown as a block)', () => {
     assert.equal(row(sections, 'script_block_text'), undefined);
     assert.equal(row(sections, 'script_path').value, 'C:\\s.ps1');
 });
+
+test('event-log records group under Windows event log with original field names', () => {
+    const sections = groupEventFields({ event_type: 'eventlog', data: { channel: 'System', provider_name: 'Service Control Manager', EventID: 7045, record_id: 9912, ServiceName: 'updater', ImagePath: 'C:/ProgramData/updater.exe', ServiceType: 'user mode service' } });
+    const ev = sections.find(s => s.id === 'eventlog');
+    assert.ok(ev, 'eventlog section present');
+    const labels = Object.fromEntries(ev.rows.map(r => [r.label, r.value]));
+    assert.equal(labels['Event ID'], '7045');
+    assert.equal(labels['Service binary'], 'C:/ProgramData/updater.exe');
+    assert.equal(labels['Service'], 'updater');
+    const other = sections.find(s => s.id === 'other');
+    assert.ok(other.rows.some(r => r.key === 'ServiceType'), 'unlisted EventData fields stay visible');
+});

@@ -135,6 +135,10 @@ type CollectorConfig struct {
 	// configured it, and reads Microsoft-Windows-PowerShell/Operational.
 	DisablePowerShellLogging bool `yaml:"disable_powershell_logging"`
 
+	// Windows Event Log forwarding (Security / System / Defender / selected
+	// operational channels) for Sigma service rules. On by default.
+	DisableEventLogCollection bool `yaml:"disable_eventlog_collection"`
+
 	// Phase 2 — Vulnerability scanner integration (Trivy/Grype)
 	VulnScanEnabled  bool          `yaml:"vuln_scan_enabled"`
 	VulnScanInterval time.Duration `yaml:"vuln_scan_interval"`

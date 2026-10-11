@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/edr-platform/win-agent/internal/auditpolicy"
 	"github.com/edr-platform/win-agent/internal/edrhosts"
 	"github.com/edr-platform/win-agent/internal/pslogging"
 )
@@ -60,6 +61,7 @@ func (h *Handler) cleanupHostArtifacts() {
 	// Only values the agent itself created are removed (GPO/admin settings
 	// are left as they were).
 	pslogging.RevertScriptBlockLogging()
+	auditpolicy.Revert()
 	h.logger.Info("[UNINSTALL] PowerShell logging policy reverted (agent-created values only)")
 
 	// ── 3. Hosts file: C2 mapping + domain sinkhole blocks ──────────────────

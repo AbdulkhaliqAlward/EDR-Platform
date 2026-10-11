@@ -448,6 +448,16 @@ func (fm *FieldMapper) ResolveField(eventData map[string]interface{}, fieldName 
 		}
 	}
 
+	// 5c) Windows event-log records forwarded by the agent keep each EventData
+	// field under its original name (data.ImagePath, data.SamAccountName, …),
+	// exactly the names Sigma service rules use. Exact case only: agent ETW
+	// fields are snake_case and never collide with these.
+	if data, ok := eventData["data"].(map[string]interface{}); ok {
+		if val, ok := data[fieldName]; ok && val != nil {
+			return val, FieldTypeString, nil
+		}
+	}
+
 	// 6) Sysmon-specific paths (common Sysmon JSON layouts)
 	sysmonPaths := []string{
 		"Event.EventData." + fieldName,
