@@ -1,3 +1,4 @@
+import { collectPages } from '../../api/collectPages';
 /**
  * Report Generator Component
  * Advanced report creation with templates, formats, and data visualization
@@ -80,29 +81,27 @@ export function ReportGenerator() {
 
         // Fetch all required data in parallel
         const [alertsRes, agentsRes, commandsRes, vulnRes, agentStatsRes, cmdStatsRes, auditRes] = await Promise.allSettled([
-            alertsApi.list({
-                limit: 1000,
-                date_from: fromIso,
-                date_to: toIso,
-                agent_id: reportScope === 'specific' && selectedAgent ? selectedAgent : undefined,
-                sort: 'timestamp',
-                order: 'desc'
-            }),
-            agentsApi.list({ limit: 500 }),
-            commandsApi.list({ limit: 500 }),
+            collectPages(cursor => alertsApi.page({ limit: '100', cursor: cursor || '', date_from: fromIso, date_to: toIso,
+                ...(reportScope === 'specific' && selectedAgent ? { agent_id: selectedAgent } : {}), sort: 'created_at', order: 'desc' })),
+            collectPages(cursor => agentsApi.page({ limit: '100', cursor: cursor || '', sort: 'hostname', order: 'asc' })),
+            collectPages(cursor => commandsApi.page({ limit: '100', cursor: cursor || '', from: fromIso, to: toIso, ...(reportScope === 'specific' && selectedAgent ? { agent_id: selectedAgent } : {}) })),
             vulnerabilityApi.listFindings({ limit: 200 }),
             agentsApi.stats(),
             commandsApi.stats(),
-            auditApi.list({ limit: 200 }),
+            collectPages(cursor => auditApi.page({ limit: '100', cursor: cursor || '', from: fromIso, to: toIso })),
         ]);
 
-        const alerts = alertsRes.status === 'fulfilled' ? (alertsRes.value.alerts || []) : [];
-        const agents = agentsRes.status === 'fulfilled' ? (agentsRes.value.data || []) : [];
-        const commands = commandsRes.status === 'fulfilled' ? (commandsRes.value.data || []) : [];
+        if (alertsRes.status === 'rejected') throw alertsRes.reason;
+        const alerts = alertsRes.value;
+        if (agentsRes.status === 'rejected') throw agentsRes.reason;
+        if (commandsRes.status === 'rejected') throw commandsRes.reason;
+        const agents = agentsRes.value;
+        const commands = commandsRes.value;
         const vulnFindings = vulnRes.status === 'fulfilled' ? (vulnRes.value.data || []) : [];
         const agentStats = agentStatsRes.status === 'fulfilled' ? agentStatsRes.value : null;
         const _cmdStats = cmdStatsRes.status === 'fulfilled' ? cmdStatsRes.value : null; void _cmdStats;
-        const auditLogs = auditRes.status === 'fulfilled' ? (auditRes.value.data || []) : [];
+        if (auditRes.status === 'rejected') throw auditRes.reason;
+        const auditLogs = auditRes.value;
 
         // Create agent map
         const agentMap = new Map(agents.map((a: { id: string; hostname: string }) => [a.id, a.hostname]));

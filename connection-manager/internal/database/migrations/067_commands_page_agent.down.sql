@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_commands_page_agent_issued_id;

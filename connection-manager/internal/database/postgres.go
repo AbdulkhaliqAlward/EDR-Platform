@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,6 +45,8 @@ func NewPostgresPool(ctx context.Context, cfg *PostgresConfig, logger *logrus.Lo
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse connection string: %w", err)
 	}
+
+	pagination.ConfigureKey([]byte(poolConfig.ConnConfig.Password))
 
 	// Set pool configuration
 	poolConfig.MaxConns = cfg.MaxConns

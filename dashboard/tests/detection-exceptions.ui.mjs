@@ -20,7 +20,7 @@ const plugin = {
     resolveId(id) { if (id === 'virtual:exceptions-fixture' || id === '/fixture-entry.js') return 'virtual:exceptions-fixture'; },
     load(id) {
         if (id !== 'virtual:exceptions-fixture') return;
-        return `import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {QueryClient,QueryClientProvider} from '@tanstack/react-query';import {ToastProvider} from '/src/components/Toast.tsx';import {useAlerts} from '/src/hooks/useAlerts.ts';import {useDashboard} from '/src/hooks/useDashboard.ts';import {Modal} from '/src/components/Modal.tsx';import {alertsApi} from '/src/api/client.ts';import {DetectionExceptionsPage} from '/src/pages/automation/DetectionExceptionsPage.tsx';import {CreateExceptionModal} from '/src/components/alerts/CreateExceptionModal.tsx';import '/src/index.css';
+        return `import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {BrowserRouter} from 'react-router-dom';import {QueryClient,QueryClientProvider} from '@tanstack/react-query';import {ToastProvider} from '/src/components/Toast.tsx';import {useAlerts} from '/src/hooks/useAlerts.ts';import {useDashboard} from '/src/hooks/useDashboard.ts';import {Modal} from '/src/components/Modal.tsx';import {alertsApi} from '/src/api/client.ts';import {DetectionExceptionsPage} from '/src/pages/automation/DetectionExceptionsPage.tsx';import {CreateExceptionModal} from '/src/components/alerts/CreateExceptionModal.tsx';import '/src/index.css';
         localStorage.setItem('user',JSON.stringify({role:new URLSearchParams(location.search).get('role')||'admin'}));
         const alert=${JSON.stringify(alert)};
         function PerfAlerts(){const data=useAlerts();const [open,setOpen]=useState(false);return React.createElement(React.Fragment,null,React.createElement('output',{'data-testid':'perf-alerts'},data.alerts.length),React.createElement('button',{onClick:()=>{data.setSelectedAlert(alert);setOpen(true);}},'Open selected alert'),data.selectedAlert?React.createElement('span',null,'Alert still selected'):null,React.createElement(CreateExceptionModal,{isOpen:open,alert,onClose:()=>setOpen(false)}));}
@@ -28,7 +28,7 @@ const plugin = {
         const queryClient=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:30000,refetchOnWindowFocus:false}}});
         function Perf(){const [mode,setMode]=useState('dashboard');return React.createElement(QueryClientProvider,{client:queryClient},React.createElement(ToastProvider,null,React.createElement('button',{onClick:()=>setMode('dashboard')},'Show dashboard'),React.createElement('button',{onClick:()=>setMode('alerts')},'Show alerts'),React.createElement('button',{onClick:()=>setMode('none')},'Leave pages'),mode==='dashboard'?React.createElement(PerfDashboard):mode==='alerts'?React.createElement(PerfAlerts):null));}
         function App(){const [open,setOpen]=useState(false);const params=new URLSearchParams(location.search);const props={isOpen:open,alert,onClose:()=>setOpen(false)};if(params.has('callback')){props.updateAlertStatus=false;props.onCreated=async(marked)=>{if(marked)await alertsApi.updateStatus(alert.id,'false_positive');};}const content=React.createElement(React.Fragment,null,React.createElement('button',{onClick:()=>setOpen(true)},'Open alert exception'),React.createElement(CreateExceptionModal,props));return params.has('alert')?React.createElement('main',{className:'p-6'},params.has('nested')?React.createElement(Modal,{isOpen:true,onClose:()=>{},title:'Alert details'},content):content):React.createElement('main',{className:'mx-auto max-w-6xl p-4'},React.createElement(DetectionExceptionsPage));}
-        createRoot(document.getElementById('root')).render(React.createElement(new URLSearchParams(location.search).has('perf')?Perf:App));`;
+        createRoot(document.getElementById('root')).render(React.createElement(BrowserRouter,null,React.createElement(new URLSearchParams(location.search).has('perf')?Perf:App)));`;
     },
     configureServer(server) {
         server.middlewares.use(async (req, res, next) => {
@@ -50,7 +50,7 @@ const plugin = {
             const fail = key => { if (state[key] > 0) { state[key]--; send({ message: `Fixture ${key} failure` }, 503); return true; } return false; };
             if (url.pathname === '/fixture/control') { Object.assign(state, input); send(state); return; }
             if (url.pathname === '/fixture/state') { send(state); return; }
-            if (url.pathname.endsWith('/sigma/alerts') && req.method === 'GET') { state.perfRequests.alerts++; send({ alerts: [], total: 0 }); return; }
+            if (url.pathname.endsWith('/sigma/alerts') && req.method === 'GET') { state.perfRequests.alerts++; send({ data: [], alerts: [], page_info: { limit: 25, has_next: false, has_prev: false, next_cursor: null, prev_cursor: null } }); return; }
             if (url.pathname.endsWith('/sigma/stats/alerts')) { state.perfRequests.stats++; send({ total_alerts: 0, by_severity: {}, by_status: {} }); return; }
             if (url.pathname.includes('/sigma/stats/timeline')) { send({ data: [] }); return; }
             if (url.pathname.endsWith('/agents/stats')) { send({ total: 24 }); return; }
@@ -91,6 +91,7 @@ try {
     browser = await chromium.launch({ channel: process.env.EDR_UI_BROWSER_CHANNEL || (process.platform === 'win32' ? 'chrome' : undefined), headless: true });
     const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
     page.setDefaultTimeout(10_000);
+    page.setDefaultNavigationTimeout(60_000); // Allow cold Vite dependency compilation; interaction deadlines stay short.
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.route('**/*', route => route.request().url().startsWith(origin) ? route.continue() : route.abort());
     const control = async patch => { const response = await fetch(`${origin}/fixture/control`, { method: 'POST', body: JSON.stringify(patch) }); assert.equal(response.status, 200); };

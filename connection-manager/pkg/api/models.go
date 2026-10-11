@@ -3,6 +3,7 @@ package api
 
 import (
 	"encoding/json"
+	"github.com/edr-platform/shared/pagination"
 	"time"
 
 	"github.com/google/uuid"
@@ -121,9 +122,11 @@ type AgentListRequest struct {
 
 // AgentListResponse for agent list.
 type AgentListResponse struct {
-	Data       []AgentSummary     `json:"data"`
-	Pagination PaginationResponse `json:"pagination"`
-	Meta       ResponseMeta       `json:"meta"`
+	PageInfo   pagination.PageInfo `json:"page_info"`
+	Total      *pagination.Total   `json:"total,omitempty"`
+	Data       []AgentSummary      `json:"data"`
+	Pagination PaginationResponse  `json:"pagination"`
+	Meta       ResponseMeta        `json:"meta"`
 }
 
 // AgentSummary for list views.
@@ -488,11 +491,15 @@ type PolicyTargets struct {
 
 // EventSearchRequest for searching events.
 type EventSearchRequest struct {
-	Filters   []EventFilter `json:"filters"`
-	Logic     string        `json:"logic" validate:"oneof=AND OR"`
-	TimeRange TimeRange     `json:"time_range"`
-	Limit     int           `json:"limit" validate:"max=10000"`
-	Offset    int           `json:"offset"`
+	Cursor       string        `json:"cursor"`
+	Sort         string        `json:"sort"`
+	Order        string        `json:"order"`
+	IncludeTotal bool          `json:"include_total"`
+	Filters      []EventFilter `json:"filters"`
+	Logic        string        `json:"logic" validate:"oneof=AND OR"`
+	TimeRange    TimeRange     `json:"time_range"`
+	Limit        int           `json:"limit" validate:"max=10000"`
+	Offset       int           `json:"offset"`
 }
 
 // EventFilter for event filtering.
@@ -513,6 +520,7 @@ type EventListResponse struct {
 // Data contains the nested event payload (action, name, pid, matched_rule_id, etc.)
 // so the dashboard can display process termination details without a secondary fetch.
 type EventSummary struct {
+	CreatedAt time.Time              `json:"created_at"`
 	ID        uuid.UUID              `json:"id"`
 	AgentID   uuid.UUID              `json:"agent_id"`
 	EventType string                 `json:"event_type"`

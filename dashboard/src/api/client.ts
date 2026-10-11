@@ -1,3 +1,4 @@
+import type { Paged } from '../hooks/paginationState';
 import axios, { type AxiosInstance } from 'axios';
 
 // Configuration - all from environment variables
@@ -651,10 +652,39 @@ export interface EndpointRiskSummary {
     last_alert_at: string;
 }
 
+/** Rows per server request: every list endpoint caps `limit` at 100. */
+const SERVER_PAGE_MAX = 100;
+
+/**
+ * Compatibility for legacy callers that ask for more rows than one server page.
+ * Reads consecutive pages (each at most 100 rows) until `want` rows or the end
+ * of the list, so a request for 500 still returns up to 500 rows instead of
+ * being silently cut to 100. Bounded by `want`; interactive tables should use
+ * the paginated `page` APIs instead.
+ */
+async function readUpTo<T, P extends Paged<T>>(want: number, fetchPage: (limit: number, cursor?: string) => Promise<P>): Promise<{ first: P; last: P; data: T[] }> {
+    const first = await fetchPage(Math.min(want, SERVER_PAGE_MAX));
+    const data = [...first.data];
+    let last = first;
+    const seen = new Set<string>();
+    while (data.length < want && last.page_info?.has_next && last.page_info.next_cursor && !seen.has(last.page_info.next_cursor)) {
+        seen.add(last.page_info.next_cursor);
+        last = await fetchPage(Math.min(want - data.length, SERVER_PAGE_MAX), last.page_info.next_cursor);
+        data.push(...last.data);
+    }
+    return { first, last, data };
+}
+
 export const alertsApi = {
+    page: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<Alert>> => {
+        const response = await sigmaApi.get<Paged<Alert>>('/api/v1/sigma/alerts', { params, signal });
+        return response.data;
+    },
     list: async (params?: {
         limit?: number;
         offset?: number;
+        cursor?: string;
+        include_total?: boolean;
         severity?: string;
         status?: string;
         agent_id?: string;
@@ -665,11 +695,12 @@ export const alertsApi = {
         sort?: string;
         order?: 'asc' | 'desc';
     }) => {
-        const response = await sigmaApi.get<{ alerts: Alert[]; total: number; limit?: number; offset?: number }>(
-            '/api/v1/sigma/alerts',
-            { params }
-        );
-        return response.data;
+        const { offset: _offset, ...rest } = params ?? {};
+        void _offset; // alerts use cursors; offset 0 is the only legacy value in use
+        const want = rest.limit ?? 25;
+        const { first, last, data } = await readUpTo<Alert, Paged<Alert>>(want, async (limit, cursor) =>
+            (await sigmaApi.get<Paged<Alert>>('/api/v1/sigma/alerts', { params: { ...rest, limit, ...(cursor ? { cursor } : {}) } })).data);
+        return { ...last, data, alerts: data, total: first.total?.value, total_capped: first.total?.capped ?? false };
     },
     get: async (id: string) => {
         const response = await sigmaApi.get<Alert>(`/api/v1/sigma/alerts/${id}`);
@@ -705,9 +736,13 @@ export const alertsApi = {
 // ============================================================================
 
 export const rulesApi = {
-    list: async (params?: { limit?: number; offset?: number; enabled?: boolean; severity?: string }) => {
-        const response = await sigmaApi.get<{ rules: Rule[]; total: number }>('/api/v1/sigma/rules', { params });
+    page: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<Rule>> => {
+        const response = await sigmaApi.get<Paged<Rule>>('/api/v1/sigma/rules', { params, signal });
         return response.data;
+    },
+    list: async (params?: { limit?: number; offset?: number; enabled?: boolean; severity?: string }) => {
+        const response = await sigmaApi.get<Paged<Rule>>('/api/v1/sigma/rules', { params });
+        return { ...response.data, rules: response.data.data };
     },
     get: async (id: string) => {
         const response = await sigmaApi.get<Rule>(`/api/v1/sigma/rules/${id}`);
@@ -767,6 +802,7 @@ export interface CmEventSummary {
     agent_id: string;
     event_type: string;
     timestamp: string;
+    created_at?: string;
     summary: string;
     severity?: string;
     data?: any;
@@ -779,24 +815,33 @@ export interface CmEventDetail extends CmEventSummary {
 
 /** Body for `POST /api/v1/events/search` (matches connection-manager EventSearchRequest). */
 export interface EventSearchRequestBody {
+    cursor?: string;
+    sort?: string;
+    order?: string;
+    include_total?: boolean;
     filters: { field: string; operator: string; value: unknown }[];
     logic: 'AND' | 'OR';
     time_range: { from: string; to: string };
     limit: number;
-    offset: number;
+    offset?: number;
 }
 
 export const eventsApi = {
+    page: async (body: EventSearchRequestBody, signal?: AbortSignal): Promise<Paged<CmEventSummary>> => {
+        const response = await connectionApi.post<Paged<CmEventSummary>>('/api/v1/events/search', body, { signal });
+        return response.data;
+    },
 	preventionActivity: async (params: { from: string; through: string; cursor_ingested_at?: string; cursor_id?: string; limit?: number }) => {
 		const response = await connectionApi.get<{ data: (CmEventSummary & { ingested_at: string })[] }>('/api/v1/events/prevention-activity', { params });
 		return response.data.data;
 	},
     search: async (body: EventSearchRequestBody) => {
-        const response = await connectionApi.post<{
-            data: CmEventSummary[];
-            pagination: { total: number; limit: number; offset: number; has_more?: boolean };
-        }>('/api/v1/events/search', body);
-        return response.data;
+        const { offset: _offset, ...rest } = body;
+        void _offset; // events use cursors; offset 0 is the only legacy value in use
+        const { first, last, data } = await readUpTo<CmEventSummary, Paged<CmEventSummary>>(rest.limit || 25, async (limit, cursor) =>
+            (await connectionApi.post<Paged<CmEventSummary>>('/api/v1/events/search', { ...rest, limit, ...(cursor ? { cursor } : {}) })).data);
+        return { ...last, data, pagination: { total: first.total?.value, total_capped: first.total?.capped ?? false,
+            limit: rest.limit, has_more: last.page_info.has_next, next_cursor: last.page_info.next_cursor } };
     },
     get: async (id: string) => {
         const response = await connectionApi.get<{ data: CmEventDetail }>(`/api/v1/events/${encodeURIComponent(id)}`);
@@ -870,6 +915,10 @@ export const appControlApi = {
 };
 
 export const agentsApi = {
+    page: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<Agent>> => {
+        const response = await connectionApi.get<Paged<Agent> & { pagination: { total: number } }>('/api/v1/agents', { params, signal });
+        return { ...response.data, total: { value: response.data.pagination.total, capped: false } };
+    },
     list: async (params?: {
         limit?: number;
         offset?: number;
@@ -879,8 +928,11 @@ export const agentsApi = {
         sort_by?: string;
         sort_order?: 'asc' | 'desc';
     }) => {
-        const response = await connectionApi.get<{ data: Agent[]; pagination: { total: number; has_more: boolean } }>('/api/v1/agents', { params });
-        return response.data;
+        type AgentList = Paged<Agent> & { pagination: { total: number; has_more: boolean } };
+        const want = params?.limit ?? 25;
+        const { first, last, data } = await readUpTo<Agent, AgentList>(want, async (limit, cursor) =>
+            (await connectionApi.get<AgentList>('/api/v1/agents', { params: cursor ? { ...params, offset: undefined, limit, cursor } : { ...params, limit } })).data);
+        return { ...last, data, pagination: { ...first.pagination, has_more: last.page_info ? last.page_info.has_next : !!last.pagination?.has_more } };
     },
     get: async (id: string) => {
         const response = await connectionApi.get<{ data: Agent }>(`/api/v1/agents/${id}`);
@@ -945,14 +997,8 @@ export const agentsApi = {
         const response = await connectionApi.get<CommandCapabilities>('/api/v1/commands/capabilities');
         return response.data;
     },
-    getCommands: async (agentId: string, params?: { limit?: number; offset?: number; status?: string }) => {
-        const response = await connectionApi.get<{
-            data: CommandListItem[];
-            pagination: { total: number; limit: number; offset: number; has_more: boolean };
-        }>(
-            `/api/v1/agents/${agentId}/commands`,
-            { params }
-        );
+    getCommands: async (agentId: string, params?: { limit?: number; cursor?: string; status?: string }, signal?: AbortSignal) => {
+        const response = await connectionApi.get<Paged<CommandListItem>>(`/api/v1/agents/${agentId}/commands`, { params, signal });
         return response.data;
     },
     getForensicCollections: async (agentId: string, params?: { limit?: number }) => {
@@ -1712,6 +1758,10 @@ export const signaturesApi = {
 // ============================================================================
 
 export const auditApi = {
+    page: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<AuditLog>> => {
+        const response = await connectionApi.get<Paged<AuditLog>>('/api/v1/audit/logs', { params, signal });
+        return response.data;
+    },
     list: async (params?: {
         limit?: number;
         offset?: number;
@@ -1721,7 +1771,7 @@ export const auditApi = {
         from?: string;
         to?: string;
     }) => {
-        const response = await connectionApi.get<{ data: AuditLog[]; pagination: { total: number } }>(
+        const response = await connectionApi.get<Paged<AuditLog>>(
             '/api/v1/audit/logs',
             { params }
         );
@@ -1759,20 +1809,13 @@ export interface SecurityEventSummaryItem {
 }
 
 export const securityEventsApi = {
-    getEvents: async (params?: {
-        event_type?: string;
-        severity?: string;
-        actor_id?: string;
-        from?: string;
-        to?: string;
-        limit?: number;
-        offset?: number;
-    }) => {
-        const response = await connectionApi.get<{
-            data: SecurityEvent[];
-            meta: { count: number; limit: number; offset: number };
-        }>('/api/v1/security/events', { params });
+    page: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<SecurityEvent>> => {
+        const response = await connectionApi.get<Paged<SecurityEvent>>('/api/v1/security/events', { params, signal });
         return response.data;
+    },
+    get: async (id: string) => {
+        const response = await connectionApi.get<{data:SecurityEvent}>(`/api/v1/security/events/${encodeURIComponent(id)}`);
+        return response.data.data;
     },
     getSummary: async () => {
         const response = await connectionApi.get<{
@@ -2242,19 +2285,12 @@ export interface CommandStats {
 // ============================================================================
 
 export const commandsApi = {
-    list: async (params?: {
-        limit?: number;
-        offset?: number;
-        status?: string;
-        command_type?: string;
-        agent_id?: string;
-        sort_by?: string;
-        sort_order?: string;
-    }) => {
-        const response = await connectionApi.get<{
-            data: CommandListItem[];
-            pagination: { total: number; limit: number; offset: number; has_more: boolean };
-        }>('/api/v1/commands', { params });
+    page: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<CommandListItem>> => {
+        const response = await connectionApi.get<Paged<CommandListItem>>('/api/v1/commands', { params, signal });
+        return response.data;
+    },
+    list: async (params?: { limit?: number; offset?: number; cursor?: string; status?: string; command_type?: string; agent_id?: string; sort_by?: string; sort_order?: string; from?: string; to?: string }) => {
+        const response = await connectionApi.get<Paged<CommandListItem>>('/api/v1/commands', { params });
         return response.data;
     },
     get: async (commandId: string) => {

@@ -121,6 +121,7 @@ func (h *Handlers) ListResponseScripts(c echo.Context) error {
 		h.logger.WithError(err).Error("ListResponseScripts failed")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list scripts")
 	}
+	scripts = capList(c, scripts)
 	return c.JSON(http.StatusOK, map[string]any{"data": scripts, "total": len(scripts)})
 }
 

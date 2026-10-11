@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 
 	"github.com/edr-platform/sigma-engine/internal/analytics"
 	"github.com/gorilla/mux"
@@ -41,12 +42,28 @@ func (h *correlationAPIHandler) getCorrelations(w http.ResponseWriter, r *http.R
 	})
 }
 
+// maxIncidentList bounds GET /sigma/incidents (newest incidents are kept).
+const maxIncidentList = 1000
+
 func (h *correlationAPIHandler) listIncidents(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	incidents := h.mgr.ListIncidents(status)
+	// The manager iterates a map: give the list a stable newest-first order
+	// (id breaks ties) and bound the response like other full-list endpoints.
+	sort.Slice(incidents, func(i, j int) bool {
+		if !incidents[i].CreatedAt.Equal(incidents[j].CreatedAt) {
+			return incidents[i].CreatedAt.After(incidents[j].CreatedAt)
+		}
+		return incidents[i].ID > incidents[j].ID
+	})
+	total := len(incidents)
+	if total > maxIncidentList {
+		incidents = incidents[:maxIncidentList]
+		w.Header().Set("X-Result-Truncated", "true")
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"incidents": incidents,
-		"total":     len(incidents),
+		"total":     total,
 	})
 }
 

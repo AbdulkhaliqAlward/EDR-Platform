@@ -266,13 +266,17 @@ func (r *PostgresUserRepository) List(ctx context.Context, filter UserFilter) ([
 		argNum++
 	}
 
-	query += " ORDER BY created_at DESC"
+	// id breaks created_at ties so offset pages never repeat or skip a user.
+	query += " ORDER BY created_at DESC, id DESC"
 
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", argNum)
+		args = append(args, filter.Limit)
+		argNum++
 	}
 	if filter.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		query += fmt.Sprintf(" OFFSET $%d", argNum)
+		args = append(args, filter.Offset)
 	}
 
 	rows, err := r.pool.Query(ctx, query, args...)

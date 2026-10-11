@@ -1,3 +1,6 @@
+import { usePageSearch } from '../../hooks/usePageSearch';
+import { usePaginatedQuery } from '../../hooks/usePaginatedQuery';
+import { PaginationControls } from '../../components/PaginationControls';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -13,8 +16,6 @@ import {
     AlertTriangle,
     BarChart3,
     BookOpen,
-    ChevronLeft,
-    ChevronRight,
     Clock,
     Eye,
     KeyRound,
@@ -1421,7 +1422,6 @@ function managedIncidentSeverityClass(sev: string | undefined): string {
     }
 }
 
-const MANAGED_INCIDENTS_PAGE_SIZE = 25;
 
 export function ManagedSecurityIncidentsPage() {
     useEffect(() => {
@@ -1429,22 +1429,17 @@ export function ManagedSecurityIncidentsPage() {
     }, []);
 
     const queryClient = useQueryClient();
-    const [page, setPage] = useState(1);
-    const [searchInput, setSearchInput] = useState('');
-    const [debouncedSearch, setDebouncedSearch] = useState('');
-    const [severityFilter, setSeverityFilter] = useState<string>('');
-    const [statusPreset, setStatusPreset] = useState<'all' | 'active' | 'open' | 'closed'>('active');
-    const [sortKey, setSortKey] = useState<'risk' | 'time' | 'sev'>('risk');
-
-    useEffect(() => {
-        const t = window.setTimeout(() => setDebouncedSearch(searchInput.trim()), 400);
-        return () => window.clearTimeout(t);
-    }, [searchInput]);
-
-    useEffect(() => {
-        setPage(1);
-    }, [debouncedSearch, severityFilter, statusPreset, sortKey]);
-
+    const listQ = usePaginatedQuery<Alert>({ name: 'managed-incidents',
+        defaults: { status: 'open,in_progress', order: 'desc', sort: 'created_at' },
+        fetchPage: (params, signal) => alertsApi.page(params, signal),
+    });
+    const [searchInput, setSearchInput] = usePageSearch(listQ.params, listQ.setFilters);
+    const severityFilter = listQ.params.severity || '';
+    const setSeverityFilter = (value: string) => listQ.setFilters({ severity: value });
+    const statusPreset = ({ 'open,in_progress': 'active', open: 'open', 'resolved,false_positive': 'closed' } as Record<string, string>)[listQ.params.status] || 'all';
+    const setStatusPreset = (value: string) => listQ.setFilters({ status: ({ active: 'open,in_progress', open: 'open', closed: 'resolved,false_positive', all: '' } as Record<string, string>)[value] });
+    const sortKey = listQ.params.order;
+    const setSortKey = (value: string) => listQ.setFilters({ order: value });
     const statsQ = useQuery({
         queryKey: ['sigma-stats-alerts', 'managed-incidents-kpi'],
         queryFn: () => statsApi.alerts(),
@@ -1459,43 +1454,6 @@ export function ManagedSecurityIncidentsPage() {
         staleTime: 60_000,
         retry: 1,
     });
-
-    const listQ = useQuery({
-        queryKey: [
-            'sigma-alerts',
-            'managed-incidents',
-            page,
-            MANAGED_INCIDENTS_PAGE_SIZE,
-            debouncedSearch,
-            severityFilter,
-            statusPreset,
-            sortKey,
-        ],
-        queryFn: () => {
-            let status: string | undefined;
-            if (statusPreset === 'active') status = 'open,in_progress';
-            else if (statusPreset === 'open') status = 'open';
-            else if (statusPreset === 'closed') status = 'resolved,closed,false_positive';
-            const sort = sortKey === 'time' ? '-timestamp' : sortKey === 'sev' ? '-severity' : '-risk_score';
-            return alertsApi.list({
-                limit: MANAGED_INCIDENTS_PAGE_SIZE,
-                offset: (page - 1) * MANAGED_INCIDENTS_PAGE_SIZE,
-                search: debouncedSearch || undefined,
-                severity: severityFilter || undefined,
-                status,
-                sort,
-            });
-        },
-        staleTime: 10_000,
-        refetchInterval: 25_000,
-        retry: 1,
-    });
-
-    useEffect(() => {
-        if (!listQ.isSuccess || listQ.data == null) return;
-        const tp = Math.max(1, Math.ceil(Number(listQ.data.total) / MANAGED_INCIDENTS_PAGE_SIZE));
-        if (page > tp) setPage(tp);
-    }, [listQ.isSuccess, listQ.data?.total, page]);
 
     const agentHostnameMap = useMemo(() => {
         const m: Record<string, string> = {};
@@ -1514,16 +1472,10 @@ export function ManagedSecurityIncidentsPage() {
     const bySev = st?.by_severity ?? {};
     const critHighKpi = (bySev.critical ?? 0) + (bySev.high ?? 0);
 
-    const total = listQ.data?.total ?? 0;
-    const rows = listQ.data?.alerts ?? [];
-    const totalPages = Math.max(1, Math.ceil(Number(total) / MANAGED_INCIDENTS_PAGE_SIZE));
-    const apiOffset = listQ.data?.offset ?? (page - 1) * MANAGED_INCIDENTS_PAGE_SIZE;
-    const displayPage = rows.length ? Math.floor(apiOffset / MANAGED_INCIDENTS_PAGE_SIZE) + 1 : Math.min(page, totalPages);
-    const fromIdx = total === 0 || rows.length === 0 ? 0 : apiOffset + 1;
-    const toIdx = total === 0 || rows.length === 0 ? 0 : apiOffset + rows.length;
+    const rows = listQ.rows;
 
     const refresh = () => {
-        void queryClient.invalidateQueries({ queryKey: ['sigma-alerts', 'managed-incidents'] });
+        listQ.reset(); void listQ.refetch();
         void queryClient.invalidateQueries({ queryKey: ['sigma-stats-alerts', 'managed-incidents-kpi'] });
     };
 
@@ -1600,10 +1552,10 @@ export function ManagedSecurityIncidentsPage() {
                     subtext="All-time count in Sigma DB"
                 />
                 <StatCard
-                    title="Matching (this view)"
-                    value={listQ.isLoading && !listQ.data ? '…' : String(total)}
+                    title="Incidents on this page"
+                    value={listQ.isLoading && !listQ.data ? '…' : String(rows.length)}
                     icon={Layers}
-                    subtext="Respects filters below · server total"
+                    subtext="Filtered page · use Next for more"
                 />
             </div>
 
@@ -1652,9 +1604,8 @@ export function ManagedSecurityIncidentsPage() {
                         onChange={(e) => setSortKey(e.target.value as typeof sortKey)}
                         className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-white"
                     >
-                        <option value="risk">Sort: Risk score (desc)</option>
-                        <option value="time">Sort: Time (newest)</option>
-                        <option value="sev">Sort: Severity (desc)</option>
+                        <option value="desc">Created: Newest first</option>
+                        <option value="asc">Created: Oldest first</option>
                     </select>
                     <button
                         type="button"
@@ -1668,7 +1619,7 @@ export function ManagedSecurityIncidentsPage() {
 
             {listQ.isError && (
                 <div className="rounded-xl border border-rose-200 dark:border-rose-900/50 bg-rose-50/80 dark:bg-rose-950/20 p-6 text-sm text-rose-900 dark:text-rose-200">
-                    Could not load incidents. Confirm system connectivity and alert read permissions.
+                    Could not load incidents. <button className="underline" onClick={() => void listQ.refetch()}>Retry</button>
                 </div>
             )}
 
@@ -1676,11 +1627,8 @@ export function ManagedSecurityIncidentsPage() {
                 <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/95 dark:bg-slate-800/90 backdrop-blur-sm shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-slate-100 dark:border-slate-800 text-xs text-slate-500">
                         <span>
-                            {total === 0
-                                ? 'No rows for current filters'
-                                : `Showing ${fromIdx}–${toIdx} of ${total}`}
+                            {rows.length ? `${rows.length} incidents on this page` : 'No rows for current filters'}
                         </span>
-                        <span className="font-mono text-[10px] text-slate-400">limit={MANAGED_INCIDENTS_PAGE_SIZE} offset={apiOffset}</span>
                     </div>
                     <table className="min-w-full text-left text-sm">
                         <thead className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-xs uppercase">
@@ -1714,7 +1662,7 @@ export function ManagedSecurityIncidentsPage() {
                                     return (
                                         <tr key={a.id} className="border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50/80 dark:hover:bg-slate-800/50">
                                             <td className="px-3 py-2.5 text-xs whitespace-nowrap text-slate-600 dark:text-slate-300">
-                                                {new Date(a.timestamp || a.created_at).toLocaleString()}
+                                                {new Date(a.created_at || a.timestamp).toLocaleString()}
                                             </td>
                                             <td className={`px-3 py-2.5 text-xs font-mono capitalize ${managedIncidentSeverityClass(a.severity)}`}>
                                                 {a.severity || '—'}
@@ -1758,31 +1706,8 @@ export function ManagedSecurityIncidentsPage() {
                             )}
                         </tbody>
                     </table>
-                    {totalPages > 1 && (
-                        <div className="flex items-center justify-between px-4 py-2 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500">
-                            <span>
-                                Page {displayPage} of {totalPages}
-                            </span>
-                            <div className="flex gap-1">
-                                <button
-                                    type="button"
-                                    disabled={displayPage <= 1}
-                                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                                    className="p-1.5 rounded-lg border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30"
-                                >
-                                    <ChevronLeft className="w-4 h-4" />
-                                </button>
-                                <button
-                                    type="button"
-                                    disabled={displayPage >= totalPages}
-                                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                                    className="p-1.5 rounded-lg border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30"
-                                >
-                                    <ChevronRight className="w-4 h-4" />
-                                </button>
-                            </div>
-                        </div>
-                    )}
+                    <PaginationControls info={listQ.info} page={listQ.page} count={rows.length} busy={listQ.busy}
+                        onNext={listQ.next} onPrevious={listQ.previous} onSize={listQ.setPageSize} />
                 </div>
             )}
 
@@ -3102,7 +3027,7 @@ export function ManagementBillingPage() {
 
 export function ManagementRmmPage() {
     useEffect(() => { document.title = 'Remote Management | MITRAS'; }, []);
-    const cmdQ = useQuery({ queryKey: ['commands-rmm'], queryFn: () => commandsApi.list({ limit: 50, offset: 0 }), staleTime: 30_000, refetchInterval: 30_000 });
+    const cmdQ = usePaginatedQuery({ name: 'commands-rmm', defaults: { sort: 'issued_at', order: 'desc' }, fetchPage: commandsApi.page });
     const cmds = cmdQ.data?.data ?? [];
     return (
         <div className="space-y-6 w-full min-w-0 animate-slide-up-fade">
@@ -3128,7 +3053,7 @@ export function ManagementRmmPage() {
                         <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                             {cmdQ.isLoading ? (
                                 <tr><td colSpan={5} className="px-5 py-8 text-center text-slate-400">Loading...</td></tr>
-                            ) : cmds.length === 0 ? (
+                            ) : cmdQ.isError ? (<tr><td colSpan={5} role="alert" className="p-5">Unable to load commands. <button className="btn btn-secondary" onClick={() => cmdQ.refetch()}>Retry</button></td></tr>) : cmds.length === 0 ? (
                                 <tr><td colSpan={5} className="px-5 py-8 text-center text-slate-400">No commands issued yet.</td></tr>
                             ) : cmds.map(c => (
                                 <tr key={c.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/30 transition-colors">
@@ -3144,6 +3069,7 @@ export function ManagementRmmPage() {
                         </tbody>
                     </table>
                 </div>
+                <PaginationControls info={cmdQ.info} page={cmdQ.page} count={cmds.length} busy={cmdQ.busy} onNext={cmdQ.next} onPrevious={cmdQ.previous} onSize={cmdQ.setPageSize} />
             </div>
         </div>
     );

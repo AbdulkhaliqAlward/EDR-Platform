@@ -133,6 +133,7 @@ func (h *Handlers) ListDetectionExceptions(c echo.Context) error {
 		h.logger.WithError(err).Error("ListDetectionExceptions failed")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list detection exceptions")
 	}
+	list = capList(c, list)
 	return c.JSON(http.StatusOK, map[string]any{"data": list, "total": len(list)})
 }
 

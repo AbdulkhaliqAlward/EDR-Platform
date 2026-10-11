@@ -71,3 +71,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250818200422-3122310a409c // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )
+
+require github.com/edr-platform/shared v0.0.0
+
+replace github.com/edr-platform/shared => ../shared

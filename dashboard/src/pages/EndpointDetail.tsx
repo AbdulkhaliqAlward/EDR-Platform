@@ -1,3 +1,6 @@
+import { commandsApi } from '../api/client';
+import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
+import { PaginationControls } from '../components/PaginationControls';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -298,15 +301,9 @@ export default function EndpointDetail() {
 
     // Commands are fetched in Response tab (cmdPage). Overview uses that list for quick status panels.
 
-    const { data: cmdPage, isLoading: cmdsLoading } = useQuery({
-        queryKey: ['agent-commands', agentId, 'response'],
-        queryFn: () => agentsApi.getCommands(agentId, { limit: 100 }),
-        enabled: !!agentId && tab === 'response',
-        // Poll every 8 s so command statuses (pending → completed/failed) update
-        // in real-time without the analyst needing to manually refresh.
-        refetchInterval: tab === 'response' ? 8_000 : false,
-        refetchIntervalInBackground: false,
-    });
+    const commandPager = usePaginatedQuery<CommandListItem>({ name: 'agent-commands', namespace: `commands-${agentId}`, scope: agentId, enabled: !!agentId && tab === 'response', refreshFirstPage: 8_000, defaults: { sort: 'issued_at', order: 'desc' }, fetchPage: (params, signal) => agentsApi.getCommands(agentId, { limit: Number(params.limit), cursor: params.cursor }, signal) });
+    const cmdPage = commandPager.data;
+    const cmdsLoading = commandPager.isLoading;
 
     const { data: quarantineData, isLoading: qLoading } = useQuery({
         queryKey: ['agent-quarantine', agentId],
@@ -340,7 +337,7 @@ export default function EndpointDetail() {
         mutationFn: (req: CommandRequest) => agentsApi.executeCommand(agentId, req),
         onSuccess: (data, variables) => {
             showToast(`Command queued (${data.command_id})`, 'success');
-            queryClient.invalidateQueries({ queryKey: ['agent-commands', agentId] });
+            queryClient.invalidateQueries({ queryKey: ['agent-commands', 'page', agentId] });
             queryClient.invalidateQueries({ queryKey: ['commands'] });
             const t = variables.command_type;
             if (t === 'quarantine_file' || t === 'restore_quarantine_file' || t === 'delete_quarantine_file') {
@@ -384,7 +381,7 @@ export default function EndpointDetail() {
         onSuccess: (_, v) => {
             showToast(`Quarantine: ${v.decision}`, 'success');
             queryClient.invalidateQueries({ queryKey: ['agent-quarantine', agentId] });
-            queryClient.invalidateQueries({ queryKey: ['agent-commands', agentId] });
+            queryClient.invalidateQueries({ queryKey: ['agent-commands', 'page', agentId] });
         },
         onError: (e: Error) => showToast(e.message || 'Decision failed', 'error'),
     });
@@ -624,6 +621,7 @@ export default function EndpointDetail() {
 
                     {tab === 'response' && canViewResp && (
                         <ResponseTab
+                            commandPager={commandPager}
                             agent={agent}
                             agentId={agentId}
                             cmds={cmdPage?.data || []}
@@ -1706,7 +1704,7 @@ function ConfigurationTab({ agent, canExec }: { agent: Agent; canExec: boolean }
 
     const invalidate = () => {
         queryClient.invalidateQueries({ queryKey: ['agent', agent.id] });
-        queryClient.invalidateQueries({ queryKey: ['agent-commands', agent.id] });
+        queryClient.invalidateQueries({ queryKey: ['agent-commands', 'page', agent.id] });
     };
 
     // ── Mutations ─────────────────────────────────────────────────────────────
@@ -2494,46 +2492,45 @@ const ACTION_BADGE: Record<string, { label: string; color: string; bg: string; i
 };
 
 function AutoProcTerminationTab({ agentId, canViewAlerts, canExec }: { agentId: string; canViewAlerts: boolean; canExec: boolean }) {
-    const queryClient = useQueryClient();
     const { showToast } = useToast();
-    const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
-    const [page, setPage] = useState(1);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [allowTarget, setAllowTarget] = useState<{ name: string; rule: string } | null>(null);
     const [allowReason, setAllowReason] = useState('');
 
-    const { from, to } = useMemo(() => {
-        const toDate = new Date();
-        const fromDate = new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000);
-        return { from: fromDate.toISOString(), to: toDate.toISOString() };
-    }, [rangeDays]);
-
-    useEffect(() => { setPage(1); }, [rangeDays]);
-
-    const offset = (page - 1) * AUTO_PROC_PAGE_SIZE;
-
-    const q = useQuery({
-        queryKey: ['auto-proc-events-v2', agentId, from, to, offset],
-        queryFn: () => eventsApi.search({
+    // Cursor pagination: the time range is frozen in the URL so every cursor
+    // carries the same filter identity; Refresh/range buttons start a new walk.
+    const rangeFor = (days: number) => ({ days: String(days), from: new Date(Date.now() - days * 86_400_000).toISOString(), to: new Date().toISOString() });
+    const [initialRange] = useState(() => rangeFor(30));
+    const q = usePaginatedQuery<CmEventSummary>({
+        name: 'auto-proc-events-v3', namespace: `autoproc-${agentId}`, scope: agentId, defaults: initialRange,
+        enabled: !!agentId && canViewAlerts,
+        fetchPage: (params, signal) => eventsApi.page({
             filters: [
                 { field: 'agent_id', operator: 'equals', value: agentId },
                 { field: 'event_type', operator: 'equals', value: 'process' },
                 { field: 'data.action', operator: 'in', value: ['auto_terminated', 'auto_terminate_failed'] },
             ],
             logic: 'AND',
-            time_range: { from, to },
-            limit: AUTO_PROC_PAGE_SIZE,
-            offset,
-        }),
-        enabled: !!agentId && canViewAlerts,
-        staleTime: 15_000,
-        refetchInterval: 30_000,
-        retry: 1,
+            time_range: { from: params.from, to: params.to },
+            limit: Number(params.limit) || AUTO_PROC_PAGE_SIZE,
+            cursor: params.cursor || undefined,
+        }, signal),
     });
-
-    const rows = q.data?.data ?? [];
-    const total = q.data?.pagination?.total ?? 0;
-    const totalPages = Math.max(1, Math.ceil(total / AUTO_PROC_PAGE_SIZE));
+    const rangeDays = Number(q.params.days) || 30;
+    const setRangeDays = (days: number) => q.setFilters(rangeFor(days));
+    const rows = q.rows;
+    // The list is a bounded projection; the expanded row loads the full event.
+    const expandedDetail = useQuery({
+        queryKey: ['event-detail', expandedId],
+        queryFn: async () => (await eventsApi.get(expandedId!)).data,
+        enabled: !!expandedId,
+        staleTime: 60_000,
+    });
+    const withDetail = (ev: CmEventSummary): CmEventSummary => {
+        if (expandedDetail.data?.id !== ev.id) return ev;
+        const raw = (expandedDetail.data.raw ?? {}) as { data?: Record<string, unknown> } & Record<string, unknown>;
+        return { ...ev, data: { ...(raw.data ?? raw), ...(ev.data ?? {}) } };
+    };
 
     const exceptionMutation = useMutation({
         mutationFn: (body: { process_name: string; reason?: string }) =>
@@ -2580,7 +2577,7 @@ function AutoProcTerminationTab({ agentId, canViewAlerts, canExec }: { agentId: 
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <button
                         type="button"
-                        onClick={() => queryClient.invalidateQueries({ queryKey: ['auto-proc-events-v2', agentId] })}
+                        onClick={() => setRangeDays(rangeDays)}
                         disabled={q.isFetching}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-600 bg-white/70 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
                     >
@@ -2612,11 +2609,13 @@ function AutoProcTerminationTab({ agentId, canViewAlerts, canExec }: { agentId: 
                             }`}
                     >Last {d} days</button>
                 ))}
-                <span className="ml-auto text-[10px] text-slate-400">{total} event{total !== 1 ? 's' : ''} in range</span>
+                <span className="ml-auto text-[10px] text-slate-400">Counts above cover this page</span>
             </div>
 
             {/* Table */}
-            {q.isLoading ? (
+            {q.isError ? (
+                <p role="alert" className="text-rose-600 dark:text-rose-400">Unable to load auto-response events. <button type="button" className="btn btn-secondary" onClick={() => q.refetch()}>Retry</button></p>
+            ) : q.isLoading || q.busy && rows.length === 0 ? (
                 <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin text-cyan-500" /></div>
             ) : rows.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-slate-300 dark:border-slate-600 p-8 text-center">
@@ -2640,7 +2639,8 @@ function AutoProcTerminationTab({ agentId, canViewAlerts, canExec }: { agentId: 
                                 </tr>
                             </thead>
                             <tbody>
-                                {filteredRows.map((ev) => {
+                                {filteredRows.map((listed) => {
+                                    const ev = withDetail(listed);
                                     const badge = getActionBadge(ev);
                                     const BadgeIcon = badge.icon;
                                     const isExpanded = expandedId === ev.id;
@@ -2712,17 +2712,7 @@ function AutoProcTerminationTab({ agentId, canViewAlerts, canExec }: { agentId: 
                         </table>
                     </div>
 
-                    {totalPages > 1 && (
-                        <div className="flex items-center justify-between gap-3 pt-1">
-                            <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>
-                                <ChevronLeft className="w-4 h-4" /> Prev
-                            </button>
-                            <span className="text-xs text-slate-500">Page <span className="font-semibold text-slate-700 dark:text-slate-200">{page}</span> / {totalPages}</span>
-                            <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={page >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>
-                                Next <ChevronRight className="w-4 h-4" />
-                            </button>
-                        </div>
-                    )}
+                    <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} onNext={q.next} onPrevious={q.previous} onSize={q.setPageSize} />
                 </>
             )}
 
@@ -2785,7 +2775,17 @@ const WHITELISTED_COMMANDS = [
     { value: 'schtasks /query /fo LIST', label: 'schtasks (Scheduled Tasks)' }
 ];
 
+function CommandHistoryDetail({command,agentId}:{command:CommandListItem;agentId:string}) {
+    const [open,setOpen]=useState(false);
+    const query=useQuery({queryKey:['command-detail',command.id],queryFn:()=>commandsApi.get(command.id),enabled:open});
+    return <><button className="btn btn-secondary" onClick={()=>setOpen(true)}>View details</button>
+        <Modal isOpen={open} onClose={()=>setOpen(false)} title="Command details">
+            {query.isLoading ? <p role="status">Loading command details...</p> : query.isError ? <p role="alert">Unable to load details. <button className="btn btn-secondary" onClick={()=>query.refetch()}>Retry</button></p> : query.data && <><pre className="whitespace-pre-wrap break-all">{JSON.stringify(query.data.parameters,null,2)}</pre>{query.data.error_message && <pre className="whitespace-pre-wrap break-all text-rose-500">{query.data.error_message}</pre>}{commandHistoryOutputCell(query.data,agentId)}</>}
+        </Modal></>;
+}
+
 function ResponseTab({
+    commandPager,
     agent: _agent,
     agentId,
     cmds,
@@ -2798,6 +2798,7 @@ function ResponseTab({
     execMutation,
     onSubmit,
 }: {
+    commandPager: ReturnType<typeof usePaginatedQuery<CommandListItem>>;
     agent: Agent;
     agentId: string;
     cmds: CommandListItem[];
@@ -2844,8 +2845,6 @@ function ResponseTab({
     const enabledScripts = useMemo(() => libraryScripts.filter((s) => s.enabled), [libraryScripts]);
     const selectedScript = enabledScripts.find((s) => s.id === fields.script_id);
 
-    const [cmdPage, setCmdPage] = useState(1);
-    const CMD_PAGE_SIZE = 10;
     const { showToast } = useToast();
     const queryClient = useQueryClient();
     const [upgradeOpen, setUpgradeOpen] = useState(false);
@@ -2902,7 +2901,7 @@ function ResponseTab({
         },
         onSuccess: (pkg) => {
             showToast(`✅ Upgrade queued — package ${pkg.package_id.slice(0, 8)}`, 'success');
-            queryClient.invalidateQueries({ queryKey: ['agent-commands', agentId] });
+            queryClient.invalidateQueries({ queryKey: ['agent-commands', 'page', agentId] });
             queryClient.invalidateQueries({ queryKey: ['commands'] });
             setUpgradeOpen(false);
             setUpgradeStep('form');
@@ -3413,7 +3412,7 @@ function ResponseTab({
 
             <div>
                 <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 mb-2">Command history</h3>
-                {cmdsLoading ? (
+                {commandPager.isError ? <p role="alert">Unable to load command history. <button className="btn btn-secondary" onClick={() => commandPager.refetch()}>Retry</button></p> : cmdsLoading ? (
                     <Loader2 className="w-8 h-8 animate-spin text-cyan-500" />
                 ) : (
                     <>
@@ -3434,7 +3433,7 @@ function ResponseTab({
                                     {cmds.length === 0 ? (
                                         <tr><td colSpan={7} className="p-4 text-slate-500">No commands</td></tr>
                                     ) : (
-                                        cmds.slice((cmdPage - 1) * CMD_PAGE_SIZE, cmdPage * CMD_PAGE_SIZE).map((c) => (
+                                        cmds.map((c) => (
                                             <tr key={c.id} className="border-t border-slate-100 dark:border-slate-800 align-top">
                                                 <td className="p-2 whitespace-nowrap font-medium text-slate-700 dark:text-slate-200">{c.status}</td>
                                                 <td className="p-2">
@@ -3452,11 +3451,8 @@ function ResponseTab({
                                                 <td className="p-2 whitespace-nowrap text-slate-600 dark:text-slate-400">{new Date(c.issued_at).toLocaleString()}</td>
                                                 <td className="p-2 max-w-[140px] break-all">{c.issued_by_user || c.issued_by || '—'}</td>
                                                 <td className="p-2 max-w-md">
-                                                    {c.error_message ? (
-                                                        <span className="text-rose-600 dark:text-rose-400">{c.error_message}</span>
-                                                    ) : (
-                                                        commandHistoryOutputCell(c, agentId)
-                                                    )}
+                                                    {c.error_message && <span className="text-rose-600 dark:text-rose-400">{c.error_message}</span>}
+                                                    <CommandHistoryDetail command={c} agentId={agentId} />
                                                 </td>
                                                 <td className="p-2">
                                                     {(c.command_type === 'kill_process' || c.command_type === 'terminate_process' || c.command_type === 'quarantine_file') && c.status === 'completed' ? (
@@ -3473,17 +3469,7 @@ function ResponseTab({
                                 </tbody>
                             </table>
                         </div>
-                        {cmds.length > CMD_PAGE_SIZE && (
-                            <div className="flex items-center justify-between gap-3 pt-3 mt-3">
-                                <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={cmdPage <= 1} onClick={() => setCmdPage((p) => Math.max(1, p - 1))}>
-                                    <ChevronLeft className="w-4 h-4" /> Previous
-                                </button>
-                                <span className="text-xs text-slate-500">Page <span className="font-semibold text-slate-700 dark:text-slate-200">{cmdPage}</span> of {Math.max(1, Math.ceil(cmds.length / CMD_PAGE_SIZE))}</span>
-                                <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={cmdPage >= Math.max(1, Math.ceil(cmds.length / CMD_PAGE_SIZE))} onClick={() => setCmdPage((p) => Math.min(Math.max(1, Math.ceil(cmds.length / CMD_PAGE_SIZE)), p + 1))}>
-                                    Next <ChevronRight className="w-4 h-4" />
-                                </button>
-                            </div>
-                        )}
+                        <PaginationControls info={commandPager.info} page={commandPager.page} count={cmds.length} busy={commandPager.busy} onNext={commandPager.next} onPrevious={commandPager.previous} onSize={commandPager.setPageSize} />
                     </>
                 )}
             </div>

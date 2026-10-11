@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +34,7 @@ type CommandRepository interface {
 
 // CommandListFilter defines filters for the global command list.
 type CommandListFilter struct {
+	Page        *pagination.Params
 	AgentID     *uuid.UUID
 	Status      *string
 	CommandType *string
@@ -302,98 +305,72 @@ func (r *PostgresCommandRepository) GetPendingForAgent(
 }
 
 // ListAll retrieves commands globally with pagination, filtering, and agent/user JOINs.
+var CommandSortColumns = map[string]string{"issued_at": "c.issued_at"}
+
 func (r *PostgresCommandRepository) ListAll(ctx context.Context, filter CommandListFilter) ([]CommandListItem, int64, error) {
-	if filter.Limit <= 0 {
-		filter.Limit = 50
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	p := filter.Page
+	if p == nil {
+		q := url.Values{}
+		if filter.Limit > 0 {
+			q.Set("limit", fmt.Sprint(filter.Limit))
+		}
+		if filter.Offset != 0 {
+			return nil, 0, fmt.Errorf("command history requires cursor pagination")
+		}
+		parsed, err := pagination.Parse(q, pagination.Options{Scope: "commands", DefaultSort: "issued_at", Sorts: CommandSortColumns})
+		if err != nil {
+			return nil, 0, err
+		}
+		p = &parsed
 	}
-
-	// Build WHERE clause dynamically
-	where := "WHERE 1=1"
-	args := []interface{}{}
-	argIdx := 1
-
+	where := "WHERE c.issued_at >= $1 AND c.issued_at <= $2"
+	args := []any{p.From, p.Until}
+	add := func(column string, value any) {
+		args = append(args, value)
+		where += fmt.Sprintf(" AND %s = $%d", column, len(args))
+	}
 	if filter.AgentID != nil {
-		where += fmt.Sprintf(" AND c.agent_id = $%d", argIdx)
-		args = append(args, *filter.AgentID)
-		argIdx++
+		add("c.agent_id", *filter.AgentID)
 	}
 	if filter.Status != nil && *filter.Status != "" {
-		where += fmt.Sprintf(" AND c.status = $%d", argIdx)
-		args = append(args, *filter.Status)
-		argIdx++
+		add("c.status", *filter.Status)
 	}
 	if filter.CommandType != nil && *filter.CommandType != "" {
-		where += fmt.Sprintf(" AND c.command_type = $%d", argIdx)
-		args = append(args, *filter.CommandType)
-		argIdx++
+		add("c.command_type", *filter.CommandType)
 	}
-
-	// Count total
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM commands c %s", where)
 	var total int64
-	if err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("failed to count commands: %w", err)
+	if p.IncludeTotal {
+		if err := r.db.QueryRow(ctx, "SELECT count(*) FROM (SELECT 1 FROM commands c "+where+" LIMIT 10001) capped", args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
-
-	// Sort
-	sortCol := "c.issued_at"
-	switch filter.SortBy {
-	case "status":
-		sortCol = "c.status"
-	case "command_type":
-		sortCol = "c.command_type"
-	}
-	sortDir := "DESC"
-	if filter.SortOrder == "asc" {
-		sortDir = "ASC"
-	}
-
-	// Data query — agent hostname JOIN + user username JOIN.
-	// COALESCE priority for issued_by_user:
-	//   1. u.username  → set when issued_by FK points to a real users row
-	//   2. metadata->>'issued_by_username' → always set by ExecuteAgentCommand
-	//                                         (stored even when issued_by FK is NULL
-	//                                          to avoid FK constraint issues)
-	//   3. ''          → final fallback (command was created by a system process)
-	dataQuery := fmt.Sprintf(`
-		SELECT c.id, c.agent_id, COALESCE(a.hostname, ''), c.command_type,
-			COALESCE(c.parameters, '{}'::jsonb), c.priority, c.status,
-			COALESCE(c.result, '{}'::jsonb), COALESCE(c.error_message, ''), c.exit_code,
-			c.timeout_seconds, c.issued_at, c.sent_at, c.completed_at, c.expires_at,
-			c.issued_by, COALESCE(u.username, c.metadata->>'issued_by_username', '')
-		FROM commands c
-		LEFT JOIN agents a ON a.id = c.agent_id
-		LEFT JOIN users u ON u.id = c.issued_by
-		%s
-		ORDER BY %s %s
-		LIMIT $%d OFFSET $%d`,
-		where, sortCol, sortDir, argIdx, argIdx+1)
-
-	args = append(args, filter.Limit, filter.Offset)
-
-	rows, err := r.db.Query(ctx, dataQuery, args...)
+	seek, order, err := p.Keyset("c.issued_at", "c.id", &args)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to list commands: %w", err)
+		return nil, 0, err
+	}
+	args = append(args, p.Limit+1)
+	query := `SELECT c.id,c.agent_id,COALESCE(a.hostname,''),c.command_type,
+ jsonb_strip_nulls(jsonb_build_object('decision_reason',left(c.parameters->>'decision_reason',256),'decision_confidence',left(c.parameters->>'decision_confidence',64),'d3fend_mapping',left(c.parameters->>'d3fend_mapping',128))),c.priority,c.status,NULL::jsonb,left(COALESCE(c.error_message,''),256),c.exit_code,
+ c.timeout_seconds,c.issued_at,c.sent_at,c.completed_at,c.expires_at,c.issued_by,
+ COALESCE(u.username,c.metadata->>'issued_by_username','')
+ FROM commands c LEFT JOIN agents a ON a.id=c.agent_id LEFT JOIN users u ON u.id=c.issued_by ` + where + seek + " ORDER BY " + order + fmt.Sprintf(" LIMIT $%d", len(args))
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list command page: %w", err)
 	}
 	defer rows.Close()
-
-	var items []CommandListItem
+	items := []CommandListItem{}
 	for rows.Next() {
 		var item CommandListItem
-		err := rows.Scan(
-			&item.ID, &item.AgentID, &item.AgentHostname, &item.CommandType,
-			&item.Parameters, &item.Priority, &item.Status,
-			&item.Result, &item.ErrorMessage, &item.ExitCode,
-			&item.TimeoutSeconds, &item.IssuedAt, &item.SentAt, &item.CompletedAt, &item.ExpiresAt,
-			&item.IssuedBy, &item.IssuedByUser,
-		)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to scan command: %w", err)
+		if err := rows.Scan(&item.ID, &item.AgentID, &item.AgentHostname, &item.CommandType, &item.Parameters, &item.Priority, &item.Status,
+			&item.Result, &item.ErrorMessage, &item.ExitCode, &item.TimeoutSeconds, &item.IssuedAt, &item.SentAt, &item.CompletedAt, &item.ExpiresAt, &item.IssuedBy, &item.IssuedByUser); err != nil {
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-
-	return items, total, nil
+	return items, total, rows.Err()
 }
 
 // GetStats returns aggregate command counts by status.

@@ -1,5 +1,5 @@
 import { useQuery, useMutation } from '@tanstack/react-query';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
     Zap, CheckCircle2, Clock, XCircle, AlertTriangle,
@@ -8,7 +8,9 @@ import {
 } from 'lucide-react';
 import { authApi, commandsApi, eventsApi, agentsApi, type CommandListItem, type CommandStats, type CmEventSummary } from '../api/client';
 import { useToast, type ToastType } from '../components';
-import { useDebounce } from '../hooks/useDebounce';
+import { usePageFilters } from '../hooks/usePageFilters';
+import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
+import { PaginationControls } from '../components/PaginationControls';
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; icon: React.ElementType }> = {
     pending: { label: 'Pending', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)', icon: Clock },
@@ -104,8 +106,10 @@ const KPICard = React.memo(function KPICard({ title: label, value, icon: Icon, c
 });
 
 // Command Stream Row Component
-const CommandRow = React.memo(function CommandRow({ command: item }: { command: CommandListItem }) {
+const CommandRow = React.memo(function CommandRow({ command }: { command: CommandListItem }) {
     const [expanded, setExpanded] = useState(false);
+    const detail = useQuery({ queryKey: ['command-detail', command.id], queryFn: () => commandsApi.get(command.id), enabled: expanded });
+    const item = detail.data ?? command;
 
     const issuedDate = new Date(item.issued_at);
     const completedDate = item.completed_at ? new Date(item.completed_at) : null;
@@ -133,7 +137,7 @@ const CommandRow = React.memo(function CommandRow({ command: item }: { command: 
     return (
         <div
             className="p-4 rounded-xl border transition-all duration-200 group relative bg-slate-50/50 dark:bg-slate-800/40 border-slate-200/80 dark:border-slate-700/50 hover:bg-white dark:hover:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600/50"
-            style={{ contentVisibility: 'auto', containIntrinsicSize: '180px' } as any}
+            style={{ contentVisibility: 'auto', containIntrinsicSize: '180px' } }
         >
             {/* Status Indicator Bar */}
             <div className={`absolute left-0 top-0 bottom-0 w-1 rounded-l-xl ${
@@ -222,6 +226,8 @@ const CommandRow = React.memo(function CommandRow({ command: item }: { command: 
                         </div>
                     </div>
 
+                    {detail.isLoading && <p role="status">Loading command details...</p>}
+                    {detail.isError && <p role="alert">Unable to load command details. <button className="btn btn-secondary" onClick={() => detail.refetch()}>Retry</button></p>}
                     <div className="mt-4">
                         <div className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">Parameters</div>
                         <pre className="bg-slate-100 dark:bg-slate-900/60 p-3 rounded-md text-slate-700 dark:text-slate-200 whitespace-pre-wrap break-words overflow-y-auto max-h-80 text-xs">
@@ -288,21 +294,9 @@ export default function ActionCenter() {
     const { showToast } = useToast();
     const [searchParams] = useSearchParams();
     const [activeTab, setActiveTab] = useState<'commands' | 'auto-proc'>('commands');
-    const [filters, setFilters] = useState<{
-        status?: string;
-        command_type?: string;
-        agent_id?: string;
-    }>(() => ({
-        agent_id: searchParams.get('agent_id') || undefined,
-    }));
-
-    useEffect(() => {
-        const aid = searchParams.get('agent_id');
-        setFilters((prev) => ({ ...prev, agent_id: aid || undefined }));
-    }, [searchParams]);
-    const [page, setPage] = useState(0);
-    const limit = 25; // Increased limit for longer lists
-    const debouncedAgentId = useDebounce(filters.agent_id, 300);
+    const pager = usePaginatedQuery<CommandListItem>({ name: 'commands', namespace: 'commands', refreshFirstPage: 30_000, defaults: { agent_id: searchParams.get('agent_id') || '', sort: 'issued_at', order: 'desc' }, fetchPage: commandsApi.page });
+    const [filters, setFilters] = usePageFilters(pager.params, { status: '', command_type: '', agent_id: '' }, pager.setFilters);
+    const debouncedAgentId = filters.agent_id;
 
     const { data: stats } = useQuery<CommandStats>({
         queryKey: ['command-stats'],
@@ -310,40 +304,10 @@ export default function ActionCenter() {
         refetchInterval: 30000,
     });
 
-    const {
-        data: commandsData,
-        isLoading: commandsLoading,
-        isFetching,
-        isError,
-        refetch,
-        dataUpdatedAt
-    } = useQuery({
-        queryKey: ['commands', filters.status, filters.command_type, debouncedAgentId, page],
-        queryFn: () => commandsApi.list({
-            limit,
-            offset: page * limit,
-            status: filters.status || undefined,
-            command_type: filters.command_type || undefined,
-            agent_id: debouncedAgentId || undefined,
-        }),
-        refetchInterval: 30000,
-    });
-
-    const commands = commandsData?.data || [];
-    const pagination = commandsData?.pagination;
-    const total = pagination?.total || 0;
-    const totalPages = Math.ceil(total / limit);
-
-    const handleRefresh = () => {
-        refetch();
-    };
-
-    const handlePageChange = (newPage: number) => {
-        setPage(newPage - 1);
-    };
-
-    const lastUpdated = dataUpdatedAt || Date.now();
-    const currentPage = page + 1;
+    const { isLoading: commandsLoading, isFetching, isError, dataUpdatedAt } = pager;
+    const commands = pager.rows;
+    const handleRefresh = () => { pager.reset(); void pager.refetch(); };
+    const lastUpdated = dataUpdatedAt;
 
     return (
         <div className="relative flex flex-col min-h-[calc(100vh-2rem)] lg:min-h-[calc(100vh-1rem)] h-full -mx-4 sm:-mx-6 lg:-mx-8 -my-4 sm:-my-6 lg:-my-8 p-4 sm:p-6 lg:p-8 bg-slate-200 dark:bg-gradient-to-br dark:from-slate-900 dark:via-[#0b1120] dark:to-slate-900 transition-colors overflow-hidden">
@@ -450,12 +414,12 @@ export default function ActionCenter() {
                                 type="text"
                                 placeholder="Filter by Agent ID..."
                                 value={filters.agent_id || ''}
-                                onChange={(e) => setFilters(prev => ({ ...prev, agent_id: e.target.value || undefined }))}
+                                onChange={(e) => setFilters(prev => ({ ...prev, agent_id: e.target.value }))}
                                 className="w-full bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700/80 text-slate-700 dark:text-slate-200 rounded-lg pl-9 pr-3 py-2 text-sm focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition-all hover:bg-white dark:hover:bg-slate-800"
                             />
                             {filters.agent_id && (
                                 <button 
-                                    onClick={() => setFilters(prev => ({ ...prev, agent_id: undefined }))}
+                                    onClick={() => setFilters(prev => ({ ...prev, agent_id: '' }))}
                                     className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-cyan-500"
                                 >
                                     <X className="w-3.5 h-3.5" />
@@ -471,7 +435,7 @@ export default function ActionCenter() {
                         <div className="relative">
                             <select
                                 value={filters.command_type || ''}
-                                onChange={(e) => setFilters(prev => ({ ...prev, command_type: e.target.value || undefined }))}
+                                onChange={(e) => setFilters(prev => ({ ...prev, command_type: e.target.value }))}
                                 className="appearance-none w-full bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700/80 text-slate-700 dark:text-slate-200 rounded-lg pl-3 pr-8 py-2 text-sm focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition-all hover:bg-white dark:hover:bg-slate-800 cursor-pointer"
                             >
                                 <option value="">All Types</option>
@@ -498,7 +462,7 @@ export default function ActionCenter() {
                                     <div className="h-20 bg-slate-200 dark:bg-slate-800 rounded-xl animate-pulse opacity-75"></div>
                                     <div className="h-20 bg-slate-200 dark:bg-slate-800 rounded-xl animate-pulse opacity-50"></div>
                                 </div>
-                            ) : commands.length === 0 ? (
+                            ) : isError ? (<p role="alert" className="p-6">Unable to load commands. <button className="btn btn-secondary" onClick={() => pager.refetch()}>Retry</button></p>) : commands.length === 0 ? (
                                 <div className="text-center py-20 flex flex-col items-center justify-center">
                                     <Activity className="w-12 h-12 text-slate-400 dark:text-slate-600 mb-4" />
                                     <h3 className="text-lg font-medium text-slate-900 dark:text-slate-100 mb-1">No commands found</h3>
@@ -513,31 +477,7 @@ export default function ActionCenter() {
                             )}
                         </div>
 
-                        {/* Pagination Strip */}
-                        <div className="shrink-0 px-4 py-3 bg-slate-50/50 dark:bg-slate-900/40 border-t border-slate-200 dark:border-slate-800/60 mt-auto flex items-center justify-between">
-                            <div className="text-sm text-slate-500 dark:text-slate-400">
-                                Showing <span className="font-semibold text-slate-700 dark:text-slate-200">{commands.length}</span> out of <span className="font-semibold text-slate-700 dark:text-slate-200">{stats?.total || 0}</span> commands
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <button
-                                    onClick={() => handlePageChange(currentPage - 1)}
-                                    disabled={currentPage === 1}
-                                    className="px-3 py-1.5 border border-slate-200 dark:border-slate-700 rounded-md text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 dark:text-slate-300 transition-colors"
-                                >
-                                    Previous
-                                </button>
-                                <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                                    Page {currentPage} of {Math.max(1, totalPages)}
-                                </span>
-                                <button
-                                    onClick={() => handlePageChange(currentPage + 1)}
-                                    disabled={currentPage === totalPages || totalPages === 0}
-                                    className="px-3 py-1.5 border border-slate-200 dark:border-slate-700 rounded-md text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 dark:text-slate-300 transition-colors"
-                                >
-                                    Next
-                                </button>
-                            </div>
-                        </div>
+                        <PaginationControls info={pager.info} page={pager.page} count={commands.length} busy={pager.busy} total={pager.data?.total} onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
                     </div>
                     </>
                 )}
@@ -556,45 +496,23 @@ const AP_ACTION_BADGE: Record<string, { label: string; color: string; bg: string
     process_rule_matched_detect_only: { label: 'Detect Only', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)', icon: AlertTriangle },
 };
 
-const AP_PAGE_SIZE = 30;
-
 function AutoProcTerminationPanel({ showToast }: { showToast: (msg: string, type?: ToastType) => void }) {
-    const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
-    const [page, setPage] = useState(1);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [allowTarget, setAllowTarget] = useState<{ agentId: string; name: string; rule: string } | null>(null);
     const [allowReason, setAllowReason] = useState('');
-
-    const { from, to } = useMemo(() => {
-        const toD = new Date();
-        const fromD = new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000);
-        return { from: fromD.toISOString(), to: toD.toISOString() };
-    }, [rangeDays]);
-
-    useEffect(() => { setPage(1); }, [rangeDays]);
-
-    const offset = (page - 1) * AP_PAGE_SIZE;
-
-    const q = useQuery({
-        queryKey: ['auto-proc-all-v2', from, to, offset],
-        queryFn: () => eventsApi.search({
-            filters: [
-                { field: 'event_type', operator: 'equals', value: 'process' },
-                { field: 'data.action', operator: 'in', value: ['auto_terminated', 'auto_terminate_failed'] },
-            ],
-            logic: 'AND',
-            time_range: { from, to },
-            limit: AP_PAGE_SIZE,
-            offset,
-        }),
-        staleTime: 15_000,
-        refetchInterval: 30_000,
-        retry: 1,
+    const [defaults] = useState(() => ({ days: '30', from: new Date(Date.now() - 30 * 86400000).toISOString(), to: new Date().toISOString() }));
+    const q = usePaginatedQuery<CmEventSummary>({ name: 'auto-proc-all', namespace: 'autoProc', defaults,
+        fetchPage: (params, signal) => eventsApi.page({
+            filters: [{ field: 'event_type', operator: 'equals', value: 'process' },
+                { field: 'data.action', operator: 'in', value: ['auto_terminated', 'auto_terminate_failed'] }],
+            logic: 'AND', time_range: { from: params.from, to: params.to },
+            limit: Number(params.limit), cursor: params.cursor, sort: 'created_at', order: 'desc',
+        }, signal),
     });
-
-    const rows: CmEventSummary[] = q.data?.data ?? [];
-    const total = q.data?.pagination?.total ?? 0;
-    const totalPages = Math.max(1, Math.ceil(total / AP_PAGE_SIZE));
+    const rangeDays = Number(q.params.days);
+    const setRangeDays = (days: number) => q.setFilters({ days: String(days), from: new Date(Date.now() - days * 86400000).toISOString(), to: new Date().toISOString() });
+    const rows = q.rows;
+    const detail = useQuery({ queryKey: ['event-detail', expandedId], queryFn: () => eventsApi.get(expandedId!), enabled: !!expandedId });
 
     const exceptionMutation = useMutation({
         mutationFn: (body: { agentId: string; process_name: string; reason?: string }) =>
@@ -608,19 +526,19 @@ function AutoProcTerminationPanel({ showToast }: { showToast: (msg: string, type
     });
 
     const getField = (ev: CmEventSummary, field: string): string => {
-        const raw = ev as any;
-        return String(raw.data?.[field] ?? raw[field] ?? '');
+        const full = detail.data?.data;
+        const source = ev.id === expandedId && full?.id === ev.id ? full.raw : ev;
+        const raw = source && typeof source === 'object' ? source as Record<string, unknown> : {};
+        const data = raw.data as Record<string, unknown> | undefined;
+        return String(data?.[field] ?? raw[field] ?? '');
     };
 
     const getBadge = (ev: CmEventSummary) => {
-        const raw = ev as any;
-        const action = raw.data?.action || raw.action || '';
+        const action = getField(ev, 'action');
         return AP_ACTION_BADGE[action] || AP_ACTION_BADGE['auto_terminate_failed'];
     };
 
-    // Client-side filter: only show autonomous termination events (exclude non-autonomous process events)
-    const AUTONOMOUS_ACTIONS = ['auto_terminated', 'auto_terminate_failed'];
-    const filteredRows = rows.filter(r => AUTONOMOUS_ACTIONS.includes(getField(r, 'action')));
+    const filteredRows = rows; // Both action filters are applied by the server before pagination.
 
     // KPI stats
     const terminated = filteredRows.filter(r => getField(r, 'action') === 'auto_terminated').length;
@@ -630,9 +548,9 @@ function AutoProcTerminationPanel({ showToast }: { showToast: (msg: string, type
         <>
         {/* KPIs */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 shrink-0">
-            <KPICard title="Total Events" value={total} icon={ShieldAlert} color="bg-cyan-500/10 dark:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20" subtitle={`Last ${rangeDays} days`} />
-            <KPICard title="Terminated" value={terminated} icon={CheckCircle2} color="bg-emerald-500/10 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20" />
-            <KPICard title="Failed" value={failed} icon={XCircle} color="bg-rose-500/10 dark:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/20" />
+            <KPICard title="Events on this page" value={rows.length} icon={ShieldAlert} color="bg-cyan-500/10 dark:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20" subtitle={`Last ${rangeDays} days`} />
+            <KPICard title="Terminated on page" value={terminated} icon={CheckCircle2} color="bg-emerald-500/10 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20" />
+            <KPICard title="Failed on page" value={failed} icon={XCircle} color="bg-rose-500/10 dark:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/20" />
         </div>
 
         {/* Time range selector */}
@@ -658,6 +576,8 @@ function AutoProcTerminationPanel({ showToast }: { showToast: (msg: string, type
                         <div className="h-16 bg-slate-200 dark:bg-slate-800 rounded-xl animate-pulse opacity-75"></div>
                         <div className="h-16 bg-slate-200 dark:bg-slate-800 rounded-xl animate-pulse opacity-50"></div>
                     </div>
+                ) : q.isError ? (
+                    <div role="alert" className="p-6">Unable to load events. <button className="btn btn-secondary" onClick={() => q.refetch()}>Retry</button></div>
                 ) : filteredRows.length === 0 ? (
                     <div className="text-center py-20 flex flex-col items-center justify-center">
                         <ShieldAlert className="w-12 h-12 text-slate-400 dark:text-slate-600 mb-4" />
@@ -734,6 +654,8 @@ function AutoProcTerminationPanel({ showToast }: { showToast: (msg: string, type
                                         {isExpanded && (
                                             <tr className="bg-slate-50/50 dark:bg-slate-900/30">
                                                 <td colSpan={8} className="p-4">
+                                                    {detail.isLoading && <p role="status">Loading event details...</p>}
+                                                    {detail.isError && <p role="alert">Unable to load details. <button className="btn btn-secondary" onClick={() => detail.refetch()}>Retry</button></p>}
                                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                                                         <div><span className="font-semibold text-slate-500 uppercase text-[10px]">PID</span><div className="font-mono mt-0.5">{getField(ev, 'pid') || '—'}</div></div>
                                                         <div><span className="font-semibold text-slate-500 uppercase text-[10px]">PPID</span><div className="font-mono mt-0.5">{getField(ev, 'ppid') || '—'}</div></div>
@@ -763,19 +685,7 @@ function AutoProcTerminationPanel({ showToast }: { showToast: (msg: string, type
                 )}
             </div>
 
-            {/* Pagination */}
-            {totalPages > 1 && (
-                <div className="shrink-0 px-4 py-3 bg-slate-50/50 dark:bg-slate-900/40 border-t border-slate-200 dark:border-slate-800/60 flex items-center justify-between">
-                    <div className="text-sm text-slate-500 dark:text-slate-400">
-                        {total} event{total !== 1 ? 's' : ''} total
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1} className="px-3 py-1.5 border border-slate-200 dark:border-slate-700 rounded-md text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 dark:text-slate-300 transition-colors">Previous</button>
-                        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Page {page} of {totalPages}</span>
-                        <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="px-3 py-1.5 border border-slate-200 dark:border-slate-700 rounded-md text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 dark:text-slate-300 transition-colors">Next</button>
-                    </div>
-                </div>
-            )}
+            <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} onNext={q.next} onPrevious={q.previous} onSize={q.setPageSize} />
         </div>
 
         {/* Allow Confirmation Dialog */}

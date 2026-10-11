@@ -274,6 +274,7 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	secEvents := protected.Group("/security")
 	secEvents.GET("/events", handlers.ListSecurityEvents, handlers.RequirePermission("audit", "read"))
 	secEvents.GET("/events/summary", handlers.GetSecurityEventsSummary, handlers.RequirePermission("audit", "read"))
+	secEvents.GET("/events/:id", handlers.GetSecurityEvent, handlers.RequirePermission("audit", "read"))
 
 	// ── Enrollment token management ──────────────────────────────────────
 	tokens := protected.Group("/enrollment-tokens")

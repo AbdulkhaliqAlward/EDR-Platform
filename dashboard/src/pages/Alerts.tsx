@@ -1,10 +1,10 @@
+import { PaginationControls, NewItemsBanner } from '../components/PaginationControls';
 import { AlertTriangle, TrendingUp, X } from 'lucide-react';
 import { useAlerts } from '../hooks/useAlerts';
 import {
     AlertsFiltersBar,
     AlertsTable,
     BulkActionsToolbar,
-    Pagination,
     AlertDetailPanel,
 } from '../components/alerts';
 import type { SortField } from '../hooks/useAlerts';
@@ -13,8 +13,7 @@ export default function Alerts() {
     const {
         // Data
         alerts,
-        total,
-        totalPages,
+        pagination, pendingCount, refresh, retry,
         agentHostnameMap,
 
         // Loading states
@@ -22,10 +21,6 @@ export default function Alerts() {
         isError,
 
         // Pagination
-        page,
-        pageSize,
-        setPage,
-        setPageSize,
 
         // Sorting
         sortBy,
@@ -57,7 +52,7 @@ export default function Alerts() {
             <div className="card text-center py-12">
                 <AlertTriangle className="w-12 h-12 text-red-400 mx-auto mb-4" />
                 <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-2">Failed to Load Alerts</h3>
-                <p className="text-slate-500">Please try again later.</p>
+                <p className="text-slate-500">Unable to load this page.</p><button className="btn btn-secondary mt-3" onClick={retry}>Retry</button>
             </div>
         );
     }
@@ -79,7 +74,7 @@ export default function Alerts() {
                         </div>
                         <div className="flex items-center gap-2 text-sm text-slate-500 bg-white/50 dark:bg-slate-800/50 px-3 py-1.5 rounded-full border border-slate-200 dark:border-slate-700/50 backdrop-blur-sm shadow-sm">
                             <TrendingUp className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                            <span>Sorted by <span className="font-semibold text-slate-800 dark:text-cyan-300">Risk Score</span></span>
+                            <span>Sorted by <span className="font-semibold text-slate-800 dark:text-cyan-300">{sortBy === 'risk_score' ? 'Risk score' : 'Creation time'}</span></span>
                         </div>
                     </div>
 
@@ -91,6 +86,8 @@ export default function Alerts() {
                         onDateRangeChange={setDateRange}
                     />
 
+                    <NewItemsBanner count={pendingCount} onRefresh={refresh} />
+                    <button type="button" className="btn btn-secondary self-start" onClick={refresh}>Refresh first page</button>
                     {/* Bulk Actions */}
                     <BulkActionsToolbar
                         selectedCount={selectedIds.size}
@@ -119,14 +116,8 @@ export default function Alerts() {
 
                         {/* Pagination */}
                         <div className="shrink-0 z-20">
-                            <Pagination
-                                page={page}
-                                totalPages={totalPages}
-                                pageSize={pageSize}
-                                total={total}
-                                onPageChange={setPage}
-                                onPageSizeChange={setPageSize}
-                            />
+                            <PaginationControls info={pagination.info} page={pagination.page} count={alerts.length} busy={pagination.busy}
+                                total={pagination.data?.total} onNext={pagination.next} onPrevious={pagination.previous} onSize={pagination.setPageSize} />
                         </div>
                     </div>
                 </div>

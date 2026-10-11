@@ -139,6 +139,7 @@ func (h *Handlers) GetAlertSuggestions(c echo.Context) error {
 	if err != nil {
 		return h.engineError(c, err, nil)
 	}
+	rules = capList(c, rules)
 	suggestions := response.Suggest(alert, playbooks, rules, 5)
 	suggested := ""
 	if len(suggestions) > 0 {

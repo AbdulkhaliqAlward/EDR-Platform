@@ -2,8 +2,10 @@
 package api
 
 import (
+	"errors"
+	"github.com/edr-platform/shared/pagination"
+	"github.com/jackc/pgx/v5"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,61 +17,82 @@ import (
 // ListSecurityEvents handles GET /api/v1/security/events
 // Query params: event_type, severity, actor_id, since (RFC3339), until (RFC3339), limit, offset
 func (h *Handlers) ListSecurityEvents(c echo.Context) error {
+	bad := func(message string) error { return errorResponse(c, 400, "INVALID_PAGINATION", message) }
+	q := c.QueryParams()
+	for _, pair := range [][2]string{{"since", "from"}, {"until", "to"}} {
+		if v := q.Get(pair[0]); v != "" {
+			if q.Get(pair[1]) != "" && q.Get(pair[1]) != v {
+				return bad("conflicting date filters")
+			}
+			q.Set(pair[1], v)
+			q.Del(pair[0])
+		}
+	}
+	p, err := pagination.Parse(q, pagination.Options{Scope: "security/events", DefaultSort: "created_at", Sorts: map[string]string{"created_at": "created_at"}})
+	if err != nil {
+		return bad(err.Error())
+	}
+	for _, key := range []string{"from", "to"} {
+		if v := q.Get(key); v != "" {
+			stamp, err := time.Parse(time.RFC3339Nano, v)
+			if err != nil {
+				return bad("invalid " + key)
+			}
+			if key == "from" {
+				p.From = stamp
+			} else if stamp.Before(p.Until) {
+				p.Until = stamp
+			}
+		}
+	}
+	if p.From.After(p.Until) {
+		return bad("from must precede to")
+	}
+	f := audit.SecurityEventFilter{Page: &p, EventType: q.Get("event_type"), Severity: q.Get("severity")}
+	if len(f.EventType) > 128 {
+		return bad("event_type exceeds 128 characters")
+	}
+	if f.Severity != "" && f.Severity != "info" && f.Severity != "warning" && f.Severity != "critical" {
+		return bad("invalid severity")
+	}
+	if v := q.Get("actor_id"); v != "" {
+		id, err := uuid.Parse(v)
+		if err != nil {
+			return bad("invalid actor_id")
+		}
+		f.ActorID = &id
+	}
+	args := []any{}
+	if _, _, err := p.Keyset("created_at", "id", &args); err != nil {
+		return bad(err.Error())
+	}
 	if h.securityEventRepo == nil {
-		return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Security event store not available")
+		return errorResponse(c, 503, "DB_UNAVAILABLE", "Security event store not available")
 	}
-
-	f := audit.SecurityEventFilter{}
-
-	if v := c.QueryParam("event_type"); v != "" {
-		f.EventType = v
-	}
-	if v := c.QueryParam("severity"); v != "" {
-		f.Severity = v
-	}
-	if v := c.QueryParam("actor_id"); v != "" {
-		if uid, err := uuid.Parse(v); err == nil {
-			f.ActorID = &uid
-		}
-	}
-	if v := c.QueryParam("since"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			f.Since = &t
-		}
-	}
-	if v := c.QueryParam("until"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			f.Until = &t
-		}
-	}
-	if v := c.QueryParam("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			f.Limit = n
-		}
-	}
-	if v := c.QueryParam("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			f.Offset = n
-		}
-	}
-
 	events, err := h.securityEventRepo.List(c.Request().Context(), f)
 	if err != nil {
-		h.logger.WithError(err).Error("Failed to list security events")
-		return errorResponse(c, http.StatusInternalServerError, "DB_ERROR", "Failed to retrieve security events")
+		h.logger.WithError(err).Warn("Security event page failed")
+		return errorResponse(c, 500, "DB_ERROR", "Failed to retrieve security events")
 	}
-	if events == nil {
-		events = []audit.Event{}
-	}
+	return c.JSON(200, pagination.Build(events, p, func(event audit.Event) pagination.Key { return pagination.TimeKey(event.CreatedAt, event.ID.String()) }))
+}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"data": events,
-		"meta": map[string]interface{}{
-			"limit":  f.Limit,
-			"offset": f.Offset,
-			"count":  len(events),
-		},
-	})
+func (h *Handlers) GetSecurityEvent(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return errorResponse(c, 400, "INVALID_ID", "Invalid security event ID")
+	}
+	if h.securityEventRepo == nil {
+		return errorResponse(c, 503, "DB_UNAVAILABLE", "Security event store not available")
+	}
+	event, err := h.securityEventRepo.GetByID(c.Request().Context(), id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errorResponse(c, 404, "NOT_FOUND", "Security event not found")
+	}
+	if err != nil {
+		return errorResponse(c, 500, "DB_ERROR", "Unable to load security event")
+	}
+	return c.JSON(200, map[string]any{"data": event})
 }
 
 // GetSecurityEventsSummary handles GET /api/v1/security/events/summary

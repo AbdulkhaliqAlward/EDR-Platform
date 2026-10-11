@@ -3,6 +3,7 @@ package repository
 
 import (
 	"context"
+	"github.com/edr-platform/shared/pagination"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,6 +76,7 @@ type AgentRepository interface {
 
 // AgentFilter defines filters for listing agents.
 type AgentFilter struct {
+	Page      *pagination.Params
 	Status    *string
 	OSType    *string
 	Search    *string // Search in hostname
@@ -368,6 +370,9 @@ type AgentPatchProfileRepository interface {
 
 // AuditLogFilter defines filters for listing audit logs.
 type AuditLogFilter struct {
+	Page         *pagination.Params
+	Actions      []string
+	Text         map[string]string
 	UserID       *uuid.UUID
 	Action       *string
 	ResourceType *string

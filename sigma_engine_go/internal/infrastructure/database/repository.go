@@ -3,6 +3,7 @@ package database
 
 import (
 	"context"
+	"github.com/edr-platform/shared/pagination"
 	"time"
 )
 
@@ -51,6 +52,7 @@ type Alert struct {
 
 // AlertFilters contains filter options for querying alerts.
 type AlertFilters struct {
+	Page      *pagination.Params
 	AgentID   string
 	RuleID    string
 	Severity  []string
@@ -168,6 +170,7 @@ type Rule struct {
 
 // RuleFilters contains filter options for querying rules.
 type RuleFilters struct {
+	Page      *pagination.Params
 	Enabled   *bool
 	Product   string
 	Category  string

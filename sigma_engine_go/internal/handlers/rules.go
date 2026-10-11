@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/edr-platform/sigma-engine/internal/domain"
@@ -120,23 +120,17 @@ type CreateRuleRequest struct {
 func (h *RuleHandler) ListRules(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Parse query parameters
-	filters := database.RuleFilters{
-		Limit:  100,
-		Offset: 0,
+	p, err := pagination.Parse(r.URL.Query(), pagination.Options{Scope: "sigma/rules", Offset: true, DefaultSort: "title", Sorts: database.RuleSortColumns})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if limit, err := strconv.Atoi(v); err == nil && limit > 0 && limit <= 1000 {
-			filters.Limit = limit
-		}
-	}
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if offset, err := strconv.Atoi(v); err == nil && offset >= 0 {
-			filters.Offset = offset
-		}
-	}
+	filters := database.RuleFilters{Limit: p.Limit, Offset: p.Offset, SortBy: p.Sort, SortOrder: p.Order, Page: &p}
 	if v := r.URL.Query().Get("enabled"); v != "" {
+		if v != "true" && v != "false" {
+			writeError(w, http.StatusBadRequest, "enabled must be true or false")
+			return
+		}
 		enabled := v == "true"
 		filters.Enabled = &enabled
 	}
@@ -152,16 +146,10 @@ func (h *RuleHandler) ListRules(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("search"); v != "" {
 		filters.Search = v
 	}
-	if v := r.URL.Query().Get("sort"); v != "" {
-		if strings.HasPrefix(v, "-") {
-			filters.SortBy = strings.TrimPrefix(v, "-")
-			filters.SortOrder = "desc"
-		} else {
-			filters.SortBy = v
-			filters.SortOrder = "asc"
-		}
+	if len(filters.Search) > 512 {
+		writeError(w, http.StatusBadRequest, "search exceeds 512 characters")
+		return
 	}
-
 	// Query database
 	rules, total, err := h.repo.List(ctx, filters)
 	if err != nil {
@@ -170,20 +158,15 @@ func (h *RuleHandler) ListRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to response
-	response := RulesListResponse{
-		Count:  len(rules),
-		Total:  total,
-		Limit:  filters.Limit,
-		Offset: filters.Offset,
-		Rules:  make([]*RuleResponse, 0, len(rules)),
-	}
-
+	records := make([]*RuleResponse, 0, len(rules))
 	for _, rule := range rules {
-		response.Rules = append(response.Rules, toRuleResponse(rule))
+		records = append(records, toRuleResponse(rule))
 	}
-
-	writeJSON(w, http.StatusOK, response)
+	page := pagination.BuildOffset(records, p)
+	if p.IncludeTotal {
+		page.Total = &pagination.Total{Value: int(total)}
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 // CreateRule handles POST /api/v1/sigma/rules

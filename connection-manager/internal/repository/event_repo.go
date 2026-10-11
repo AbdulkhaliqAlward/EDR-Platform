@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 // EventRow is the event row returned by search/list APIs.
 // Raw is included so callers can extract typed fields (action, name, pid, etc.).
 type EventRow struct {
+	CreatedAt time.Time
 	ID        uuid.UUID
 	AgentID   uuid.UUID
 	EventType string
@@ -46,6 +49,7 @@ type EventSearchFilter struct {
 
 // EventSearchRequest matches API EventSearchRequest (without importing api package).
 type EventSearchRequest struct {
+	Page     *pagination.Params
 	Filters  []EventSearchFilter
 	Logic    string // AND/OR
 	TimeFrom time.Time
@@ -115,55 +119,35 @@ func (r *PostgresEventRepository) InsertMany(ctx context.Context, rows []EventIn
 }
 
 func (r *PostgresEventRepository) ListByAgent(ctx context.Context, agentID uuid.UUID, limit, offset int) ([]EventRow, int, error) {
-	if limit <= 0 {
-		limit = 50
+	if offset != 0 {
+		return nil, 0, fmt.Errorf("offset is unsupported; use cursor")
 	}
-	if limit > 500 {
-		limit = 500
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	var total int
-	if err := r.db.QueryRow(ctx, "SELECT COUNT(1) FROM events WHERE agent_id=$1", agentID).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("count events: %w", err)
-	}
-
-	q := `
-		SELECT id, agent_id, event_type, severity, ts, summary, raw
-		FROM events
-		WHERE agent_id = $1
-		ORDER BY ts DESC
-		LIMIT $2 OFFSET $3`
-	rs, err := r.db.Query(ctx, q, agentID, limit, offset)
-	if err != nil {
-		return nil, 0, fmt.Errorf("list events: %w", err)
-	}
-	defer rs.Close()
-
-	out := []EventRow{}
-	for rs.Next() {
-		var e EventRow
-		if err := rs.Scan(&e.ID, &e.AgentID, &e.EventType, &e.Severity, &e.Timestamp, &e.Summary, &e.Raw); err != nil {
-			return nil, 0, fmt.Errorf("scan event: %w", err)
-		}
-		out = append(out, e)
-	}
-	return out, total, nil
+	return r.Search(ctx, EventSearchRequest{Limit: limit, Filters: []EventSearchFilter{{Field: "agent_id", Operator: "equals", Value: agentID.String()}}})
 }
 
 func (r *PostgresEventRepository) Search(ctx context.Context, req EventSearchRequest) ([]EventRow, int, error) {
-	limit := req.Limit
-	offset := req.Offset
-	if limit <= 0 {
-		limit = 50
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	p := req.Page
+	if p == nil {
+		q := url.Values{}
+		if req.Limit > 0 {
+			q.Set("limit", fmt.Sprint(req.Limit))
+		}
+		if req.Offset != 0 {
+			return nil, 0, fmt.Errorf("offset is unsupported; use cursor")
+		}
+		parsed, err := pagination.Parse(q, pagination.Options{Scope: "events", DefaultSort: "created_at", Sorts: map[string]string{"created_at": "created_at"}})
+		if err != nil {
+			return nil, 0, err
+		}
+		p = &parsed
 	}
-	if limit > 10000 {
-		limit = 10000
+	if req.TimeFrom.IsZero() {
+		req.TimeFrom = p.From
 	}
-	if offset < 0 {
-		offset = 0
+	if req.TimeTo.IsZero() {
+		req.TimeTo = p.Until
 	}
 
 	where := []string{"ts >= $1", "ts <= $2"}
@@ -253,20 +237,33 @@ func (r *PostgresEventRepository) Search(ctx context.Context, req EventSearchReq
 	}
 
 	w := strings.Join(where, joiner)
-
-	countQ := "SELECT COUNT(1) FROM events WHERE " + w
+	args = append(args, p.Until)
+	w += fmt.Sprintf(" AND created_at <= $%d", len(args))
 	var total int
-	if err := r.db.QueryRow(ctx, countQ, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("count search: %w", err)
+	if p.IncludeTotal {
+		countQ := "SELECT count(*) FROM (SELECT 1 FROM events WHERE " + w + " LIMIT 10001) capped"
+		if err := r.db.QueryRow(ctx, countQ, args...).Scan(&total); err != nil {
+			return nil, 0, fmt.Errorf("count events: %w", err)
+		}
 	}
-
-	dataQ := `
-		SELECT id, agent_id, event_type, severity, ts, summary, raw
-		FROM events
-		WHERE ` + w + `
-		ORDER BY ts DESC
-		LIMIT $` + fmt.Sprint(len(args)+1) + ` OFFSET $` + fmt.Sprint(len(args)+2)
-	args = append(args, limit, offset)
+	seek, order, err := p.Keyset("created_at", "id", &args)
+	if err != nil {
+		return nil, 0, err
+	}
+	args = append(args, p.Limit+1)
+	dataQ := `SELECT id,agent_id,event_type,severity,ts,left(summary,1024),created_at,
+  jsonb_strip_nulls(jsonb_build_object(
+   'action',COALESCE(raw->'data'->>'action',raw->>'action'),
+   'name',left(COALESCE(raw->'data'->>'name',raw->>'name'),512),
+   'process_name',left(COALESCE(raw->'data'->>'process_name',raw->>'process_name'),512),
+   'pid',COALESCE(raw->'data'->'pid',raw->'pid'),
+   'autonomous',COALESCE(raw->'data'->'autonomous',raw->'autonomous'),
+   'matched_rule_id',COALESCE(raw->'data'->>'matched_rule_id',raw->>'matched_rule_id'),
+   'matched_rule_title',left(COALESCE(raw->'data'->>'matched_rule_title',raw->>'matched_rule_title'),512),
+   'response_action',COALESCE(raw->'data'->>'response_action',raw->>'response_action'),
+   'decision_mode',COALESCE(raw->'data'->>'decision_mode',raw->>'decision_mode')
+  ))
+  FROM events WHERE ` + w + seek + ` ORDER BY ` + order + fmt.Sprintf(" LIMIT $%d", len(args))
 
 	rs, err := r.db.Query(ctx, dataQ, args...)
 	if err != nil {
@@ -277,12 +274,12 @@ func (r *PostgresEventRepository) Search(ctx context.Context, req EventSearchReq
 	out := []EventRow{}
 	for rs.Next() {
 		var e EventRow
-		if err := rs.Scan(&e.ID, &e.AgentID, &e.EventType, &e.Severity, &e.Timestamp, &e.Summary, &e.Raw); err != nil {
+		if err := rs.Scan(&e.ID, &e.AgentID, &e.EventType, &e.Severity, &e.Timestamp, &e.Summary, &e.CreatedAt, &e.Raw); err != nil {
 			return nil, 0, fmt.Errorf("scan event: %w", err)
 		}
 		out = append(out, e)
 	}
-	return out, total, nil
+	return out, total, rs.Err()
 }
 
 func (r *PostgresEventRepository) GetByID(ctx context.Context, id uuid.UUID) (*EventDetail, error) {
@@ -305,12 +302,12 @@ func (r *PostgresEventRepository) GetByID(ctx context.Context, id uuid.UUID) (*E
 
 // ProcessAggRow is an aggregated process execution row.
 type ProcessAggRow struct {
-	Name       string `json:"name"`
-	Executable string `json:"executable"`
-	Count      int    `json:"count"`
-	AgentCount int    `json:"agent_count"`
+	Name       string   `json:"name"`
+	Executable string   `json:"executable"`
+	Count      int      `json:"count"`
+	AgentCount int      `json:"agent_count"`
 	Hostnames  []string `json:"hostnames"`
-	LastSeen   string `json:"last_seen"`
+	LastSeen   string   `json:"last_seen"`
 }
 
 // GetProcessAnalytics aggregates process events by name within a time window.
@@ -385,13 +382,13 @@ func (r *PostgresEventRepository) GetProcessAnalytics(ctx context.Context, hours
 
 // SoftwareInventoryRow is an aggregated installed software row.
 type SoftwareInventoryRow struct {
-	Name          string `json:"name"`
-	Version       string `json:"version"`
-	Publisher     string `json:"publisher"`
-	InstallDate   string `json:"install_date"`
-	AgentCount    int    `json:"agent_count"`
-	Hostnames     []string `json:"hostnames"`
-	LastReported  string `json:"last_reported"`
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	Publisher    string   `json:"publisher"`
+	InstallDate  string   `json:"install_date"`
+	AgentCount   int      `json:"agent_count"`
+	Hostnames    []string `json:"hostnames"`
+	LastReported string   `json:"last_reported"`
 }
 
 // GetSoftwareInventory aggregates software_inventory events by app name.
@@ -489,17 +486,17 @@ func (r *PostgresEventRepository) GetSoftwareInventoryByAgent(ctx context.Contex
 // bytes_sent/bytes_received. We track connection counts and unique
 // destinations as a proxy for bandwidth/activity.
 type BandwidthAggRow struct {
-	ProcessName        string `json:"process_name"`
-	Executable         string `json:"executable"`
-	BytesSent          int64  `json:"bytes_sent"`
-	BytesReceived      int64  `json:"bytes_received"`
-	TotalBytes         int64  `json:"total_bytes"`
-	Connections        int    `json:"connections"`
-	UniqueDestinations int    `json:"unique_destinations"`
-	UniquePorts        int    `json:"unique_ports"`
-	AgentCount         int    `json:"agent_count"`
+	ProcessName        string   `json:"process_name"`
+	Executable         string   `json:"executable"`
+	BytesSent          int64    `json:"bytes_sent"`
+	BytesReceived      int64    `json:"bytes_received"`
+	TotalBytes         int64    `json:"total_bytes"`
+	Connections        int      `json:"connections"`
+	UniqueDestinations int      `json:"unique_destinations"`
+	UniquePorts        int      `json:"unique_ports"`
+	AgentCount         int      `json:"agent_count"`
 	Hostnames          []string `json:"hostnames"`
-	LastSeen           string `json:"last_seen"`
+	LastSeen           string   `json:"last_seen"`
 }
 
 // GetBandwidthAnalytics aggregates network events by process name within a time window.

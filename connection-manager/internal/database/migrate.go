@@ -2,9 +2,12 @@
 package database
 
 import (
+	"context"
+	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres" // postgres driver
@@ -53,6 +56,11 @@ func RunMigrations(cfg *PostgresConfig, logger *logrus.Logger) error {
 		return fmt.Errorf("failed to read migration version: %w", verErr)
 	}
 	if dirty {
+		// A failed concurrent build may leave an INVALID index. Do not skip it
+		// and pretend the pagination indexes were successfully installed.
+		if version >= 64 {
+			return fmt.Errorf("migration %d is dirty; inspect and repair the failed concurrent index before resuming migrations", version)
+		}
 		logger.WithField("version", version).Warn("Database is in dirty state — forcing version clean")
 		if err := m.Force(int(version)); err != nil {
 			return fmt.Errorf("failed to force migration version %d: %w", version, err)
@@ -63,9 +71,24 @@ func RunMigrations(cfg *PostgresConfig, logger *logrus.Logger) error {
 	if err := m.Up(); err != nil {
 		if errors.Is(err, migrate.ErrNoChange) {
 			logger.Info("Database schema is up to date — no migrations needed")
-			return nil
+		} else {
+			return fmt.Errorf("migration failed: %w", err)
 		}
-		return fmt.Errorf("migration failed: %w", err)
+	}
+	// Validate on every startup, including ErrNoChange. IF NOT EXISTS cannot
+	// distinguish a ready index from a failed concurrent build with that name.
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("open migration validation: %w", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, name := range []string{"idx_events_page_created_id", "idx_events_page_agent_created_id", "idx_commands_page_issued_id", "idx_commands_page_agent_issued_id", "idx_security_events_page_created_id", "idx_security_events_page_actor_created_id"} {
+		var valid bool
+		if err := db.QueryRowContext(ctx, "SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid=to_regclass($1)", name).Scan(&valid); err != nil || !valid {
+			return fmt.Errorf("pagination index %s is missing or invalid; repair the interrupted concurrent build before restarting", name)
+		}
 	}
 
 	// Log the final version

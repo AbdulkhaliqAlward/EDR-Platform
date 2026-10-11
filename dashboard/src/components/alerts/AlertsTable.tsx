@@ -99,14 +99,14 @@ export function AlertsTable({
                                 onClick={() => onToggleSort('timestamp')}
                                 className="flex items-center gap-1 hover:text-slate-700 dark:hover:text-slate-200"
                             >
-                                Time
+                                Created
                                 <ArrowUpDown className={`w-3 h-3 ${sortBy === 'timestamp' ? 'text-primary-500' : ''}`} />
                             </button>
                         </th>
                         <th className="py-4 px-4">Rule</th>
                         <th className="py-4 px-4">
                             <button
-                                onClick={() => onToggleSort('severity')}
+                                disabled title="Filter by severity; pagination uses stable creation order"
                                 className="flex items-center gap-1 hover:text-slate-700 dark:hover:text-slate-200"
                             >
                                 Severity
@@ -157,7 +157,8 @@ export function AlertsTable({
                                     </div>
                                 </td>
                                 <td className="whitespace-nowrap text-sm py-3 px-3 text-slate-500 dark:text-slate-400">
-                                    {new Date(alert.timestamp).toLocaleString()}
+                                    {new Date(alert.created_at || alert.timestamp).toLocaleString()}
+                                    {alert.last_seen_at && <span className="block text-[10px] text-slate-500">Last seen {new Date(alert.last_seen_at).toLocaleString()}</span>}
                                 </td>
                                 <td className="py-3 px-3">
                                     <div className="max-w-[220px]">

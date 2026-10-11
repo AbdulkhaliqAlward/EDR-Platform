@@ -38,6 +38,7 @@ func (h *Handlers) ListSiemConnectors(c echo.Context) error {
 		h.logger.WithError(err).Error("Failed to list SIEM connectors")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list SIEM connectors")
 	}
+	rows = capList(c, rows)
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"data": rows,
 		"meta": responseMeta(c),

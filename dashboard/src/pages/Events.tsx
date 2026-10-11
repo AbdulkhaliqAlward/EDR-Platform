@@ -1,12 +1,12 @@
-import { useQuery } from '@tanstack/react-query';
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ChevronLeft, ChevronRight, Loader2, Search } from 'lucide-react';
+import { usePageSearch } from '../hooks/usePageSearch';
+import { memo, useCallback, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Activity, AlertTriangle, Loader2, Search } from 'lucide-react';
 import { authApi, eventsApi, type CmEventSummary } from '../api/client';
 import { EventDetailModal } from '../components/EventDetailModal';
-import { useDebounce } from '../hooks/useDebounce';
+import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
+import { PaginationControls } from '../components/PaginationControls';
 
-const DEFAULT_LIMIT = 50;
 
 const EventRow = memo(function EventRow({
     e,
@@ -49,105 +49,25 @@ function isoHoursAgo(hours: number) {
     return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 }
 
-function Pagination({
-    page,
-    totalPages,
-    onPage,
-}: {
-    page: number;
-    totalPages: number;
-    onPage: (p: number) => void;
-}) {
-    if (totalPages <= 1) return null;
-    return (
-        <div className="flex items-center justify-between text-sm">
-            <button
-                type="button"
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-900/50 text-slate-700 dark:text-slate-200 disabled:opacity-50"
-                onClick={() => onPage(Math.max(1, page - 1))}
-                disabled={page <= 1}
-            >
-                <span className="inline-flex items-center gap-2">
-                    <ChevronLeft className="w-4 h-4" /> Prev
-                </span>
-            </button>
-            <div className="text-slate-500 dark:text-slate-400">
-                Page <span className="font-semibold text-slate-700 dark:text-slate-200">{page}</span> / {totalPages}
-            </div>
-            <button
-                type="button"
-                className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-900/50 text-slate-700 dark:text-slate-200 disabled:opacity-50"
-                onClick={() => onPage(Math.min(totalPages, page + 1))}
-                disabled={page >= totalPages}
-            >
-                <span className="inline-flex items-center gap-2">
-                    Next <ChevronRight className="w-4 h-4" />
-                </span>
-            </button>
-        </div>
-    );
-}
-
 export default function Events() {
     const canView = authApi.canViewAlerts(); // server guards events/search with alerts:read
-    const [sp, setSp] = useSearchParams();
-
-    const [agentId, setAgentId] = useState(() => sp.get('agent_id') || '');
-    const [eventType, setEventType] = useState(() => sp.get('event_type') || '');
-    // Default to last hour (security UIs should be time-bounded by default).
-    const [from, setFrom] = useState(() => sp.get('from') || isoHoursAgo(1));
-    const [to, setTo] = useState(() => sp.get('to') || new Date().toISOString());
-    const [page, setPage] = useState(() => Math.max(1, parseInt(sp.get('page') || '1', 10) || 1));
+    const q = usePaginatedQuery<CmEventSummary>({ name: 'events-search', enabled: canView,
+        defaults: { from: isoHoursAgo(1), to: new Date().toISOString() },
+        fetchPage: (params, signal) => {
+            const filters = [];
+            if (params.agent_id) filters.push({ field: 'agent_id', operator: 'equals', value: params.agent_id });
+            if (params.event_type) filters.push({ field: 'event_type', operator: 'equals', value: params.event_type });
+            return eventsApi.page({ filters, logic: 'AND', time_range: { from: params.from, to: params.to }, limit: Number(params.limit), cursor: params.cursor }, signal);
+        },
+    });
+    const [agentId, setAgentId] = usePageSearch(q.params, q.setFilters, 'agent_id');
+    const [eventType, setEventType] = usePageSearch(q.params, q.setFilters, 'event_type');
+    const from = q.params.from, to = q.params.to;
+    const setFrom = (value: string) => q.setFilters({ from: value });
+    const setTo = (value: string) => q.setFilters({ to: value });
     const [detailId, setDetailId] = useState<string | null>(null);
     const openDetail = useCallback((id: string) => setDetailId(id), []);
-
-    useEffect(() => {
-        // keep URL in sync (bookmarkable)
-        setSp((prev) => {
-            const n = new URLSearchParams(prev);
-            const setOrDel = (k: string, v: string) => (v ? n.set(k, v) : n.delete(k));
-            setOrDel('agent_id', agentId.trim());
-            setOrDel('event_type', eventType.trim());
-            setOrDel('from', from);
-            setOrDel('to', to);
-            n.set('page', String(page));
-            return n;
-        });
-    }, [agentId, eventType, from, to, page, setSp]);
-
-    const debouncedAgentId = useDebounce(agentId.trim(), 250);
-    const debouncedEventType = useDebounce(eventType.trim(), 250);
-
-    const offset = (page - 1) * DEFAULT_LIMIT;
-
-    const queryBody = useMemo(() => {
-        const filters: { field: string; operator: string; value: unknown }[] = [];
-        if (debouncedAgentId) filters.push({ field: 'agent_id', operator: 'equals', value: debouncedAgentId });
-        if (debouncedEventType) filters.push({ field: 'event_type', operator: 'equals', value: debouncedEventType });
-        return {
-            filters,
-            logic: 'AND' as const,
-            time_range: { from, to },
-            limit: DEFAULT_LIMIT,
-            offset,
-        };
-    }, [debouncedAgentId, debouncedEventType, from, to, offset]);
-
-    const q = useQuery({
-        queryKey: ['events-search', queryBody],
-        queryFn: () => eventsApi.search(queryBody),
-        enabled: canView,
-        staleTime: 15_000,
-        retry: 1,
-    });
-
-    const rows: CmEventSummary[] = q.data?.data ?? [];
-    const total = q.data?.pagination?.total ?? 0;
-    const totalPages = Math.max(1, Math.ceil(total / DEFAULT_LIMIT));
-
-    useEffect(() => {
-        if (page > totalPages) setPage(totalPages);
-    }, [page, totalPages]);
+    const rows = q.rows;
 
     if (!canView) {
         return (
@@ -188,7 +108,7 @@ export default function Events() {
                                 <input
                                     className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-9 py-2 text-sm"
                                     value={agentId}
-                                    onChange={(e) => { setAgentId(e.target.value); setPage(1); }}
+                                    onChange={(e) => { setAgentId(e.target.value); }}
                                     placeholder="UUID (optional)"
                                 />
                             </div>
@@ -198,7 +118,7 @@ export default function Events() {
                             <input
                                 className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm"
                                 value={eventType}
-                                onChange={(e) => { setEventType(e.target.value); setPage(1); }}
+                                onChange={(e) => { setEventType(e.target.value); }}
                                 placeholder="e.g. network, process, file"
                             />
                         </div>
@@ -207,11 +127,7 @@ export default function Events() {
                                 type="button"
                                 className="w-full px-3 py-2 text-sm font-semibold rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800"
                                 onClick={() => {
-                                    setAgentId('');
-                                    setEventType('');
-                                    setFrom(isoHoursAgo(1));
-                                    setTo(new Date().toISOString());
-                                    setPage(1);
+                                    q.setFilters({ agent_id: undefined, event_type: undefined, from: isoHoursAgo(1), to: new Date().toISOString() });
                                 }}
                             >
                                 Reset
@@ -225,7 +141,7 @@ export default function Events() {
                             <input
                                 className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono"
                                 value={from}
-                                onChange={(e) => { setFrom(e.target.value); setPage(1); }}
+                                onChange={(e) => { setFrom(e.target.value); }}
                             />
                         </div>
                         <div>
@@ -233,7 +149,7 @@ export default function Events() {
                             <input
                                 className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm font-mono"
                                 value={to}
-                                onChange={(e) => { setTo(e.target.value); setPage(1); }}
+                                onChange={(e) => { setTo(e.target.value); }}
                             />
                         </div>
                     </div>
@@ -241,10 +157,10 @@ export default function Events() {
                     <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                         <div>
                             Showing <span className="font-semibold text-slate-700 dark:text-slate-200">{rows.length}</span> rows
-                            {total ? <> / total {total}</> : null}
+                            {q.data?.total ? <> / {q.data.total.value.toLocaleString()}{q.data.total.capped ? '+' : ''}</> : null}
                         </div>
                         <div className="font-mono">
-                            limit={DEFAULT_LIMIT} offset={offset}
+                            Ordered by ingestion time
                         </div>
                     </div>
                 </div>
@@ -257,14 +173,13 @@ export default function Events() {
                     <div className="rounded-xl border border-rose-200 dark:border-rose-900/50 bg-rose-50/80 dark:bg-rose-950/20 p-5 text-sm text-rose-900 dark:text-rose-200 flex items-start gap-3">
                         <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0" />
                         <div>
-                            Failed to search events. If the status is 405, the reverse proxy must forward{' '}
-                            network access to the connection manager (see dashboard{' '}
-                            <code className="text-xs">nginx.conf</code>).
+                            Could not load events. Check the filters and retry.
+                            <button type="button" className="ml-3 underline" onClick={() => void q.refetch()}>Retry</button>
                         </div>
                     </div>
                 ) : rows.length === 0 ? (
                     <div className="rounded-xl border border-dashed border-slate-300 dark:border-slate-700 p-8 text-center text-slate-500 dark:text-slate-400">
-                        No events returned for this query. If you expect data, the backend <code className="text-xs">SearchEvents</code> handler may still be stubbed.
+                        No results for these filters. Try another time range or clear the filters.
                     </div>
                 ) : (
                     <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 backdrop-blur">
@@ -277,7 +192,7 @@ export default function Events() {
                                     <th className="p-3">Summary</th>
                                 </tr>
                             </thead>
-                            <tbody style={{ contentVisibility: 'auto', containIntrinsicSize: '600px' } as any}>
+                            <tbody style={{ contentVisibility: 'auto', containIntrinsicSize: '600px' }}>
                                 {rows.map((e) => (
                                     <EventRow key={e.id} e={e} onOpen={openDetail} />
                                 ))}
@@ -286,7 +201,7 @@ export default function Events() {
                     </div>
                 )}
 
-                <Pagination page={page} totalPages={totalPages} onPage={setPage} />
+                <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} total={q.data?.total} onNext={q.next} onPrevious={q.previous} onSize={q.setPageSize} />
 
                 <EventDetailModal eventId={detailId} onClose={() => setDetailId(null)} fetchEnabled={canView} />
             </div>

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -70,7 +71,12 @@ func (r *PostgresRuleRepository) GetByID(ctx context.Context, id string) (*Rule,
 }
 
 // List retrieves rules matching the given filters.
+// RuleSortColumns is a static SQL whitelist; request values never become SQL expressions.
+var RuleSortColumns = map[string]string{"title": "title", "created_at": "created_at", "severity": "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END"}
+
 func (r *PostgresRuleRepository) List(ctx context.Context, filters RuleFilters) ([]*Rule, int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
 	var conditions []string
 	var args []interface{}
 	argNum := 1
@@ -106,7 +112,7 @@ func (r *PostgresRuleRepository) List(ctx context.Context, filters RuleFilters) 
 		argNum++
 	}
 	if filters.Search != "" {
-		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d OR description ILIKE $%d)", argNum, argNum))
+		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d OR description ILIKE $%d OR id ILIKE $%d OR category ILIKE $%d)", argNum, argNum, argNum, argNum))
 		args = append(args, "%"+filters.Search+"%")
 		argNum++
 	}
@@ -121,9 +127,13 @@ func (r *PostgresRuleRepository) List(ctx context.Context, filters RuleFilters) 
 		whereClause = "WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	sortBy := "title"
-	if filters.SortBy != "" {
-		sortBy = filters.SortBy
+	sortName := filters.SortBy
+	if sortName == "" {
+		sortName = "title"
+	}
+	sortBy, ok := RuleSortColumns[sortName]
+	if !ok {
+		return nil, 0, fmt.Errorf("unsupported sort column")
 	}
 	sortOrder := "ASC"
 	if filters.SortOrder == "desc" {
@@ -136,26 +146,35 @@ func (r *PostgresRuleRepository) List(ctx context.Context, filters RuleFilters) 
 	}
 	offset := filters.Offset
 
-	// Count
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM sigma_rules %s", whereClause)
 	var total int64
-	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("failed to count rules: %w", err)
+	if filters.Page == nil || filters.Page.IncludeTotal {
+		if err := r.pool.QueryRow(ctx, "SELECT count(*) FROM sigma_rules "+whereClause, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
-
+	contentColumn, metadataColumn, referencesColumn, falsePositivesColumn := "content", "custom_metadata", `"references"`, "false_positives"
+	if filters.Page != nil {
+		limit = filters.Page.Limit + 1
+		offset = filters.Page.Offset
+		contentColumn = "''::text"
+		metadataColumn = "NULL::jsonb"
+		referencesColumn = "NULL::text[]"
+		falsePositivesColumn = "NULL::text[]"
+	}
+	args = append(args, limit, offset)
 	// Data
 	dataQuery := fmt.Sprintf(`
-		SELECT id, title, description, author, content, enabled, status,
+		SELECT id, title, description, author, %s, enabled, status,
 			product, category, service, severity,
-			mitre_tactics, mitre_techniques, tags, "references",
+			mitre_tactics, mitre_techniques, tags, %s,
 			version, date_created, date_modified, source, source_url,
-			custom_metadata, false_positives,
+			%s, %s,
 			avg_match_time_ms, total_matches, last_matched_at,
 			created_at, updated_at
 		FROM sigma_rules %s
-		ORDER BY %s %s
-		LIMIT %d OFFSET %d`,
-		whereClause, sortBy, sortOrder, limit, offset)
+		ORDER BY %s %s, id %s
+		LIMIT $%d OFFSET $%d`,
+		contentColumn, referencesColumn, metadataColumn, falsePositivesColumn, whereClause, sortBy, sortOrder, sortOrder, len(args)-1, len(args))
 
 	rows, err := r.pool.Query(ctx, dataQuery, args...)
 	if err != nil {
@@ -172,7 +191,7 @@ func (r *PostgresRuleRepository) List(ctx context.Context, filters RuleFilters) 
 		rules = append(rules, rule)
 	}
 
-	return rules, total, nil
+	return rules, total, rows.Err()
 }
 
 // Create inserts a new rule into the database.

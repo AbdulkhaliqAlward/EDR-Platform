@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { authApi } from '../api/client';
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
@@ -15,7 +15,9 @@ import {
     type CommandRequest,
 } from '../api/client';
 import { Modal, useToast, SkeletonTable } from '../components';
-import { useDebounce } from '../hooks/useDebounce';
+import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
+import { usePageFilters } from '../hooks/usePageFilters';
+import { PaginationControls } from '../components/PaginationControls';
 import { formatRelativeTime, getEffectiveStatus } from '../utils/agentDisplay';
 
 // Command definitions
@@ -622,20 +624,20 @@ export default function Endpoints() {
     const { showToast } = useToast();
     const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
     const [selectedCommand, setSelectedCommand] = useState<CommandType | null>(null);
-    const [filters, setFilters] = useState({
-        status: '',
-        os_type: '',
-        search: '',
-    });
+    const pager = usePaginatedQuery<Agent>({ name: 'agents', refreshFirstPage: 10_000, defaults: { sort: 'health_score', order: 'desc' }, fetchPage: agentsApi.page });
+    const [filters, setFilters] = usePageFilters(pager.params, { status: '', os_type: '', search: '' }, pager.setFilters);
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [treeVisible, setTreeVisible] = useState(false);
     const [treeSearch, setTreeSearch] = useState('');
     const [selectedGroupId, setSelectedGroupId] = useState<string>('g1');
-    const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+    const scope = JSON.stringify(pager.params);
+    const [selection, setSelection] = useState<{scope: string; ids: Set<string>}>({scope: '', ids: new Set()});
+    const selectedIds = useMemo(() => selection.scope === scope ? selection.ids : new Set<string>(), [selection, scope]);
+    const setSelectedIds = (update: (old: Set<string>) => Set<string>) => setSelection(old => ({scope, ids: update(old.scope === scope ? old.ids : new Set())}));
 
-    const debouncedSearch = useDebounce(filters.search, 300);
 
     const toggleSelectOne = (id: string) => {
+        if (pager.busy) return;
         setSelectedIds((prev) => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id);
@@ -644,22 +646,9 @@ export default function Endpoints() {
         });
     };
 
-    // Fetch agents
-    const { data, isLoading, error } = useQuery({
-        queryKey: ['agents', filters.status, filters.os_type, debouncedSearch],
-        queryFn: () => agentsApi.list({
-            limit: 50,
-            status: filters.status || undefined,
-            os_type: filters.os_type || undefined,
-            search: debouncedSearch || undefined,
-            sort_by: 'health_score',
-            sort_order: 'desc',
-        }),
-        refetchInterval: 10000, // Refresh every 10 seconds for near-real-time status
-    });
-
-    const agents = data?.data || [];
-    const total = data?.pagination?.total || 0;
+    const { isLoading, error } = pager;
+    const agents = pager.rows;
+    const total = pager.data?.total?.value ?? 0;
 
     const patchBusinessContextMutation = useMutation({
         mutationFn: ({ agentId, ...data }: { agentId: string } & Parameters<typeof agentsApi.patchBusinessContext>[1]) =>
@@ -678,22 +667,13 @@ export default function Endpoints() {
     });
 
     const toggleSelectAll = () => {
+        if (pager.busy) return;
         setSelectedIds((prev) => {
             if (prev.size === agents.length && agents.length > 0) return new Set();
             return new Set(agents.map((a) => a.id));
         });
     };
 
-    useEffect(() => {
-        const valid = new Set(agents.map((a) => a.id));
-        setSelectedIds((prev) => {
-            const next = new Set<string>();
-            prev.forEach((id) => {
-                if (valid.has(id)) next.add(id);
-            });
-            return next;
-        });
-    }, [agents]);
 
     const handleCommand = (agent: Agent, command: CommandType) => {
         setSelectedAgent(agent);
@@ -701,10 +681,10 @@ export default function Endpoints() {
     };
 
     const toolbarTargetAgent = useMemo(() => {
-        if (selectedIds.size !== 1) return null;
+        if (pager.busy || selectedIds.size !== 1) return null;
         const id = [...selectedIds][0];
         return agents.find((a) => a.id === id) ?? null;
-    }, [selectedIds, agents]);
+    }, [selectedIds, agents, pager.busy]);
 
     if (error) {
         return (
@@ -1167,6 +1147,8 @@ export default function Endpoints() {
                     </div>
             </div>
 
+            <PaginationControls info={pager.info} page={pager.page} count={agents.length} busy={pager.busy} total={pager.data?.total}
+                onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
             <CommandExecutionModal
                 isOpen={!!selectedAgent && !!selectedCommand}
                 onClose={() => {

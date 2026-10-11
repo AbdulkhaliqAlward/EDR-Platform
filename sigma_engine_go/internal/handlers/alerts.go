@@ -4,8 +4,8 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -119,22 +119,12 @@ type AlertsListResponse struct {
 func (h *AlertHandler) QueryAlerts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Parse query parameters
-	filters := database.AlertFilters{
-		Limit:  100,
-		Offset: 0,
+	p, err := pagination.Parse(r.URL.Query(), pagination.Options{Scope: "sigma/alerts", DefaultSort: "created_at", Sorts: database.AlertSortColumns})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if limit, err := strconv.Atoi(v); err == nil && limit > 0 && limit <= 1000 {
-			filters.Limit = limit
-		}
-	}
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if offset, err := strconv.Atoi(v); err == nil && offset >= 0 {
-			filters.Offset = offset
-		}
-	}
+	filters := database.AlertFilters{Limit: p.Limit, Page: &p}
 	if v := r.URL.Query().Get("agent_id"); v != "" {
 		filters.AgentID = v
 	}
@@ -148,28 +138,59 @@ func (h *AlertHandler) QueryAlerts(w http.ResponseWriter, r *http.Request) {
 		filters.Status = strings.Split(v, ",")
 	}
 	if v := r.URL.Query().Get("date_from"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 			filters.DateFrom = t
+			// date_from bounds the creation-time fence, so rare filters never
+			// walk the whole index. Later pages reuse the fence in the cursor.
+			if p.Cursor == "" || t.Before(p.From) {
+				p.From = t
+			}
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid date_from")
+			return
 		}
 	}
 	if v := r.URL.Query().Get("date_to"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 			filters.DateTo = t
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid date_to")
+			return
 		}
 	}
 	if v := r.URL.Query().Get("search"); v != "" {
 		filters.Search = v
 	}
-	if v := r.URL.Query().Get("sort"); v != "" {
-		if strings.HasPrefix(v, "-") {
-			filters.SortBy = strings.TrimPrefix(v, "-")
-			filters.SortOrder = "desc"
-		} else {
-			filters.SortBy = v
-			filters.SortOrder = "asc"
+	if !filters.DateFrom.IsZero() && !filters.DateTo.IsZero() && filters.DateFrom.After(filters.DateTo) {
+		writeError(w, http.StatusBadRequest, "date_from must precede date_to")
+		return
+	}
+	for _, v := range filters.Severity {
+		if !map[string]bool{"critical": true, "high": true, "medium": true, "low": true, "informational": true}[v] {
+			writeError(w, http.StatusBadRequest, "invalid severity")
+			return
 		}
 	}
-
+	for _, v := range filters.Status {
+		if !map[string]bool{"open": true, "in_progress": true, "investigating": true, "suppressed": true, "acknowledged": true, "resolved": true, "false_positive": true}[v] {
+			writeError(w, http.StatusBadRequest, "invalid status")
+			return
+		}
+	}
+	if len(filters.Search) > 512 {
+		writeError(w, http.StatusBadRequest, "search exceeds 512 characters")
+		return
+	}
+	// Reject invalid key types before touching the repository.
+	args := []any{}
+	keyset := p.Keyset
+	if p.Sort == "risk_score" {
+		keyset = p.KeysetInt
+	}
+	if _, _, err := keyset("created_at", "id", &args); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Query database
 	alerts, total, err := h.repo.List(ctx, filters)
 	if err != nil {
@@ -178,20 +199,19 @@ func (h *AlertHandler) QueryAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to response
-	response := AlertsListResponse{
-		Count:  len(alerts),
-		Total:  total,
-		Limit:  filters.Limit,
-		Offset: filters.Offset,
-		Alerts: make([]*AlertResponse, 0, len(alerts)),
-	}
-
+	records := make([]*AlertResponse, 0, len(alerts))
 	for _, alert := range alerts {
-		response.Alerts = append(response.Alerts, h.toAlertResponse(alert))
+		records = append(records, h.toAlertResponse(alert))
 	}
-
-	writeJSON(w, http.StatusOK, response)
+	key := func(a *AlertResponse) pagination.Key { return pagination.TimeKey(a.CreatedAt, a.ID) }
+	if p.Sort == "risk_score" {
+		key = func(a *AlertResponse) pagination.Key { return pagination.IntKey(int64(a.RiskScore), a.ID) }
+	}
+	page := pagination.Build(records, p, key)
+	if p.IncludeTotal {
+		page.Total = pagination.CappedTotal(int(total))
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 // GetAlert handles GET /api/v1/sigma/alerts/{alert_id}

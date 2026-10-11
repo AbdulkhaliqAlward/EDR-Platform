@@ -56,6 +56,19 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return fmt.Errorf("failed to execute migration %s: %w", filename, err)
 		}
+		// IF NOT EXISTS alone also accepts an INVALID index left by an
+		// interrupted concurrent build. Surface that condition for repair.
+		indexName := map[string]string{
+			"024_alerts_page_created.up.sql": "idx_sigma_alerts_page_created_id",
+			"025_alerts_page_agent.up.sql":   "idx_sigma_alerts_page_agent_created_id",
+			"026_alerts_page_risk.up.sql":    "idx_sigma_alerts_page_risk_id",
+		}[filename]
+		if indexName != "" {
+			var valid bool
+			if err := pool.QueryRow(ctx, "SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass($1)", indexName).Scan(&valid); err != nil || !valid {
+				return fmt.Errorf("pagination index %s is missing or invalid; repair the interrupted concurrent build before restarting", indexName)
+			}
+		}
 
 		logger.Infof("✅ Migration applied: %s", filename)
 	}

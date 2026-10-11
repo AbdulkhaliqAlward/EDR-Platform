@@ -1,12 +1,13 @@
+import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
+import { usePageFilters } from '../hooks/usePageFilters';
+import { PaginationControls } from '../components/PaginationControls';
 import { useQuery } from '@tanstack/react-query';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import {
     Shield,
     AlertTriangle,
     RefreshCw,
     Filter,
-    ChevronLeft,
-    ChevronRight,
     ShieldAlert,
     Info,
     LogIn,
@@ -18,7 +19,7 @@ import {
 } from 'lucide-react';
 
 import { securityEventsApi, authApi, type SecurityEvent, type SecurityEventSummaryItem } from '../api/client';
-import { SkeletonTable } from '../components';
+import { SkeletonTable, Modal } from '../components';
 
 // ─── Event type metadata ────────────────────────────────────────────────────
 
@@ -48,7 +49,7 @@ const EVENT_TYPE_OPTIONS = [
     'agent_enrolled', 'cert_revoked', 'cert_revocation_attempted', 'cert_renewed',
 ];
 
-const PAGE_SIZE = 50;
+
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -117,33 +118,12 @@ export default function SecurityEvents() {
     const canView = authApi.canViewAuditLogs(); // admin | security
 
     const [filterPanelOpen, setFilterPanelOpen] = useState(true);
-    const [page, setPage] = useState(1);
-    const [filters, setFilters] = useState({
-        event_type: '',
-        severity: '',
-        from: '',
-        to: '',
-    });
-
-    // Reset page on filter change
-    useEffect(() => { setPage(1); }, [filters.event_type, filters.severity, filters.from, filters.to]);
-
-    const offset = (page - 1) * PAGE_SIZE;
-
-    const queryParams = useMemo(() => ({
-        event_type: filters.event_type || undefined,
-        severity:   filters.severity   || undefined,
-        from:       filters.from       || undefined,
-        to:         filters.to         || undefined,
-        limit:  PAGE_SIZE,
-        offset,
-    }), [filters, offset]);
-
-    const { data, isLoading, error, isFetching, refetch } = useQuery({
-        queryKey: ['securityEvents', queryParams],
-        queryFn: () => securityEventsApi.getEvents(queryParams),
-        enabled: canView,
-    });
+    const pager = usePaginatedQuery<SecurityEvent>({ name: 'securityEvents', fetchPage: securityEventsApi.page, enabled: canView });
+    const [filters, setFilters] = usePageFilters(pager.params, {event_type:'',severity:'',from:'',to:''}, pager.setFilters);
+    const { isLoading, error, isFetching, refetch } = pager;
+    const [selectedId,setSelectedId] = useState<string | null>(null);
+    const detail = useQuery({queryKey:['security-event',selectedId],queryFn:()=>securityEventsApi.get(selectedId!),enabled:!!selectedId && canView});
+    const localTime = (value: string) => value ? new Date(new Date(value).getTime() - new Date(value).getTimezoneOffset()*60000).toISOString().slice(0,16) : '';
 
     const { data: summaryData } = useQuery({
         queryKey: ['securityEventsSummary'],
@@ -151,11 +131,7 @@ export default function SecurityEvents() {
         enabled: canView,
     });
 
-    const events: SecurityEvent[] = data?.data ?? [];
-    const total  = data?.meta?.count ?? 0;
-    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    const fromIdx = total === 0 ? 0 : offset + 1;
-    const toIdx   = Math.min(offset + events.length, total);
+    const events = pager.rows;
     const summaryItems: SecurityEventSummaryItem[] = summaryData?.data ?? [];
 
     const clearFilters = () => setFilters({ event_type: '', severity: '', from: '', to: '' });
@@ -278,8 +254,8 @@ export default function SecurityEvents() {
                             <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1">From</label>
                             <input
                                 type="datetime-local"
-                                value={filters.from}
-                                onChange={e => setFilters(f => ({ ...f, from: e.target.value }))}
+                                value={localTime(filters.from)}
+                                onChange={e => setFilters(f => ({ ...f, from: e.target.value ? new Date(e.target.value).toISOString() : '' }))}
                                 className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1.5 text-sm text-slate-900 dark:text-slate-100"
                             />
                         </div>
@@ -289,8 +265,8 @@ export default function SecurityEvents() {
                             <label className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1">To</label>
                             <input
                                 type="datetime-local"
-                                value={filters.to}
-                                onChange={e => setFilters(f => ({ ...f, to: e.target.value }))}
+                                value={localTime(filters.to)}
+                                onChange={e => setFilters(f => ({ ...f, to: e.target.value ? new Date(e.target.value).toISOString() : '' }))}
                                 className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1.5 text-sm text-slate-900 dark:text-slate-100"
                             />
                         </div>
@@ -393,7 +369,7 @@ export default function SecurityEvents() {
 
                                             {/* Description */}
                                             <td className="py-2 px-3 align-top text-xs text-slate-600 dark:text-slate-400 max-w-[320px]">
-                                                {ev.description || '—'}
+                                                <button type="button" className="text-left hover:underline" onClick={()=>setSelectedId(ev.id)}>{ev.description || 'View details'}</button>
                                             </td>
                                         </tr>
                                     );
@@ -403,34 +379,10 @@ export default function SecurityEvents() {
                     </div>
                 )}
 
-                {/* Pagination */}
-                {!isLoading && total > 0 && (
-                    <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 border-t border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/60 text-[12px] text-slate-500 shrink-0">
-                        <span>
-                            Showing <span className="font-semibold text-slate-700 dark:text-slate-300">{fromIdx}–{toIdx}</span> of{' '}
-                            <span className="font-semibold text-slate-700 dark:text-slate-300">{total}</span> events
-                        </span>
-                        <div className="flex items-center gap-2">
-                            <button
-                                type="button"
-                                disabled={page <= 1}
-                                onClick={() => setPage(p => Math.max(1, p - 1))}
-                                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 dark:border-slate-600 disabled:opacity-40 text-xs"
-                            >
-                                <ChevronLeft className="w-3.5 h-3.5" /> Previous
-                            </button>
-                            <span className="tabular-nums">Page {page} / {totalPages}</span>
-                            <button
-                                type="button"
-                                disabled={page >= totalPages}
-                                onClick={() => setPage(p => p + 1)}
-                                className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 dark:border-slate-600 disabled:opacity-40 text-xs"
-                            >
-                                Next <ChevronRight className="w-3.5 h-3.5" />
-                            </button>
-                        </div>
-                    </div>
-                )}
+                <PaginationControls info={pager.info} page={pager.page} count={events.length} busy={pager.busy} onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
+                <Modal isOpen={!!selectedId} onClose={()=>setSelectedId(null)} title="Security event details">
+                    {detail.isLoading ? <p role="status">Loading details...</p> : detail.isError ? <p role="alert">Unable to load details. <button className="btn btn-secondary" onClick={()=>detail.refetch()}>Retry</button></p> : <pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify(detail.data,null,2)}</pre>}
+                </Modal>
             </div>
         </div>
     );

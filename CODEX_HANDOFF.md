@@ -530,3 +530,28 @@ Reusable test: npm run test:alert-details. No live endpoint actions, deployment,
 commit or push. Deploy dashboard and sigma-engine to apply UI and new snapshot
 fixes; no agent rebuild or DB migration required. Missing historical actor data
 cannot be reconstructed by this presentation fix. Live deployment remains unverified.
+
+## Pagination continuation — 2026-10-11 (in progress)
+
+User requests platform-wide production pagination; no commit/push. Baseline Main
+1efe3707. User approved immutable creation-time alert ordering, build-only shared
+module wiring, and separate measurement of aggregate analytics. Read
+`docs/pagination/INVENTORY_AND_DESIGN.md` and `docs/pagination/PROGRESS.md` before
+continuing. The latter lists actual test evidence, measured regressions, migrations,
+compatibility gaps, and the ordered remaining work. It is NOT a completion report.
+
+New shared module: `shared/pagination`. Currently adapted endpoints: Sigma alerts
+and rules, CM event search/agent events and audit logs. New migration files: CM
+064/065 and Sigma 024/025 (single concurrent index statement per file). No runtime
+env/config or detection implementation changed. Full scope is still incomplete;
+many legacy lists/consumers and performance acceptance checks remain pending.
+
+## Pagination review and completion — 2026-10-11 (Claude)
+
+Codex's pagination work was reviewed, corrected and completed; nothing is
+committed. Final status, fixes, EXPLAIN evidence (1M alerts), unverified items
+and deploy steps: `docs/pagination/PROGRESS.md`. Main corrections: risk-score
+keyset sort restored (+ Sigma migration 026), alert date range on the creation
+key, lightweight list keeps hostname/UEBA, offset-based endpoint tab fixed,
+command-history refresh restored, legacy >100-row callers read multiple pages,
+agent metadata keys restored, small config lists capped at 1000.

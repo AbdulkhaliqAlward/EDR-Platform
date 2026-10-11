@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
     Search,
     Download,
@@ -19,7 +19,9 @@ import {
 } from 'lucide-react';
 import { auditApi, authApi, type AuditLog } from '../api/client';
 import { Modal, DateRangePicker, type DateRange, SkeletonTable } from '../components';
-import { useDebounce } from '../hooks/useDebounce';
+import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
+import { usePageFilters } from '../hooks/usePageFilters';
+import { PaginationControls } from '../components/PaginationControls';
 
 const ACTION_ICONS: Record<string, { icon: typeof Activity; color: string }> = {
     login: { icon: User, color: 'text-green-500' },
@@ -228,33 +230,19 @@ function exportToCSV(logs: AuditLog[]) {
     URL.revokeObjectURL(url);
 }
 
-const PAGE_SIZES = [20, 50, 100, 200] as const;
 
 export default function AuditLogs() {
     const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null);
-    const [dateRange, setDateRange] = useState<DateRange>({
-        from: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-        to: new Date(),
-    });
-    const [filters, setFilters] = useState({
-        action: '',
-        resource_type: '',
-        user_id: '',
-        search: '',
-        staff: '',
-        affected: '',
-        oldVal: '',
-        newVal: '',
-        extra: '',
-        session: '',
-    });
+    const canViewAudit = authApi.canViewAuditLogs();
+    const [defaults] = useState(() => ({ from: new Date(Date.now()-7*86400000).toISOString(), to: new Date().toISOString() }));
+    const pager = usePaginatedQuery<AuditLog>({ name: 'auditLogs', defaults, fetchPage: auditApi.page, enabled: canViewAudit });
+    const dateRange = { from: new Date(pager.params.from), to: new Date(pager.params.to) };
+    const setDateRange = (range: DateRange) => pager.setFilters({ from: range.from?.toISOString(), to: range.to?.toISOString() });
+    const [filters, setFilters] = usePageFilters(pager.params, { action: '', resource_type: '', user_id: '', search: '', staff: '', affected: '', oldVal: '', newVal: '', extra: '', session: '' }, pager.setFilters);
     const [filterPanelOpen, setFilterPanelOpen] = useState(true);
-    const [page, setPage] = useState(1);
-    const [pageSize, setPageSize] = useState<(typeof PAGE_SIZES)[number]>(20);
     const [exportMenuOpen, setExportMenuOpen] = useState(false);
     const exportMenuRef = useRef<HTMLDivElement>(null);
 
-    const debouncedSearch = useDebounce(filters.search, 300);
 
     useEffect(() => {
         const fn = (e: MouseEvent) => {
@@ -264,88 +252,11 @@ export default function AuditLogs() {
         return () => document.removeEventListener('mousedown', fn);
     }, []);
 
-    const canViewAudit = authApi.canViewAuditLogs();
-
-    useEffect(() => {
-        setPage(1);
-    }, [filters.action, filters.resource_type, filters.user_id, debouncedSearch, dateRange.from, dateRange.to]);
-
-    const offset = (page - 1) * pageSize;
-
-    const { data, isLoading, error, isFetching, refetch } = useQuery({
-        queryKey: [
-            'auditLogs',
-            filters.action,
-            filters.resource_type,
-            filters.user_id,
-            debouncedSearch,
-            dateRange,
-            page,
-            pageSize,
-        ],
-        queryFn: () =>
-            auditApi.list({
-                limit: pageSize,
-                offset,
-                action: filters.action || undefined,
-                resource_type: filters.resource_type || undefined,
-                user_id: filters.user_id || undefined,
-                from: dateRange.from?.toISOString(),
-                to: dateRange.to?.toISOString(),
-            }),
-        enabled: canViewAudit,
-    });
-
-    const logs = data?.data ?? [];
-    const total = data?.pagination?.total ?? logs.length;
-
-    const filteredLogs = useMemo(() => {
-        let list = logs;
-        if (debouncedSearch) {
-            const s = debouncedSearch.toLowerCase();
-            list = list.filter(
-                (log) =>
-                    log.username?.toLowerCase().includes(s) ||
-                    log.action?.toLowerCase().includes(s) ||
-                    log.resource_type?.toLowerCase().includes(s) ||
-                    (log.resource_id || '').toLowerCase().includes(s) ||
-                    (log.ip_address || '').toLowerCase().includes(s),
-            );
-        }
-        if (filters.staff.trim()) {
-            const s = filters.staff.toLowerCase();
-            list = list.filter((log) => log.username?.toLowerCase().includes(s));
-        }
-        if (filters.affected.trim()) {
-            const s = filters.affected.toLowerCase();
-            list = list.filter(
-                (log) =>
-                    (log.resource_id || '').toLowerCase().includes(s) ||
-                    log.resource_type.toLowerCase().includes(s),
-            );
-        }
-        if (filters.oldVal.trim()) {
-            const s = filters.oldVal.toLowerCase();
-            list = list.filter((log) => fmtCellValue(log.old_value).toLowerCase().includes(s));
-        }
-        if (filters.newVal.trim()) {
-            const s = filters.newVal.toLowerCase();
-            list = list.filter((log) => fmtCellValue(log.new_value).toLowerCase().includes(s));
-        }
-        if (filters.extra.trim()) {
-            const s = filters.extra.toLowerCase();
-            list = list.filter((log) => (log.details || '').toLowerCase().includes(s));
-        }
-        if (filters.session.trim()) {
-            const s = filters.session.toLowerCase();
-            list = list.filter((log) => log.id.toLowerCase().includes(s));
-        }
-        return list;
-    }, [logs, debouncedSearch, filters.staff, filters.affected, filters.oldVal, filters.newVal, filters.extra, filters.session]);
-
-    const fromIdx = total === 0 ? 0 : offset + 1;
-    const displayRange =
-        total === 0 ? '0' : `${fromIdx}-${Math.min(offset + filteredLogs.length, offset + logs.length)}`;
+    const { isLoading, error, isFetching, refetch } = pager;
+    const logs = pager.rows;
+    const filteredLogs = logs;
+    const detail = useQuery({ queryKey: ['audit-detail', selectedLog?.id], enabled: !!selectedLog,
+        queryFn: () => auditApi.get(selectedLog!.id) });
 
     if (!canViewAudit) {
         return (
@@ -363,7 +274,7 @@ export default function AuditLogs() {
             <div className="card text-center py-12">
                 <AlertTriangle className="w-12 h-12 text-red-400 mx-auto mb-4" />
                 <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-2">Failed to Load Audit Logs</h3>
-                <p className="text-slate-500">Please try again later.</p>
+                <p className="text-slate-500">Please try again later.</p><button className="btn btn-secondary" onClick={() => void refetch()}>Retry</button>
             </div>
         );
     }
@@ -562,7 +473,7 @@ export default function AuditLogs() {
                         ))}
                     </div>
                     <p className="text-[11px] text-slate-400">
-                        Column filters (Staff, Affected object, values…) apply to the current result page. Use date range
+                        Column filters apply across the selected time range. Value columns show previews; open details for full values. Use date range
                         and server filters for broad queries.
                     </p>
                 </div>
@@ -695,55 +606,13 @@ export default function AuditLogs() {
                     </div>
                 )}
 
-                {/* Pagination — Platform style */}
-                {!isLoading && logs.length > 0 && (
-                    <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 border-t border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/60 text-[12px] text-slate-500">
-                        <div className="flex items-center gap-2">
-                            <span className="text-slate-500">Results per page:</span>
-                            <select
-                                value={pageSize}
-                                onChange={(e) => {
-                                    setPageSize(Number(e.target.value) as (typeof PAGE_SIZES)[number]);
-                                    setPage(1);
-                                }}
-                                className="rounded border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1 text-xs"
-                            >
-                                {PAGE_SIZES.map((n) => (
-                                    <option key={n} value={n}>
-                                        {n}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                        <span className="text-slate-500">
-                            Displaying {displayRange} of {total} results
-                        </span>
-                        <div className="flex items-center gap-2">
-                            <button
-                                type="button"
-                                disabled={page <= 1}
-                                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                                className="px-2 py-1 rounded border border-slate-200 dark:border-slate-600 disabled:opacity-40 text-xs"
-                            >
-                                Previous
-                            </button>
-                            <span className="text-xs tabular-nums">
-                                Page {page} / {Math.max(1, Math.ceil(total / pageSize))}
-                            </span>
-                            <button
-                                type="button"
-                                disabled={offset + logs.length >= total}
-                                onClick={() => setPage((p) => p + 1)}
-                                className="px-2 py-1 rounded border border-slate-200 dark:border-slate-600 disabled:opacity-40 text-xs"
-                            >
-                                Next
-                            </button>
-                        </div>
-                    </div>
-                )}
+                <PaginationControls info={pager.info} page={pager.page} count={logs.length} busy={pager.busy}
+                    onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
             </div>
 
-            <AuditDetailModal log={selectedLog} isOpen={!!selectedLog} onClose={() => setSelectedLog(null)} />
+            {selectedLog && !detail.data ? <Modal isOpen onClose={() => setSelectedLog(null)} title="Audit Log Details">
+                {detail.isError ? <p>Could not load details. <button onClick={() => void detail.refetch()}>Retry</button></p> : <p>Loading details…</p>}
+            </Modal> : <AuditDetailModal log={detail.data || null} isOpen={!!selectedLog} onClose={() => setSelectedLog(null)} />}
         </div>
     );
 }

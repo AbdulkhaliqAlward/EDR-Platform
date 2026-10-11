@@ -71,6 +71,7 @@ func (h *Handlers) ListEnrollmentTokens(c echo.Context) error {
 		h.logger.Errorf("ListEnrollmentTokens: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to list tokens"})
 	}
+	tokens = capList(c, tokens)
 
 	// Never return nil list to frontend
 	resp := make([]EnrollmentTokenResponse, 0, len(tokens))

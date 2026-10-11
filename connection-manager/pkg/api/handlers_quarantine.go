@@ -33,6 +33,7 @@ func (h *Handlers) ListAgentQuarantine(c echo.Context) error {
 		h.logger.WithError(err).Warn("[Quarantine] List failed")
 		return errorResponse(c, http.StatusInternalServerError, "DB_ERROR", "Failed to list quarantine inventory")
 	}
+	items = capList(c, items)
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"items": items,
 		"meta":  responseMeta(c),

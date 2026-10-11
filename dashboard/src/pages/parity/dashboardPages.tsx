@@ -1,3 +1,4 @@
+import { collectPages } from '../../api/collectPages';
 import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, Navigate } from 'react-router-dom';
@@ -1215,21 +1216,15 @@ export function _LegacyDashboardReportsPage() {
             const toIso = new Date(to).toISOString();
 
             if (reportType === 'commands') {
-                const rows = await fetchAllPaged(
-                    (offset, limit) => commandsApi.list({ offset, limit, agent_id: agentScope === 'all' ? undefined : agentScope, sort_by: 'issued_at', sort_order: 'desc' }),
-                    { max: 5000 }
-                );
-                const filtered = rows.filter((c: any) => { const t = new Date(c.issued_at).getTime(); return t >= new Date(fromIso).getTime() && t <= new Date(toIso).getTime(); });
+                const filtered = await collectPages(cursor => commandsApi.page({ limit: '100', cursor: cursor || '', from: fromIso, to: toIso, ...(agentScope === 'all' ? {} : { agent_id: agentScope }), sort: 'issued_at', order: 'desc' }), 5000);
                 setLastCount(filtered.length);
                 const mapped = filtered.map((c: any) => ({ id: c.id, agent_id: c.agent_id, agent_hostname: c.agent_hostname, command_type: c.command_type, status: c.status, issued_at: c.issued_at, issued_by_user: c.issued_by_user, exit_code: c.exit_code ?? '', error_message: c.error_message ?? '' }));
                 fmt === 'json' ? downloadJson('report-commands', { from: fromIso, to: toIso, scope: agentScope, rows: mapped }) : downloadCsv('report-commands', mapped);
                 return;
             }
             if (reportType === 'alerts') {
-                const allAlerts = await fetchAllPaged(
-                    (offset, limit) => alertsApi.list({ limit, offset, agent_id: agentScope === 'all' ? undefined : agentScope, date_from: fromIso, date_to: toIso, sort: 'timestamp', order: 'desc' }).then(r => ({ data: r.alerts ?? [], pagination: { has_more: (r.alerts?.length ?? 0) >= limit } })),
-                    { max: 2000 }
-                );
+                const allAlerts = await collectPages(cursor => alertsApi.page({ limit: '100', cursor: cursor || '',
+                    ...(agentScope === 'all' ? {} : { agent_id: agentScope }), date_from: fromIso, date_to: toIso, sort: 'created_at', order: 'desc' }), 2000);
                 setLastCount(allAlerts.length);
                 const mapped = allAlerts.map((a: any) => ({ id: a.id, timestamp: a.timestamp, agent_id: a.agent_id, rule_title: a.rule_title, severity: a.severity, status: a.status, category: a.category, risk_score: a.risk_score ?? '' }));
                 fmt === 'json' ? downloadJson('report-alerts', { from: fromIso, to: toIso, scope: agentScope, rows: mapped }) : downloadCsv('report-alerts', mapped);

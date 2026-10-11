@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -60,9 +62,9 @@ func (r *PostgresAuditLogRepository) Create(ctx context.Context, log *models.Aud
 // GetByID retrieves an audit log by its ID.
 func (r *PostgresAuditLogRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.AuditLog, error) {
 	query := `
-		SELECT id, user_id, username, action, resource_type, resource_id,
-			old_value, new_value, result, error_message,
-			ip_address, user_agent, created_at
+		SELECT id, COALESCE(user_id,'00000000-0000-0000-0000-000000000000'::uuid), COALESCE(username,''), action, COALESCE(resource_type,''), COALESCE(resource_id,'00000000-0000-0000-0000-000000000000'::uuid),
+			old_value, new_value, result, COALESCE(error_message,''),
+			COALESCE(ip_address,''), COALESCE(user_agent,''), created_at
 		FROM audit_logs
 		WHERE id = $1`
 
@@ -94,67 +96,103 @@ func (r *PostgresAuditLogRepository) GetByID(ctx context.Context, id uuid.UUID) 
 }
 
 // List retrieves audit logs with optional filters.
-func (r *PostgresAuditLogRepository) List(ctx context.Context, filter AuditLogFilter) ([]*models.AuditLog, error) {
-	query := `
-		SELECT id, user_id, username, action, resource_type, resource_id,
-			old_value, new_value, result, error_message,
-			ip_address, user_agent, created_at
-		FROM audit_logs
-		WHERE 1=1`
-
+// auditWhere is shared by list and optional capped total so filters cannot diverge.
+func auditWhere(filter AuditLogFilter) (string, []interface{}) {
+	where := " WHERE 1=1"
 	args := []interface{}{}
 	argNum := 1
 
 	if filter.UserID != nil {
-		query += fmt.Sprintf(" AND user_id = $%d", argNum)
+		where += fmt.Sprintf(" AND user_id = $%d", argNum)
 		args = append(args, *filter.UserID)
 		argNum++
 	}
 
 	if filter.Action != nil {
-		query += fmt.Sprintf(" AND action = $%d", argNum)
+		where += fmt.Sprintf(" AND action = $%d", argNum)
 		args = append(args, *filter.Action)
 		argNum++
 	}
 
 	if filter.ResourceType != nil {
-		query += fmt.Sprintf(" AND resource_type = $%d", argNum)
+		where += fmt.Sprintf(" AND resource_type = $%d", argNum)
 		args = append(args, *filter.ResourceType)
 		argNum++
 	}
 
 	if filter.ResourceID != nil {
-		query += fmt.Sprintf(" AND resource_id = $%d", argNum)
+		where += fmt.Sprintf(" AND resource_id = $%d", argNum)
 		args = append(args, *filter.ResourceID)
 		argNum++
 	}
 
 	if filter.Result != nil {
-		query += fmt.Sprintf(" AND result = $%d", argNum)
+		where += fmt.Sprintf(" AND result = $%d", argNum)
 		args = append(args, *filter.Result)
 		argNum++
 	}
 
 	if filter.StartTime != nil {
-		query += fmt.Sprintf(" AND created_at >= $%d", argNum)
+		where += fmt.Sprintf(" AND created_at >= $%d", argNum)
 		args = append(args, *filter.StartTime)
 		argNum++
 	}
 
 	if filter.EndTime != nil {
-		query += fmt.Sprintf(" AND created_at <= $%d", argNum)
+		where += fmt.Sprintf(" AND created_at <= $%d", argNum)
 		args = append(args, *filter.EndTime)
 		argNum++
 	}
 
-	query += " ORDER BY created_at DESC"
+	if len(filter.Actions) > 0 {
+		where += fmt.Sprintf(" AND action=ANY($%d)", argNum)
+		args = append(args, filter.Actions)
+		argNum++
+	}
+	fields := map[string]string{"staff": "username", "affected": "concat_ws(' ',resource_type,resource_id::text)", "oldVal": "old_value::text", "newVal": "new_value::text", "extra": "error_message", "session": "id::text", "search": "concat_ws(' ',username,action,resource_type,resource_id::text,ip_address::text)"}
+	for _, key := range []string{"staff", "affected", "oldVal", "newVal", "extra", "session", "search"} {
+		if value := filter.Text[key]; value != "" {
+			where += fmt.Sprintf(" AND %s ILIKE $%d", fields[key], argNum)
+			args = append(args, "%"+value+"%")
+			argNum++
+		}
+	}
+	return where, args
+}
 
-	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+func (r *PostgresAuditLogRepository) List(ctx context.Context, filter AuditLogFilter) ([]*models.AuditLog, error) {
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	p := filter.Page
+	if p == nil {
+		q := url.Values{}
+		if filter.Limit > 0 {
+			q.Set("limit", fmt.Sprint(filter.Limit))
+		}
+		if filter.Offset != 0 {
+			return nil, fmt.Errorf("use cursor instead of offset")
+		}
+		parsed, err := pagination.Parse(q, pagination.Options{Scope: "audit", DefaultSort: "created_at", Sorts: map[string]string{"created_at": "created_at"}})
+		if err != nil {
+			return nil, err
+		}
+		p = &parsed
 	}
-	if filter.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+	if filter.StartTime == nil {
+		filter.StartTime = &p.From
 	}
+	if filter.EndTime == nil || filter.EndTime.After(p.Until) {
+		filter.EndTime = &p.Until
+	}
+	where, args := auditWhere(filter)
+	seek, order, err := p.Keyset("created_at", "id", &args)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, p.Limit+1)
+	query := `SELECT id,COALESCE(user_id,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE(username,''),action,COALESCE(resource_type,''),COALESCE(resource_id,'00000000-0000-0000-0000-000000000000'::uuid),
+       to_jsonb(left(old_value::text,256)),to_jsonb(left(new_value::text,256)),result,COALESCE(left(error_message,256),''),
+       COALESCE(ip_address,''),''::text,created_at FROM audit_logs` + where + seek + " ORDER BY " + order + fmt.Sprintf(" LIMIT $%d", len(args))
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -186,46 +224,17 @@ func (r *PostgresAuditLogRepository) List(ctx context.Context, filter AuditLogFi
 		logs = append(logs, log)
 	}
 
-	return logs, nil
+	return logs, rows.Err()
 }
 
 // Count returns the number of audit logs matching the filter.
 func (r *PostgresAuditLogRepository) Count(ctx context.Context, filter AuditLogFilter) (int64, error) {
-	query := `SELECT COUNT(*) FROM audit_logs WHERE 1=1`
-	args := []interface{}{}
-	argNum := 1
-
-	if filter.UserID != nil {
-		query += fmt.Sprintf(" AND user_id = $%d", argNum)
-		args = append(args, *filter.UserID)
-		argNum++
-	}
-
-	if filter.Action != nil {
-		query += fmt.Sprintf(" AND action = $%d", argNum)
-		args = append(args, *filter.Action)
-		argNum++
-	}
-
-	if filter.StartTime != nil {
-		query += fmt.Sprintf(" AND created_at >= $%d", argNum)
-		args = append(args, *filter.StartTime)
-		argNum++
-	}
-
-	if filter.EndTime != nil {
-		query += fmt.Sprintf(" AND created_at <= $%d", argNum)
-		args = append(args, *filter.EndTime)
-		argNum++
-	}
-
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	where, args := auditWhere(filter)
 	var count int64
-	err := r.pool.QueryRow(ctx, query, args...).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("failed to count audit logs: %w", err)
-	}
-
-	return count, nil
+	err := r.pool.QueryRow(ctx, "SELECT count(*) FROM (SELECT 1 FROM audit_logs"+where+" LIMIT 10001) capped", args...).Scan(&count)
+	return count, err
 }
 
 // PostgresInstallationTokenRepository implements InstallationTokenRepository.

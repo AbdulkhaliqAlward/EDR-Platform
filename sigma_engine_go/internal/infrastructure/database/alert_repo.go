@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
+	"net/url"
 	"strings"
 	"time"
 
@@ -285,7 +287,7 @@ func (r *PostgresAlertRepository) scanAlertFromRow(row pgx.Row) (*Alert, error) 
 // GetByID retrieves an alert by its ID.
 func (r *PostgresAlertRepository) GetByID(ctx context.Context, id string) (*Alert, error) {
 	query := `
-		SELECT id, timestamp, agent_id, rule_id, rule_title, severity, category,
+		SELECT id, timestamp, agent_id, rule_id, COALESCE(rule_title,''), severity, COALESCE(category,''),
 			event_count, event_ids, mitre_tactics, mitre_techniques,
 			matched_fields, matched_selections, context_data,
 			status, assigned_to, resolution_notes,
@@ -293,15 +295,36 @@ func (r *PostgresAlertRepository) GetByID(ctx context.Context, id string) (*Aler
 			match_count, related_rules, related_rule_ids, combined_confidence,
 			severity_promoted, original_severity,
 			risk_score, context_snapshot, score_breakdown,
-			created_at, updated_at, COALESCE(last_seen_at, timestamp)
+			COALESCE(created_at,timestamp), updated_at, COALESCE(last_seen_at, timestamp)
 		FROM sigma_alerts
 		WHERE id = $1`
 
 	return r.scanAlert(r.pool.QueryRow(ctx, query, id))
 }
 
+// AlertSortColumns is the alert list sort whitelist. timestamp is a legacy
+// alias for immutable creation order.
+var AlertSortColumns = map[string]string{"created_at": "created_at", "timestamp": "created_at", "risk_score": "risk_score"}
+
 // List retrieves alerts matching the given filters.
 func (r *PostgresAlertRepository) List(ctx context.Context, filters AlertFilters) ([]*Alert, int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	p := filters.Page
+	if p == nil {
+		q := url.Values{}
+		if filters.Limit > 0 {
+			q.Set("limit", fmt.Sprint(filters.Limit))
+		}
+		if filters.Offset != 0 {
+			return nil, 0, fmt.Errorf("offset is unsupported; use cursor")
+		}
+		parsed, err := pagination.Parse(q, pagination.Options{Scope: "alerts", DefaultSort: "created_at", Sorts: AlertSortColumns})
+		if err != nil {
+			return nil, 0, err
+		}
+		p = &parsed
+	}
 	// Build WHERE clause
 	var conditions []string
 	var args []interface{}
@@ -327,13 +350,15 @@ func (r *PostgresAlertRepository) List(ctx context.Context, filters AlertFilters
 		args = append(args, filters.Status)
 		argNum++
 	}
+	// The date range applies to the alert's creation key, the same key the
+	// list is ordered and fenced by, so one indexed range serves every sort.
 	if !filters.DateFrom.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("timestamp >= $%d", argNum))
+		conditions = append(conditions, fmt.Sprintf("COALESCE(created_at,timestamp) >= $%d", argNum))
 		args = append(args, filters.DateFrom)
 		argNum++
 	}
 	if !filters.DateTo.IsZero() {
-		conditions = append(conditions, fmt.Sprintf("timestamp <= $%d", argNum))
+		conditions = append(conditions, fmt.Sprintf("COALESCE(created_at,timestamp) <= $%d", argNum))
 		args = append(args, filters.DateTo)
 		argNum++
 	}
@@ -343,59 +368,43 @@ func (r *PostgresAlertRepository) List(ctx context.Context, filters AlertFilters
 		argNum++
 	}
 
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	// Sort — allowlist guards against SQL injection from the SortBy field.
-	// risk_score DESC is the primary SOC triage sort; timestamp DESC is the default.
-	allowedSortColumns := map[string]string{
-		"timestamp":  "timestamp",
-		"risk_score": "risk_score",
-		"severity":   "severity",
-		"status":     "status",
-		"rule_id":    "rule_id",
-		"agent_id":   "agent_id",
-	}
-	sortBy := "timestamp"
-	if col, ok := allowedSortColumns[filters.SortBy]; ok {
-		sortBy = col
-	}
-	sortOrder := "DESC"
-	if filters.SortOrder == "asc" {
-		sortOrder = "ASC"
-	}
-
-	// Limit/Offset
-	limit := 50
-	if filters.Limit > 0 {
-		limit = filters.Limit
-	}
-	offset := filters.Offset
-
-	// Count query
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM sigma_alerts %s", whereClause)
+	args = append(args, p.From, p.Until)
+	conditions = append(conditions, fmt.Sprintf("COALESCE(created_at,timestamp) >= $%d AND COALESCE(created_at,timestamp) <= $%d", len(args)-1, len(args)))
+	whereClause := "WHERE " + strings.Join(conditions, " AND ")
 	var total int64
-	if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("failed to count alerts: %w", err)
+	if p.IncludeTotal {
+		countQuery := "SELECT count(*) FROM (SELECT 1 FROM sigma_alerts " + whereClause + " LIMIT 10001) capped"
+		if err := r.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+			return nil, 0, fmt.Errorf("count alerts: %w", err)
+		}
 	}
-
-	// Data query
-	dataQuery := fmt.Sprintf(`
-		SELECT id, timestamp, agent_id, rule_id, rule_title, severity, category,
-			event_count, event_ids, mitre_tactics, mitre_techniques,
-			matched_fields, matched_selections, context_data,
-			status, assigned_to, resolution_notes,
-			confidence, false_positive_risk,
-			match_count, related_rules, related_rule_ids, combined_confidence,
-			severity_promoted, original_severity,
-			risk_score, context_snapshot, score_breakdown,
-			created_at, updated_at, COALESCE(last_seen_at, timestamp)
-		FROM sigma_alerts %s
-		ORDER BY %s %s
-		LIMIT %d OFFSET %d`,
-		whereClause, sortBy, sortOrder, limit, offset)
+	var seek, order string
+	var err error
+	if p.Sort == "risk_score" {
+		// risk_score is NOT NULL (migration 014); id breaks ties.
+		seek, order, err = p.KeysetInt("risk_score", "id", &args)
+	} else {
+		seek, order, err = p.Keyset("COALESCE(created_at,timestamp)", "id", &args)
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	args = append(args, p.Limit+1)
+	// Lightweight projection: heavy JSON (context_data, snapshots, matched
+	// selections) is served by GetByID. Only the small values the table shows
+	// are extracted: source hostname, the UEBA signal and whether a context
+	// snapshot exists.
+	dataQuery := fmt.Sprintf(`SELECT id,timestamp,agent_id,rule_id,COALESCE(rule_title,''),severity,COALESCE(category,''),
+  event_count,NULL::text[],mitre_tactics,mitre_techniques,
+  NULL::jsonb,NULL::text[],
+  jsonb_build_object('source',jsonb_strip_nulls(jsonb_build_object('hostname',context_data->'source'->'hostname'))),
+  status,assigned_to,NULL::text,
+  confidence,false_positive_risk,match_count,NULL::text[],related_rule_ids,combined_confidence,
+  severity_promoted,original_severity,risk_score,
+  CASE WHEN context_snapshot IS NULL OR context_snapshot = 'null'::jsonb THEN NULL ELSE '{"list_projection":true}'::jsonb END,
+  jsonb_strip_nulls(jsonb_build_object('ueba_signal',COALESCE(score_breakdown->'ueba_signal',context_snapshot->'score_breakdown'->'ueba_signal'))),
+  COALESCE(created_at,timestamp),updated_at,COALESCE(last_seen_at,timestamp)
+  FROM sigma_alerts %s%s ORDER BY %s LIMIT $%d`, whereClause, seek, order, len(args))
 
 	rows, err := r.pool.Query(ctx, dataQuery, args...)
 	if err != nil {
@@ -412,7 +421,7 @@ func (r *PostgresAlertRepository) List(ctx context.Context, filters AlertFilters
 		alerts = append(alerts, alert)
 	}
 
-	return alerts, total, nil
+	return alerts, total, rows.Err()
 }
 
 // Update updates an existing alert.

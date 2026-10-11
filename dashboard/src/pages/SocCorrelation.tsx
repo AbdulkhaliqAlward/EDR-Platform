@@ -237,20 +237,7 @@ export default function SocCorrelation() {
         queryKey: ['correlation', 'commands', agentId, fromIso, toIso],
         queryFn: async () => {
             if (!agentId) return { data: [] as CommandListItem[], pagination: { total: 0, limit: 0, offset: 0, has_more: false } };
-            const r = await commandsApi.list({
-                limit: 500,
-                offset: 0,
-                agent_id: agentId,
-                sort_by: 'issued_at',
-                sort_order: 'desc',
-            });
-            const fromT = range.from?.getTime() ?? 0;
-            const toT = range.to?.getTime() ?? Date.now();
-            const filtered = (r.data ?? []).filter((c) => {
-                const t = new Date(c.issued_at).getTime();
-                return t >= fromT && t <= toT;
-            });
-            return { ...r, data: filtered };
+            return commandsApi.list({limit: 100,agent_id: agentId,sort_by: 'issued_at',sort_order: 'desc',from:fromIso || undefined,to:toIso || undefined});
         },
         enabled: !!agentId,
         staleTime: 20_000,

@@ -3,8 +3,10 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
+	"github.com/edr-platform/shared/pagination"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +15,7 @@ import (
 
 // SecurityEventFilter specifies query filters for listing security events.
 type SecurityEventFilter struct {
+	Page      *pagination.Params
 	EventType string
 	Severity  string
 	ActorID   *uuid.UUID
@@ -41,87 +44,84 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 
 // List returns a paginated list of security events, newest first.
 func (r *Repository) List(ctx context.Context, f SecurityEventFilter) ([]Event, error) {
-	if f.Limit <= 0 {
-		f.Limit = 50
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	p := f.Page
+	if p == nil {
+		q := url.Values{}
+		if f.Limit > 0 {
+			q.Set("limit", fmt.Sprint(f.Limit))
+		}
+		if f.Offset != 0 {
+			return nil, fmt.Errorf("security events require cursor pagination")
+		}
+		parsed, err := pagination.Parse(q, pagination.Options{Scope: "security/events", DefaultSort: "created_at", Sorts: map[string]string{"created_at": "created_at"}})
+		if err != nil {
+			return nil, err
+		}
+		p = &parsed
 	}
-	if f.Limit > 500 {
-		f.Limit = 500
+	from, until := p.From, p.Until
+	if f.Since != nil {
+		from = *f.Since
 	}
-
-	where := []string{"1=1"}
-	args := []interface{}{}
-	n := 1
-
+	if f.Until != nil && f.Until.Before(until) {
+		until = *f.Until
+	}
+	args := []any{from, until}
+	where := " WHERE created_at >= $1 AND created_at <= $2"
+	add := func(column string, value any) {
+		args = append(args, value)
+		where += fmt.Sprintf(" AND %s = $%d", column, len(args))
+	}
 	if f.EventType != "" {
-		where = append(where, fmt.Sprintf("event_type = $%d", n))
-		args = append(args, f.EventType)
-		n++
+		add("event_type", f.EventType)
 	}
 	if f.Severity != "" {
-		where = append(where, fmt.Sprintf("severity = $%d", n))
-		args = append(args, f.Severity)
-		n++
+		add("severity", f.Severity)
 	}
 	if f.ActorID != nil {
-		where = append(where, fmt.Sprintf("actor_id = $%d", n))
-		args = append(args, f.ActorID.String())
-		n++
+		add("actor_id", *f.ActorID)
 	}
-	if f.Since != nil {
-		where = append(where, fmt.Sprintf("created_at >= $%d", n))
-		args = append(args, *f.Since)
-		n++
+	seek, order, err := p.Keyset("created_at", "id", &args)
+	if err != nil {
+		return nil, err
 	}
-	if f.Until != nil {
-		where = append(where, fmt.Sprintf("created_at <= $%d", n))
-		args = append(args, *f.Until)
-		n++
-	}
-
-	q := fmt.Sprintf(`
-		SELECT id, event_type, severity, actor_id, actor_name, target_id, target_type,
-		       ip_address, user_agent, description, metadata, created_at
-		FROM security_events
-		WHERE %s
-		ORDER BY created_at DESC
-		LIMIT $%d OFFSET $%d`,
-		strings.Join(where, " AND "), n, n+1)
-	args = append(args, f.Limit, f.Offset)
-
-	rows, err := r.pool.Query(ctx, q, args...)
+	args = append(args, p.Limit+1)
+	rows, err := r.pool.Query(ctx, `SELECT id,event_type,severity,actor_id,actor_name,target_id,target_type,ip_address,''::text,left(description,256),'{}'::jsonb,created_at FROM security_events`+where+seek+" ORDER BY "+order+fmt.Sprintf(" LIMIT $%d", len(args)), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var out []Event
+	out := []Event{}
 	for rows.Next() {
-		var e Event
-		var actorID, targetID *string
-		var metaJSON string
-		if err := rows.Scan(
-			&e.ID, &e.EventType, &e.Severity,
-			&actorID, &e.ActorName,
-			&targetID, &e.TargetType,
-			&e.IPAddress, &e.UserAgent, &e.Description,
-			&metaJSON, &e.CreatedAt,
-		); err != nil {
+		event, err := scanEvent(rows)
+		if err != nil {
 			return nil, err
 		}
-		if actorID != nil {
-			if uid, err := uuid.Parse(*actorID); err == nil {
-				e.ActorID = &uid
-			}
-		}
-		if targetID != nil {
-			if uid, err := uuid.Parse(*targetID); err == nil {
-				e.TargetID = &uid
-			}
-		}
-		// Metadata is already string->string in storage
-		out = append(out, e)
+		out = append(out, *event)
 	}
 	return out, rows.Err()
+}
+
+func scanEvent(row interface{ Scan(...any) error }) (*Event, error) {
+	var event Event
+	var metadata []byte
+	if err := row.Scan(&event.ID, &event.EventType, &event.Severity, &event.ActorID, &event.ActorName, &event.TargetID, &event.TargetType, &event.IPAddress, &event.UserAgent, &event.Description, &metadata, &event.CreatedAt); err != nil {
+		return nil, err
+	}
+	if len(metadata) > 0 {
+		if err := json.Unmarshal(metadata, &event.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	return &event, nil
+}
+
+func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*Event, error) {
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	return scanEvent(r.pool.QueryRow(ctx, `SELECT id,event_type,severity,actor_id,actor_name,target_id,target_type,ip_address,user_agent,description,metadata,created_at FROM security_events WHERE id=$1`, id))
 }
 
 // Summary returns counts of events grouped by event_type and severity

@@ -40,3 +40,7 @@ require (
 	golang.org/x/text v0.29.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
+
+require github.com/edr-platform/shared v0.0.0
+
+replace github.com/edr-platform/shared => ../shared

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -348,11 +350,10 @@ func (r *PostgresAgentRepository) Delete(ctx context.Context, id uuid.UUID) erro
 }
 
 // List retrieves agents with optional filters.
-func (r *PostgresAgentRepository) List(ctx context.Context, filter AgentFilter) ([]*models.Agent, error) {
-	query := `SELECT` + agentSelectColumns + `
-		FROM agents
-		WHERE 1=1`
+var AgentSortColumns = map[string]string{"created_at": "created_at", "hostname": "hostname", "status": "status", "last_seen": "last_seen", "health_score": "health_score"}
 
+func agentListWhere(filter AgentFilter) (string, []interface{}) {
+	query := " WHERE 1=1"
 	args := []interface{}{}
 	argNum := 1
 
@@ -377,22 +378,44 @@ func (r *PostgresAgentRepository) List(ctx context.Context, filter AgentFilter) 
 		argNum++
 	}
 
-	// Sort and pagination
-	sortBy := "created_at"
-	if filter.SortBy != "" {
-		sortBy = filter.SortBy
+	return query, args
+}
+
+func (r *PostgresAgentRepository) List(ctx context.Context, filter AgentFilter) ([]*models.Agent, error) {
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	columns := agentSelectColumns
+	if filter.Page != nil {
+		columns = strings.Replace(columns, "COALESCE(metadata, '{}')", `jsonb_strip_nulls(jsonb_build_object('profile',left(metadata->>'profile',256),'logged_in_user',left(metadata->>'logged_in_user',256),'signature_server_version',left(metadata->>'signature_server_version',64),'device_criticality',left(metadata->>'device_criticality',64),'role_risk',left(metadata->>'role_risk',64),'network_anomaly',left(metadata->>'network_anomaly',64),'filter_policy',CASE WHEN octet_length((metadata->'filter_policy')::text) <= 16384 THEN metadata->'filter_policy' END))`, 1)
+	}
+	where, args := agentListWhere(filter)
+	query := `SELECT` + columns + ` FROM agents` + where
+
+	sortName := filter.SortBy
+	if sortName == "" {
+		sortName = "created_at"
+	}
+	sortBy, ok := AgentSortColumns[sortName]
+	if !ok {
+		return nil, fmt.Errorf("unsupported agent sort")
 	}
 	sortOrder := "DESC"
 	if filter.SortOrder == "asc" {
 		sortOrder = "ASC"
 	}
-	query += fmt.Sprintf(" ORDER BY %s %s", sortBy, sortOrder)
-
-	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+	query += fmt.Sprintf(" ORDER BY %s %s,id %s", sortBy, sortOrder, sortOrder)
+	limit, offset := filter.Limit, filter.Offset
+	if filter.Page != nil {
+		limit = filter.Page.Limit + 1
+		offset = filter.Page.Offset
 	}
-	if filter.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", filter.Offset)
+	if limit > 0 {
+		args = append(args, limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	if offset > 0 {
+		args = append(args, offset)
+		query += fmt.Sprintf(" OFFSET $%d", len(args))
 	}
 
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -443,23 +466,15 @@ func (r *PostgresAgentRepository) List(ctx context.Context, filter AgentFilter) 
 		agents = append(agents, agent)
 	}
 
-	return agents, nil
+	return agents, rows.Err()
 }
 
 // Count returns the number of agents matching the filter.
 func (r *PostgresAgentRepository) Count(ctx context.Context, filter AgentFilter) (int64, error) {
-	query := `SELECT COUNT(*) FROM agents WHERE 1=1`
-	args := []interface{}{}
-	argNum := 1
-
-	if filter.Status != nil {
-		query += fmt.Sprintf(" AND status = $%d", argNum)
-		args = append(args, *filter.Status)
-		argNum++
-	} else {
-		// Keep the count consistent with List: removed devices are hidden.
-		query += " AND status <> '" + models.AgentStatusDeleted + "'"
-	}
+	ctx, cancel := context.WithTimeout(ctx, pagination.QueryTimeout)
+	defer cancel()
+	where, args := agentListWhere(filter)
+	query := "SELECT COUNT(*) FROM agents" + where
 
 	var count int64
 	err := r.pool.QueryRow(ctx, query, args...).Scan(&count)

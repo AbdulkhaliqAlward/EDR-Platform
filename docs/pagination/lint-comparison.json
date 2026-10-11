@@ -1,0 +1,206 @@
+[
+  {
+    "file": "dashboard/src/api/client.ts",
+    "before": {
+      "@typescript-eslint/no-explicit-any": 9,
+      "@typescript-eslint/no-unused-vars": 2,
+      "prefer-const": 1
+    },
+    "current": {
+      "@typescript-eslint/no-explicit-any": 9,
+      "@typescript-eslint/no-unused-vars": 2,
+      "prefer-const": 1
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/components/alerts/AlertsTable.tsx",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/components/reports/ReportGenerator.tsx",
+    "before": {
+      "@typescript-eslint/no-explicit-any": 16
+    },
+    "current": {
+      "@typescript-eslint/no-explicit-any": 16
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/hooks/useAlerts.ts",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/ActionCenter.tsx",
+    "before": {
+      "@typescript-eslint/no-explicit-any": 4,
+      "react-hooks/purity": 2
+    },
+    "current": {
+      "react-hooks/purity": 1,
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/Alerts.tsx",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/AuditLogs.tsx",
+    "before": {
+      "react-hooks/purity": 1
+    },
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/EndpointDetail.tsx",
+    "before": {
+      "@typescript-eslint/no-explicit-any": 17,
+      "react-hooks/set-state-in-effect": 6,
+      "react-hooks/purity": 2,
+      "react-hooks/static-components": 10,
+      "no-irregular-whitespace": 1,
+      "@typescript-eslint/ban-ts-comment": 1,
+      "react-hooks/rules-of-hooks": 9
+    },
+    "current": {
+      "@typescript-eslint/no-explicit-any": 17,
+      "react-hooks/set-state-in-effect": 6,
+      "react-hooks/purity": 2,
+      "react-hooks/static-components": 10,
+      "no-irregular-whitespace": 1,
+      "@typescript-eslint/ban-ts-comment": 1,
+      "react-hooks/rules-of-hooks": 9
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/Endpoints.tsx",
+    "before": {
+      "react-hooks/set-state-in-effect": 1,
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "current": {
+      "react-hooks/set-state-in-effect": 1,
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/Events.tsx",
+    "before": {
+      "react-hooks/set-state-in-effect": 1,
+      "@typescript-eslint/no-explicit-any": 1
+    },
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/Rules.tsx",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/SecurityEvents.tsx",
+    "before": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/SocCorrelation.tsx",
+    "before": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "current": {
+      "react-hooks/set-state-in-effect": 1
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/parity/dashboardPages.tsx",
+    "before": {
+      "@typescript-eslint/ban-ts-comment": 1,
+      "@typescript-eslint/no-unused-vars": 1,
+      "@typescript-eslint/no-explicit-any": 10,
+      "react-hooks/static-components": 4,
+      "react-refresh/only-export-components": 1,
+      "react-hooks/rules-of-hooks": 12,
+      "@typescript-eslint/no-unused-expressions": 3
+    },
+    "current": {
+      "@typescript-eslint/ban-ts-comment": 1,
+      "@typescript-eslint/no-unused-vars": 1,
+      "@typescript-eslint/no-explicit-any": 9,
+      "react-hooks/static-components": 4,
+      "react-refresh/only-export-components": 1,
+      "react-hooks/rules-of-hooks": 12,
+      "@typescript-eslint/no-unused-expressions": 3
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/pages/parity/paritySectionPages.tsx",
+    "before": {
+      "react-hooks/set-state-in-effect": 2,
+      "react-hooks/static-components": 4
+    },
+    "current": {
+      "react-hooks/static-components": 4
+    },
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/api/collectPages.ts",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/components/PaginationControls.tsx",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/hooks/paginationState.test.mjs",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/hooks/paginationState.ts",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/hooks/usePageFilters.ts",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/hooks/usePageSearch.ts",
+    "before": {},
+    "current": {},
+    "increases": {}
+  },
+  {
+    "file": "dashboard/src/hooks/usePaginatedQuery.ts",
+    "before": {},
+    "current": {},
+    "increases": {}
+  }
+]

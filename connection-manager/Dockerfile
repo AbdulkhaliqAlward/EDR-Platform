@@ -9,6 +9,8 @@ WORKDIR /app
 
 # Copy go mod files
 COPY go.mod go.sum ./
+# Local shared module is supplied as a named BuildKit context.
+COPY --from=shared . /shared
 
 # Use official Go module proxy
 ENV GOPROXY="https://proxy.golang.org,direct"

@@ -1,3 +1,6 @@
+import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
+import { usePageSearch } from '../hooks/usePageSearch';
+import { PaginationControls } from '../components/PaginationControls';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, useMemo } from 'react';
 import {
@@ -74,18 +77,16 @@ const SEV_BAR: Record<string, string> = {
 export default function Rules() {
     const queryClient = useQueryClient();
     const canWrite = authApi.canWriteRules();
-    const [searchTerm, setSearchTerm] = useState('');
+    const pager = usePaginatedQuery<Rule>({ name: 'rules', defaults: { sort: 'title', order: 'asc' }, fetchPage: rulesApi.page });
+    const [searchTerm, setSearchTerm] = usePageSearch(pager.params, pager.setFilters);
+    const isLoading = pager.isLoading;
     const [showModal, setShowModal] = useState(false);
     const [editingRule, setEditingRule] = useState<Rule | null>(null);
-    const [enabledFilter, setEnabledFilter] = useState<boolean | undefined>(undefined);
-    const [sortBySeverity, setSortBySeverity] = useState(false);
+    const enabledFilter = pager.params.enabled === 'true' ? true : pager.params.enabled === 'false' ? false : undefined;
+    const setEnabledFilter = (value: boolean | undefined) => pager.setFilters({ enabled: value === undefined ? '' : String(value) });
+    const sortBySeverity = pager.params.sort === 'severity';
+    const setSortBySeverity = (value: boolean) => pager.setFilters({ sort: value ? 'severity' : 'title', order: 'asc' });
     const [pendingId, setPendingId] = useState<string | null>(null);
-
-    // Fetch rules
-    const { data, isLoading } = useQuery({
-        queryKey: ['rules', enabledFilter],
-        queryFn: () => rulesApi.list({ limit: 200, enabled: enabledFilter }),
-    });
 
     // Fetch rule stats (enabled/disabled/by_severity)
     const { data: ruleStats } = useQuery({
@@ -101,7 +102,7 @@ export default function Rules() {
         refetchInterval: 30000,
     });
 
-    const byRule = alertStats?.by_rule || {};
+    const byRule = useMemo(() => alertStats?.by_rule || {}, [alertStats?.by_rule]);
     const maxFires = useMemo(() => Math.max(1, ...Object.values(byRule) as number[]), [byRule]);
 
     // Enable/Disable mutations
@@ -140,24 +141,10 @@ export default function Rules() {
         }
     };
 
-    const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low'];
-
-    const filteredRules = useMemo(() => {
-        let list = (data?.rules || []).filter((r) =>
-            r.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            r.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            r.category?.toLowerCase().includes(searchTerm.toLowerCase())
-        );
-        if (sortBySeverity) {
-            list = [...list].sort(
-                (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity)
-            );
-        }
-        return list;
-    }, [data?.rules, searchTerm, sortBySeverity]);
+    const filteredRules = pager.rows;
 
     // Totals
-    const totalRules    = ruleStats?.total_rules    ?? data?.total        ?? 0;
+    const totalRules    = ruleStats?.total_rules    ?? pager.data?.total?.value        ?? 0;
     const enabledRules  = ruleStats?.enabled_rules  ?? 0;
     const disabledRules = ruleStats?.disabled_rules ?? 0;
     const bySeverity    = ruleStats?.by_severity    ?? {};
@@ -323,7 +310,7 @@ export default function Rules() {
                 {/* ── Data Table ── */}
                 <div className="relative flex-1 flex flex-col min-h-0 bg-white dark:bg-slate-800/70 rounded-2xl border border-slate-200 dark:border-slate-700/60 shadow-sm overflow-hidden">
                     <div className="flex-1 overflow-auto custom-scrollbar">
-                        {isLoading ? (
+                        {pager.isError ? (<div role="alert" className="p-6">Could not load rules. <button className="underline" onClick={() => void pager.refetch()}>Retry</button></div>) : isLoading ? (
                             <div className="p-6 space-y-3">
                                 {[...Array(6)].map((_, i) => (
                                     <div key={i} className="h-14 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse" style={{ opacity: 1 - i * 0.12 }} />
@@ -452,10 +439,12 @@ export default function Rules() {
                         )}
                     </div>
 
+                    <PaginationControls info={pager.info} page={pager.page} count={pager.rows.length} busy={pager.busy}
+                        onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
                     {/* Footer */}
                     <div className="shrink-0 px-5 py-3 bg-slate-50/60 dark:bg-slate-900/40 border-t border-slate-200 dark:border-slate-800/60 text-xs text-slate-500 dark:text-slate-400 flex justify-between items-center">
                         <span>
-                            Showing <span className="font-semibold text-slate-700 dark:text-slate-200">{filteredRules.length}</span> of <span className="font-semibold text-slate-700 dark:text-slate-200">{totalRules}</span> signatures
+                            On this page: <span className="font-semibold text-slate-700 dark:text-slate-200">{filteredRules.length}</span> · Fleet: <span className="font-semibold text-slate-700 dark:text-slate-200">{totalRules}</span> signatures
                         </span>
                         <span className="flex items-center gap-1.5">
                             <span className="w-2 h-2 rounded-full bg-emerald-500" />

@@ -8,6 +8,8 @@ RUN apk add --no-cache git ca-certificates
 
 # Copy go mod files
 COPY go.mod go.sum ./
+# Local shared module is supplied as a named BuildKit context.
+COPY --from=shared . /shared
 
 # Speed up module downloads
 ENV GOPROXY="https://proxy.golang.org,direct"

@@ -2,342 +2,135 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { alertsApi, agentsApi, createAlertStream, type Alert } from '../api/client';
 import { useToast } from '../components';
-import { useDebounce } from './useDebounce';
 import type { DateRange } from '../components/DateRangePicker';
+import { usePaginatedQuery } from './usePaginatedQuery';
 import { createAlertRefresh, rememberAlert } from './alertRefresh';
+import { usePageFilters } from './usePageFilters';
 
 export type SortField = 'timestamp' | 'severity' | 'risk_score';
-
-export interface AlertFilters {
-    severities: string[];
-    statuses: string[];
-    search: string;
-}
-
-export interface UseAlertsReturn {
-    // Data
-    alerts: Alert[];
-    total: number;
-    totalPages: number;
-    agentHostnameMap: Record<string, string>;
-
-    // Loading states
-    isLoading: boolean;
-    isError: boolean;
-    error: Error | null;
-
-    // Pagination
-    page: number;
-    pageSize: number;
-    setPage: (page: number) => void;
-    setPageSize: (size: number) => void;
-
-    // Sorting
-    sortBy: SortField;
-    sortOrder: 'asc' | 'desc';
-    toggleSort: (field: SortField) => void;
-
-    // Filters
-    filters: AlertFilters;
-    dateRange: DateRange;
-    setFilters: (filters: AlertFilters) => void;
-    setDateRange: (range: DateRange) => void;
-
-    // Selection
-    selectedIds: Set<string>;
-    selectedAlert: Alert | null;
-    toggleSelectAll: () => void;
-    toggleSelect: (id: string) => void;
-    setSelectedAlert: (alert: Alert | null) => void;
-    clearSelection: () => void;
-
-    // Actions
-    handleStatusChange: (id: string, status: string, requireSuccess?: boolean) => Promise<void>;
-    handleBulkAction: (status: string) => void;
-    isUpdating: boolean;
-    isBulkUpdating: boolean;
-    newAlertIds: Set<string>;
-}
-
-export function useAlerts(): UseAlertsReturn {
+export interface AlertFilters { severities: string[]; statuses: string[]; search: string }
+export function useAlerts() {
     const queryClient = useQueryClient();
     const { showToast } = useToast();
-
-    // Refs for stream handling
-    const seenAlertIdsRef = useRef<Set<string>>(new Set());
-    const pendingStreamIdsRef = useRef<Set<string>>(new Set());
-    const [streamConnected, setStreamConnected] = useState(false);
-
-    // State
     const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
-    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-    const [page, setPage] = useState(1);
-    const [pageSize, setPageSize] = useState(10);
-    const [sortBy, setSortBy] = useState<SortField>('timestamp');
-    const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+    const [selection, setSelection] = useState<{ scope: string; ids: Set<string> }>({ scope: '', ids: new Set() });
     const [newAlertIds, setNewAlertIds] = useState<Set<string>>(new Set());
-
-    const [filters, setFilters] = useState<AlertFilters>({
-        severities: [],
-        statuses: [],
-        search: '',
-    });
-
-    const [dateRange, setDateRange] = useState<DateRange>(() => ({
-        from: new Date(Date.now() - 24 * 60 * 60 * 1000),
-        to: new Date(),
+    const [pendingCount, setPendingCount] = useState(0);
+    const pending = useRef(new Set<string>());
+    const visibleAlerts = useRef<Alert[]>([]);
+    const paramsRef = useRef<Record<string, string>>({});
+    const [defaults] = useState(() => ({
+        date_from: new Date(Date.now() - 24 * 3600_000).toISOString(), date_to: new Date().toISOString(), sort: 'created_at', order: 'desc',
     }));
-
-    const debouncedSearch = useDebounce(filters.search, 300);
-
-    // Close drawer on Escape
+    const query = usePaginatedQuery<Alert>({ name: 'alerts', defaults, fetchPage: alertsApi.page });
+    const alerts = query.rows;
+    useEffect(() => { visibleAlerts.current = alerts; }, [alerts]);
+    useEffect(() => { paramsRef.current = query.params; }, [query.params]);
+    // New-item counts belong to one filter set; navigating pages keeps them.
+    const filterIdentity = useMemo(() => { const { cursor: _cursor, ...rest } = query.params; void _cursor; return JSON.stringify(rest); }, [query.params]);
+    useEffect(() => { pending.current.clear(); setPendingCount(0); }, [filterIdentity]);
+    const [filterDraft, updateFilters] = usePageFilters(query.params, { severity: '', status: '', search: '' }, query.setFilters);
+    const filters: AlertFilters = { severities: filterDraft.severity.split(',').filter(Boolean), statuses: filterDraft.status.split(',').filter(Boolean), search: filterDraft.search };
+    const dateRange = { from: new Date(query.params.date_from), to: new Date(query.params.date_to) };
+    const setFilters = (next: AlertFilters) => updateFilters({ severity: next.severities.join(','), status: next.statuses.join(','), search: next.search });
+    const selectionScope = JSON.stringify(query.params);
+    const selectedIds = selection.scope === selectionScope ? selection.ids : new Set<string>();
+    const setSelectedIds = (change: Set<string> | ((old: Set<string>) => Set<string>)) => setSelection(old => ({ scope: selectionScope,
+        ids: typeof change === 'function' ? change(old.scope === selectionScope ? old.ids : new Set()) : change }));
+    const clearSelection = () => setSelectedIds(new Set());
+    const { data: agentData } = useQuery({ queryKey: ['agentsForAlerts'], queryFn: () => agentsApi.list({ limit: 100 }), staleTime: 120000 });
+    const agentHostnameMap = useMemo(() => Object.fromEntries((agentData?.data || []).map(a => [a.id, a.hostname])), [agentData]);
+    const detail = useQuery({ queryKey: ['alert', selectedAlert?.id], queryFn: () => alertsApi.get(selectedAlert!.id), enabled: !!selectedAlert?.id, staleTime: 30_000 });
     useEffect(() => {
-        const handler = (e: KeyboardEvent) => {
-            if (e.key === 'Escape' && !document.querySelector('[role="dialog"][aria-modal="true"]')) setSelectedAlert(null);
-        };
-        window.addEventListener('keydown', handler);
-        return () => window.removeEventListener('keydown', handler);
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !document.querySelector('[role="dialog"][aria-modal="true"]')) setSelectedAlert(null); };
+        window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
     }, []);
-
-    // Agent hostname lookup map
-    const { data: agentListData } = useQuery({
-        queryKey: ['agentsForAlerts'],
-        queryFn: () => agentsApi.list({ limit: 500 }),
-        staleTime: 120000,
-        refetchInterval: 120000,
-    });
-
-    const agentHostnameMap = useMemo(() => agentListData?.data?.reduce((acc: Record<string, string>, agent) => {
-        acc[agent.id] = agent.hostname;
-        return acc;
-    }, {}) || {}, [agentListData]);
-
-    // Fetch alerts
-    const { data, isLoading, isError, error } = useQuery({
-        queryKey: ['alerts', filters.severities, filters.statuses, debouncedSearch, dateRange.from?.toISOString(), page, pageSize, sortBy, sortOrder],
-        queryFn: () => alertsApi.list({
-            limit: pageSize,
-            offset: (page - 1) * pageSize,
-            severity: filters.severities.length > 0 ? filters.severities.join(',') : undefined,
-            status: filters.statuses.length > 0 ? filters.statuses.join(',') : undefined,
-            date_from: dateRange.from?.toISOString(),
-            date_to: new Date().toISOString(),
-            search: debouncedSearch || undefined,
-            sort: sortOrder === 'desc' ? `-${sortBy}` : sortBy,
-            order: sortOrder,
-        }),
-        refetchInterval: streamConnected ? 30_000 : 5_000,
-        refetchOnWindowFocus: true,
-    });
-
-    const alerts = useMemo(() => data?.alerts || [], [data?.alerts]);
-    const total = data?.total || 0;
-    const totalPages = Math.ceil(total / pageSize);
-
-    // Fetch full alert details when one is selected.
-    //
-    // The list endpoint (/api/v1/sigma/alerts) returns a compact projection
-    // suitable for table rendering — it omits context_snapshot, score_breakdown,
-    // ancestor_chain, matched_fields, mitre_*, human_summary, etc. Those fields
-    // are only returned by /api/v1/sigma/alerts/{id}. Without this query the
-    // detail drawer would render placeholder/empty sections even though the
-    // data exists server-side.
-    const { data: selectedAlertFull } = useQuery({
-        queryKey: ['alert', selectedAlert?.id],
-        queryFn: () => alertsApi.get(selectedAlert!.id),
-        enabled: !!selectedAlert?.id,
-        staleTime: 30_000,
-    });
-
-    // Prefer the fully-hydrated record when it matches the currently-selected
-    // alert; fall back to the list row while the detail fetch is in-flight so
-    // the drawer never flashes empty.
-    const effectiveSelectedAlert =
-        selectedAlertFull && selectedAlertFull.id === selectedAlert?.id
-            ? selectedAlertFull
-            : selectedAlert;
-
-    // Track IDs already rendered from DB
+    // Reconcile a bounded first-page preview on outages/reconnects. Neither this
+    // probe nor the stream writes into the analyst's current page cache.
     useEffect(() => {
-        for (const alert of alerts) {
-            rememberAlert(seenAlertIdsRef.current, alert.id);
-        }
-    }, [alerts]);
-
-    // Realtime stream setup
-    useEffect(() => {
-        const pendingStreamIds = pendingStreamIdsRef.current;
-        const refresh = createAlertRefresh(() => {
-                const newCount = pendingStreamIds.size;
-                
-                if (newCount > 0) {
-                    setNewAlertIds(prev => {
-                        const next = new Set(prev);
-                        pendingStreamIds.forEach(id => rememberAlert(next, id, 500));
-                        return next;
-                    });
+        let connected = false, hasConnected = false, disposed = false;
+        let request: AbortController | undefined;
+        const flush = createAlertRefresh(() => setPendingCount(pending.current.size));
+        const matches = (alert: Alert) => {
+            const { severity = '', status = '' } = paramsRef.current;
+            return (!severity || severity.split(',').includes(alert.severity)) && (!status || status.split(',').includes(alert.status));
+        };
+        const queue = (alert: Alert) => { if (alert?.id && matches(alert)) { rememberAlert(pending.current, alert.id, 1000); flush.schedule(); } };
+        const probe = async () => {
+            if (disposed || request || document.visibilityState !== 'visible') return;
+            request = new AbortController();
+            try {
+                const current = paramsRef.current;
+                const params: Record<string, string> = { ...current, limit: '25', sort: 'created_at', order: 'desc', date_to: new Date().toISOString() };
+                delete params.cursor;
+                const page = await alertsApi.page(params, request.signal);
+                if (disposed) return;
+                const known = new Map(visibleAlerts.current.map(alert => [alert.id, JSON.stringify(alert)]));
+                const fence = Date.parse(current.date_to);
+                for (const alert of page.data) {
+                    const old = known.get(alert.id);
+                    if (old ? old !== JSON.stringify(alert) : Date.parse(alert.created_at || alert.timestamp) > fence) queue(alert);
                 }
-                
-                pendingStreamIds.clear();
-
-                const refetchType = document.visibilityState === 'visible' ? 'active' : 'none';
-                void queryClient.invalidateQueries({ queryKey: ['alerts'], refetchType }, { cancelRefetch: false });
-                void queryClient.invalidateQueries({ queryKey: ['alertStats'], refetchType }, { cancelRefetch: false });
-
-                if (newCount > 0 && document.visibilityState === 'visible') {
-                    showToast(`Received ${newCount} new alert${newCount > 1 ? 's' : ''}`, 'success');
-                }
+            } catch { /* Keep the current page; retry on the next visible interval. */ }
+            finally { request = undefined; }
+        };
+        const stream = createAlertStream(queue, undefined, online => {
+            connected = online;
+            if (online && hasConnected) void probe();
+            if (online) hasConnected = true;
         });
-
-        let hasConnected = false;
-        const onConnectionChange = (connected: boolean) => {
-            setStreamConnected(connected);
-            if (connected && hasConnected) refresh.schedule();
-            if (connected) hasConnected = true;
-        };
-        const stream = createAlertStream((alert) => {
-            if (!alert?.id) return;
-            if (!seenAlertIdsRef.current.has(alert.id)) {
-                rememberAlert(seenAlertIdsRef.current, alert.id);
-                rememberAlert(pendingStreamIds, alert.id);
-            }
-            // Existing alert IDs can carry aggregation/status updates too.
-            refresh.schedule();
-        }, undefined, onConnectionChange);
-
-        return () => {
-            stream.close();
-            refresh.dispose();
-            pendingStreamIds.clear();
-        };
-    }, [queryClient, showToast]);
-
-    // Mutations
-    const updateStatusMutation = useMutation({
-        mutationFn: ({ id, status }: { id: string; status: string }) =>
-            alertsApi.updateStatus(id, status),
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['alerts'] });
-            queryClient.invalidateQueries({ queryKey: ['alertStats'] });
-            showToast('Alert status updated', 'success');
-        },
-        onError: () => {
-            showToast('Failed to update alert status', 'error');
-        },
-    });
-
-    const bulkUpdateMutation = useMutation({
-        mutationFn: ({ ids, status }: { ids: string[]; status: string }) =>
-            alertsApi.bulkUpdateStatus(ids, status),
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['alerts'] });
-            queryClient.invalidateQueries({ queryKey: ['alertStats'] });
-            setSelectedIds(new Set());
-            showToast(`${selectedIds.size} alerts updated`, 'success');
-        },
-        onError: () => {
-            showToast('Failed to update alerts', 'error');
-        },
-    });
-
-    // Handlers
+        const timer = setInterval(() => { if (!connected) void probe(); }, 5000);
+        const onVisible = () => { if (document.visibilityState === 'visible') void probe(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => { disposed = true; clearInterval(timer); request?.abort(); flush.dispose(); stream.close(); document.removeEventListener('visibilitychange', onVisible); };
+    }, []);
+    const refresh = () => {
+        setNewAlertIds(new Set(pending.current)); pending.current.clear(); setPendingCount(0); clearSelection();
+        query.setFilters({ date_to: new Date().toISOString() });
+    };
+    // An analyst's own change re-reads the current page with the same cursor and
+    // fence, so rows stay in place (a row leaves only if it no longer matches).
+    const reloadPage = () => {
+        void queryClient.invalidateQueries({ queryKey: ['alertStats'] });
+        void queryClient.invalidateQueries({ queryKey: ['alerts', 'page'] });
+    };
+    const update = useMutation({ mutationFn: ({ id, status }: { id: string; status: string }) => alertsApi.updateStatus(id, status), onSuccess: (_data, { id }) => {
+        reloadPage(); void queryClient.invalidateQueries({ queryKey: ['alert', id] });
+        showToast('Alert status updated', 'success');
+    }, onError: () => showToast('Failed to update alert status', 'error') });
+    const bulk = useMutation({ mutationFn: ({ ids, status }: { ids: string[]; status: string }) => alertsApi.bulkUpdateStatus(ids, status), onSuccess: (_data, { ids }) => {
+        clearSelection(); reloadPage(); showToast(`${ids.length} alert${ids.length === 1 ? '' : 's'} updated`, 'success');
+    }, onError: () => showToast('Failed to update alerts', 'error') });
     const handleStatusChange = useCallback(async (id: string, status: string, requireSuccess = false) => {
-        try {
-            await updateStatusMutation.mutateAsync({ id, status });
-            setSelectedAlert(null);
-        } catch (err) {
-            // The exception dialog needs a rejection to retry only its follow-up.
-            // Other action buttons already surface the mutation's error toast.
-            if (requireSuccess) throw err;
-        }
-    }, [updateStatusMutation]);
-
-    const handleBulkAction = useCallback((status: string) => {
-        bulkUpdateMutation.mutate({ ids: Array.from(selectedIds), status });
-    }, [bulkUpdateMutation, selectedIds]);
-
-    const toggleSelectAll = useCallback(() => {
-        if (selectedIds.size === alerts.length) {
-            setSelectedIds(new Set());
-        } else {
-            setSelectedIds(new Set(alerts.map((a) => a.id)));
-        }
-    }, [selectedIds, alerts]);
-
-    const toggleSelect = useCallback((id: string) => {
-        const newSet = new Set(selectedIds);
-        if (newSet.has(id)) {
-            newSet.delete(id);
-        } else {
-            newSet.add(id);
-        }
-        setSelectedIds(newSet);
-    }, [selectedIds]);
-
-    const toggleSort = useCallback((field: SortField) => {
-        if (sortBy === field) {
-            setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
-        } else {
-            setSortBy(field);
-            setSortOrder('desc');
-        }
-        setPage(1);
-    }, [sortBy, sortOrder]);
-
-    const clearSelection = useCallback(() => {
-        setSelectedIds(new Set());
-    }, []);
-
-    // Wrapper for setPageSize that resets page
-    const handleSetPageSize = useCallback((size: number) => {
-        setPageSize(size);
-        setPage(1);
-    }, []);
-
-    return {
-        // Data
-        alerts,
-        total,
-        totalPages,
-        agentHostnameMap,
-
-        // Loading states
-        isLoading,
-        isError,
-        error,
-
-        // Pagination
-        page,
-        pageSize,
-        setPage,
-        setPageSize: handleSetPageSize,
-
-        // Sorting
-        sortBy,
-        sortOrder,
-        toggleSort,
-
-        // Filters
-        filters,
-        dateRange,
-        setFilters,
-        setDateRange,
-
-        // Selection
-        selectedIds,
-        selectedAlert: effectiveSelectedAlert,
-        toggleSelectAll,
-        toggleSelect,
-        setSelectedAlert,
-        clearSelection,
-
-        // Actions
-        handleStatusChange,
-        handleBulkAction,
-        isUpdating: updateStatusMutation.isPending,
-        isBulkUpdating: bulkUpdateMutation.isPending,
-        newAlertIds,
+        try { await update.mutateAsync({ id, status }); setSelectedAlert(null); }
+        catch (error) { if (requireSuccess) throw error; }
+    }, [update]);
+    const handleBulkAction = (status: string) => {
+        if (query.busy) return;
+        const ids = alerts.filter(a => selectedIds.has(a.id)).map(a => a.id);
+        if (ids.length) bulk.mutate({ ids, status });
+    };
+    const toggleSelect = (id: string) => {
+        if (query.busy || !alerts.some(a => a.id === id)) return;
+        setSelectedIds(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+    };
+    const toggleSelectAll = () => { if (!query.busy) setSelectedIds(selectedIds.size === alerts.length ? new Set() : new Set(alerts.map(a => a.id))); };
+    return { alerts, agentHostnameMap, isLoading: query.isLoading, isError: query.isError, error: query.error,
+        pagination: query, pendingCount, refresh, retry: () => query.refetch(),
+        filters, dateRange,
+        setFilters, setDateRange: (range: DateRange) => query.setFilters({ date_from: range.from?.toISOString(), date_to: range.to?.toISOString() }),
+        sortBy: (query.params.sort === 'risk_score' ? 'risk_score' : 'timestamp') as SortField, sortOrder: (query.params.order === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc',
+        // Keyset sorts the server supports: creation time and risk score.
+        toggleSort: (field: SortField) => {
+            const sort = field === 'risk_score' ? 'risk_score' : field === 'timestamp' ? 'created_at' : '';
+            if (!sort) return;
+            const order = query.params.sort === sort && query.params.order !== 'asc' ? 'asc' : 'desc';
+            query.setFilters({ sort, order });
+        },
+        selectedIds, selectedAlert: detail.data?.id === selectedAlert?.id ? detail.data ?? null : selectedAlert, setSelectedAlert,
+        toggleSelectAll, toggleSelect, clearSelection, handleStatusChange, handleBulkAction,
+        isUpdating: update.isPending, isBulkUpdating: bulk.isPending, newAlertIds,
     };
 }
-
+export type UseAlertsReturn = ReturnType<typeof useAlerts>;
 export default useAlerts;

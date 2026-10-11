@@ -3,7 +3,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/handlers"
 	"github.com/edr-platform/connection-manager/pkg/models"
+	"github.com/edr-platform/shared/pagination"
 )
 
 type contextPolicyRequest struct {
@@ -92,6 +92,7 @@ func (h *Handlers) ListContextPolicies(c echo.Context) error {
 		h.logger.WithError(err).Error("Failed to list context policies")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list context policies")
 	}
+	items = capList(c, items)
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"data":  items,
 		"total": len(items),
@@ -419,100 +420,10 @@ func (h *Handlers) DeleteAlert(c echo.Context) error {
 func (h *Handlers) SearchEvents(c echo.Context) error {
 	var req EventSearchRequest
 	if err := c.Bind(&req); err != nil {
-		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
+		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid search body")
 	}
-	if h.eventRepo == nil {
-		return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Event repository is not available")
-	}
+	return h.eventPage(c, req)
 
-	// Validate defaults
-	limit := req.Limit
-	offset := req.Offset
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 10000 {
-		limit = 10000
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	// Convert request to repository request
-	filters := make([]repository.EventSearchFilter, 0, len(req.Filters))
-	for _, f := range req.Filters {
-		filters = append(filters, repository.EventSearchFilter{
-			Field:    f.Field,
-			Operator: f.Operator,
-			Value:    f.Value,
-		})
-	}
-
-	rows, total, err := h.eventRepo.Search(c.Request().Context(), repository.EventSearchRequest{
-		Filters:  filters,
-		Logic:    req.Logic,
-		TimeFrom: req.TimeRange.From,
-		TimeTo:   req.TimeRange.To,
-		Limit:    limit,
-		Offset:   offset,
-	})
-	if err != nil {
-		return errorResponse(c, http.StatusInternalServerError, "SEARCH_FAILED", err.Error())
-	}
-
-	out := make([]EventSummary, 0, len(rows))
-	for _, r := range rows {
-		es := EventSummary{
-			ID:        r.ID,
-			AgentID:   r.AgentID,
-			EventType: r.EventType,
-			Severity:  r.Severity,
-			Timestamp: r.Timestamp,
-			Summary:   r.Summary,
-		}
-		// Decode raw payload so the dashboard gets typed fields (action, name, pid, rule, etc.)
-		// without needing a second /events/:id fetch for every row.
-		if len(r.Raw) > 0 {
-			var raw map[string]interface{}
-			if err := json.Unmarshal(r.Raw, &raw); err == nil {
-				// Prefer the nested "data" object if present, otherwise use top-level raw.
-				if nested, ok := raw["data"].(map[string]interface{}); ok {
-					es.Data = nested
-				} else {
-					// Flatten: copy useful keys from the top-level raw into Data.
-					flat := make(map[string]interface{})
-					for _, k := range []string{
-						"action", "autonomous", "name", "process_name",
-						"pid", "ppid", "command_line", "parent_name",
-						"matched_rule_id", "matched_rule_title", "decision_mode",
-						"kill_tree", "kill_output", "kill_error",
-						"user_name", "is_elevated", "signature_status",
-						"hostname",
-					} {
-						if v, exists := raw[k]; exists {
-							flat[k] = v
-						}
-					}
-					if len(flat) > 0 {
-						es.Data = flat
-					}
-				}
-				// Also pull severity from raw if not set
-				if es.Severity == "" || es.Severity == "informational" {
-					if s, ok := raw["severity"].(string); ok && s != "" {
-						es.Severity = s
-					}
-				}
-			}
-		}
-		out = append(out, es)
-	}
-
-	return c.JSON(http.StatusOK, EventListResponse{
-		Data:       out,
-		Pagination: PaginationResponse{Total: total, Limit: limit, Offset: offset},
-		Meta:       responseMeta(c),
-	})
 }
 
 // GetEventStats returns event statistics.
@@ -676,14 +587,18 @@ func (h *Handlers) ListUsers(c echo.Context) error {
 		filter.Search = &v
 	}
 	if v := c.QueryParam("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
-			filter.Limit = n
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return errorResponse(c, http.StatusBadRequest, "INVALID_PAGINATION", "limit must be a positive integer")
 		}
+		filter.Limit = min(n, pagination.MaxLimit)
 	}
 	if v := c.QueryParam("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			filter.Offset = n
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 1000000 {
+			return errorResponse(c, http.StatusBadRequest, "INVALID_PAGINATION", "offset must be between 0 and 1000000")
 		}
+		filter.Offset = n
 	}
 
 	total, err := h.userRepo.Count(c.Request().Context(), filter)
@@ -1025,7 +940,6 @@ func (h *Handlers) ChangePassword(c echo.Context) error {
 	})
 }
 
-
 // splitBearer extracts the token string from a "Bearer <token>" header value.
 // Returns empty string if the header is malformed.
 func splitBearer(authHeader string) string {
@@ -1057,92 +971,6 @@ var actionGroupToDB = map[string][]string{
 }
 
 // ListAuditLogs returns audit logs from the database with filtering and pagination.
-func (h *Handlers) ListAuditLogs(c echo.Context) error {
-	emptyResp := func() error {
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"data":       []interface{}{},
-			"pagination": PaginationResponse{Total: 0, Limit: 50, Offset: 0},
-			"meta":       responseMeta(c),
-		})
-	}
-
-	if h.auditRepo == nil {
-		return emptyResp()
-	}
-
-	filter := repository.AuditLogFilter{
-		Limit:  50,
-		Offset: 0,
-	}
-
-	// Action filter: map frontend group → DB value(s)
-	if v := c.QueryParam("action"); v != "" {
-		if dbActions, ok := actionGroupToDB[v]; ok {
-			// Use first value for simple equality; for groups use first action
-			// (the repository supports single action filter; multi-value requires
-			// a schema/repo change — for now first in list is most representative)
-			filter.Action = &dbActions[0]
-		} else {
-			// Passed value is a direct DB action string
-			filter.Action = &v
-		}
-	}
-
-	if v := c.QueryParam("resource_type"); v != "" {
-		filter.ResourceType = &v
-	}
-	if v := c.QueryParam("user_id"); v != "" {
-		if uid, err := uuid.Parse(v); err == nil {
-			filter.UserID = &uid
-		}
-	}
-	if v := c.QueryParam("from"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			filter.StartTime = &t
-		}
-	}
-	if v := c.QueryParam("to"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			filter.EndTime = &t
-		}
-	}
-	if v := c.QueryParam("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
-			filter.Limit = n
-		}
-	}
-	if v := c.QueryParam("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			filter.Offset = n
-		}
-	}
-
-	ctx := c.Request().Context()
-
-	logs, err := h.auditRepo.List(ctx, filter)
-	if err != nil {
-		h.logger.WithError(err).Warn("Failed to list audit logs")
-		return emptyResp()
-	}
-
-	total, err := h.auditRepo.Count(ctx, filter)
-	if err != nil {
-		h.logger.WithError(err).Warn("Failed to count audit logs")
-		total = int64(len(logs))
-	}
-
-	// Normalise nil slice → empty slice so JSON shows [] not null
-	if logs == nil {
-		logs = []*models.AuditLog{}
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"data":       logs,
-		"pagination": PaginationResponse{Total: int(total), Limit: filter.Limit, Offset: filter.Offset, HasMore: int64(filter.Offset+filter.Limit) < total},
-		"meta":       responseMeta(c),
-	})
-}
-
 // GetAuditLog returns a single audit log by ID.
 func (h *Handlers) GetAuditLog(c echo.Context) error {
 	idStr := c.Param("id")

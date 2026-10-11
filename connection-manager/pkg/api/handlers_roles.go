@@ -25,6 +25,7 @@ func (h *Handlers) ListRoles(c echo.Context) error {
 		h.logger.WithError(err).Error("Failed to list roles")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list roles")
 	}
+	roles = capList(c, roles)
 
 	data := make([]RoleResponse, 0, len(roles))
 	for _, r := range roles {
@@ -178,6 +179,7 @@ func (h *Handlers) ListPermissions(c echo.Context) error {
 		h.logger.WithError(err).Error("Failed to list permissions")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list permissions")
 	}
+	perms = capList(c, perms)
 
 	data := make([]PermissionResponse, 0, len(perms))
 	for _, p := range perms {

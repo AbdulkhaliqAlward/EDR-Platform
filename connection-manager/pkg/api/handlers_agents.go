@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/edr-platform/shared/pagination"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,13 +32,32 @@ func (h *Handlers) ListAgents(c echo.Context) error {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid query parameters")
 	}
 
-	// Set defaults
-	if req.Limit == 0 {
-		req.Limit = 50
+	q := c.QueryParams()
+	if v := q.Get("sort_by"); v != "" {
+		if q.Get("sort") != "" && q.Get("sort") != v {
+			return errorResponse(c, 400, "INVALID_PAGINATION", "conflicting sort parameters")
+		}
+		q.Set("sort", v)
 	}
-
+	if v := q.Get("sort_order"); v != "" {
+		if q.Get("order") != "" && q.Get("order") != v {
+			return errorResponse(c, 400, "INVALID_PAGINATION", "conflicting order parameters")
+		}
+		q.Set("order", v)
+	}
+	p, err := pagination.Parse(q, pagination.Options{Scope: "agents", Offset: true, DefaultSort: "created_at", Sorts: repository.AgentSortColumns})
+	if err != nil {
+		return errorResponse(c, 400, "INVALID_PAGINATION", err.Error())
+	}
+	if len(req.Search) > 512 {
+		return errorResponse(c, 400, "INVALID_FILTER", "search exceeds 512 characters")
+	}
+	req.Limit, req.Offset, req.SortBy, req.SortOrder = p.Limit, p.Offset, p.Sort, p.Order
+	ctx, cancel := context.WithTimeout(c.Request().Context(), pagination.QueryTimeout)
+	defer cancel()
 	// Build repository filter
 	filter := repository.AgentFilter{
+		Page:      &p,
 		Limit:     req.Limit,
 		Offset:    req.Offset,
 		SortBy:    req.SortBy,
@@ -54,17 +74,17 @@ func (h *Handlers) ListAgents(c echo.Context) error {
 	}
 
 	// Query agents from database
-	agents, err := h.agentSvc.ListAgents(c.Request().Context(), filter)
+	agents, err := h.agentSvc.ListAgents(ctx, filter)
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to list agents")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve agents")
 	}
 
 	// Get total count for pagination
-	total, err := h.agentSvc.CountAgents(c.Request().Context(), filter)
+	total, err := h.agentSvc.CountAgents(ctx, filter)
 	if err != nil {
 		h.logger.WithError(err).Warn("Failed to count agents")
-		total = int64(len(agents))
+		return errorResponse(c, 500, "QUERY_FAILED", "Unable to count agents")
 	}
 
 	// Map to API response models — populate ALL fields for InlineAgentDetail panel
@@ -107,8 +127,11 @@ func (h *Handlers) ListAgents(c echo.Context) error {
 		summaries = append(summaries, summary)
 	}
 
+	page := pagination.BuildOffset(summaries, p)
 	return c.JSON(http.StatusOK, AgentListResponse{
-		Data: summaries,
+		PageInfo: page.PageInfo,
+		Total:    &pagination.Total{Value: int(total)},
+		Data:     page.Data,
 		Pagination: PaginationResponse{
 			Total:   int(total),
 			Limit:   req.Limit,
@@ -409,102 +432,21 @@ func (h *Handlers) GetAgentStats(c echo.Context) error {
 
 // GetAgentEvents returns events for an agent.
 func (h *Handlers) GetAgentEvents(c echo.Context) error {
-	idStr := c.Param("id")
-	agentID, err := uuid.Parse(idStr)
+	agentID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid agent ID format")
+		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid agent ID")
 	}
+	return h.eventPage(c, EventSearchRequest{Filters: []EventFilter{{Field: "agent_id", Operator: "equals", Value: agentID.String()}}})
 
-	if h.eventRepo == nil {
-		return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Event repository is not available")
-	}
-
-	limit, offset := 50, 0
-	_ = echo.QueryParamsBinder(c).Int("limit", &limit).Int("offset", &offset)
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 500 {
-		limit = 500
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	rows, total, err := h.eventRepo.ListByAgent(c.Request().Context(), agentID, limit, offset)
-	if err != nil {
-		return errorResponse(c, http.StatusInternalServerError, "QUERY_FAILED", err.Error())
-	}
-
-	out := make([]EventSummary, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, EventSummary{
-			ID:        r.ID,
-			AgentID:   r.AgentID,
-			EventType: r.EventType,
-			Timestamp: r.Timestamp,
-			Summary:   r.Summary,
-		})
-	}
-
-	return c.JSON(http.StatusOK, EventListResponse{
-		Data:       out,
-		Pagination: PaginationResponse{Total: total, Limit: limit, Offset: offset},
-		Meta: ResponseMeta{
-			RequestID: c.Response().Header().Get(echo.HeaderXRequestID),
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		},
-	})
 }
 
 // GetAgentCommands returns command history for an agent (same row shape as Action Center list).
 func (h *Handlers) GetAgentCommands(c echo.Context) error {
-	idStr := c.Param("id")
-	agentID, err := uuid.Parse(idStr)
+	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return errorResponse(c, http.StatusBadRequest, "INVALID_ID", "Invalid agent ID format")
+		return errorResponse(c, 400, "INVALID_ID", "Invalid agent ID format")
 	}
-
-	if h.commandRepo == nil {
-		return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Command repository is not available")
-	}
-
-	limit, offset := 50, 0
-	_ = echo.QueryParamsBinder(c).Int("limit", &limit).Int("offset", &offset)
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
-	filter := repository.CommandListFilter{
-		AgentID:   &agentID,
-		Limit:     limit,
-		Offset:    offset,
-		SortBy:    "issued_at",
-		SortOrder: "desc",
-	}
-
-	items, total, err := h.commandRepo.ListAll(c.Request().Context(), filter)
-	if err != nil {
-		h.logger.WithError(err).Error("GetAgentCommands: ListAll failed")
-		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve commands")
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"data": items,
-		"pagination": PaginationResponse{
-			Total:   int(total),
-			Limit:   limit,
-			Offset:  offset,
-			HasMore: int64(offset+limit) < total,
-		},
-		"meta": ResponseMeta{
-			RequestID: c.Response().Header().Get(echo.HeaderXRequestID),
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		},
-	})
+	return h.commandPage(c, &id)
 }
 
 // ExecuteAgentCommand pushes a command to a live agent via the AgentRegistry.

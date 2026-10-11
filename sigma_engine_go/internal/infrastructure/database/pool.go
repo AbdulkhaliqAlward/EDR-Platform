@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"github.com/edr-platform/shared/pagination"
 	"os"
 	"time"
 
@@ -109,6 +110,8 @@ func NewPool(ctx context.Context, cfg Config) (*Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse database config: %w", err)
 	}
+
+	pagination.ConfigureKey([]byte(poolConfig.ConnConfig.Password))
 
 	poolConfig.MaxConns = cfg.MaxConns
 	poolConfig.MinConns = cfg.MinConns
