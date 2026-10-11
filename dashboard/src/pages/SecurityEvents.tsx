@@ -379,7 +379,7 @@ export default function SecurityEvents() {
                     </div>
                 )}
 
-                <PaginationControls info={pager.info} page={pager.page} count={events.length} busy={pager.busy} onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
+                <PaginationControls info={pager.info} page={pager.page} count={events.length} busy={pager.busy} onNext={pager.next} onFirst={pager.first} onPrevious={pager.previous} onSize={pager.setPageSize} />
                 <Modal isOpen={!!selectedId} onClose={()=>setSelectedId(null)} title="Security event details">
                     {detail.isLoading ? <p role="status">Loading details...</p> : detail.isError ? <p role="alert">Unable to load details. <button className="btn btn-secondary" onClick={()=>detail.refetch()}>Retry</button></p> : <pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify(detail.data,null,2)}</pre>}
                 </Modal>

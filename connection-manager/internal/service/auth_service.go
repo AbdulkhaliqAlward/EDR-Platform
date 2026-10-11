@@ -215,8 +215,9 @@ func (s *authServiceImpl) completeLogin(ctx context.Context, user *models.User) 
 	user.RecordSuccessfulLogin()
 	s.userRepo.Update(ctx, user)
 
-	audit := models.NewAuditLog(user.ID, user.Username, models.AuditActionLoginSuccess, "user", user.ID)
-	s.auditRepo.Create(ctx, audit)
+	// The login-success audit entry is written once by the HTTP handler
+	// (issueSessionTokens), which also records client IP and user agent.
+	// Writing it here too produced two entries for every sign-in.
 
 	s.logger.WithField("username", user.Username).Info("User logged in successfully")
 

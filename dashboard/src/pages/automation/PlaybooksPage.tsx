@@ -3,6 +3,8 @@ import { useLocation, useSearchParams } from 'react-router-dom';
 import { AlertContextPanel } from '../../components/automation/AlertContextPanel';
 import { UserAssistant } from '../../components/automation/UserAssistant';
 import { PlaybookRunPanel } from '../../components/automation/PlaybookRunPanel';
+import { PaginationControls } from '../../components/PaginationControls';
+import { useClientPagination, useOffsetPageState } from '../../hooks/useClientPagination';
 import { apiErrorMessage } from '../../api/apiError';
 import { Play, Shield, Clock, TrendingUp, AlertTriangle, Plus, Terminal, X, Target, Trash2, Filter, Zap, ToggleRight, ChevronUp, ChevronDown, Pencil, History } from 'lucide-react';
 import {
@@ -117,6 +119,8 @@ export function PlaybooksPage() {
   const [catalog, setCatalog] = useState<ResponseCatalog | null>(null);
   const [agents, setAgents] = useState<{ id: string; hostname: string }[]>([]);
   const [executions, setExecutions] = useState<PlaybookExecution[]>([]);
+  const [executionsHasNext, setExecutionsHasNext] = useState(false);
+  const playbookPager = useClientPagination(playbooks, { namespace: 'playbooks' });
 
   // Run modal
   const [selectedPlaybook, setSelectedPlaybook] = useState<Playbook | null>(null);
@@ -223,13 +227,20 @@ export function PlaybooksPage() {
     }
   }, []);
 
+  // Run history grows without bound: page it on the server (limit + 1 probe row).
+  const runsPager = useOffsetPageState({ namespace: 'runs', resetKey: activeAlertId, defaultLimit: 10 });
+  const { limit: runsLimit, offset: runsOffset } = runsPager;
   const fetchExecutions = useCallback(async () => {
     try {
-      setExecutions(await automationApi.listExecutions(activeAlertId ? { alert_id: activeAlertId, limit: 20 } : { limit: 20 }));
+      const filter = { limit: runsLimit + 1, offset: runsOffset, ...(activeAlertId ? { alert_id: activeAlertId } : {}) };
+      const rows = await automationApi.listExecutions(filter);
+      setExecutionsHasNext(rows.length > runsLimit);
+      setExecutions(rows.slice(0, runsLimit));
     } catch {
       setExecutions([]);
+      setExecutionsHasNext(false);
     }
-  }, [activeAlertId]);
+  }, [activeAlertId, runsLimit, runsOffset]);
 
   useEffect(() => {
     fetchPlaybooks();
@@ -511,8 +522,10 @@ export function PlaybooksPage() {
             <p className="text-sm font-medium text-slate-500 mt-4">Loading playbooks...</p>
           </div>
         ) : (
+          <>
           <div className="divide-y divide-slate-200 dark:divide-slate-700/80">
-            {playbooks.map((playbook) => (
+            {playbooks.length === 0 && <p className="p-6 text-sm text-slate-500">No playbooks configured yet.</p>}
+            {playbookPager.pageRows.map((playbook) => (
               <div key={playbook.id} className="p-6 hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                 <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
                   <div className="flex-1">
@@ -599,6 +612,8 @@ export function PlaybooksPage() {
               </div>
             ))}
           </div>
+          {playbooks.length > 0 && <PaginationControls {...playbookPager.controls} label="playbooks" />}
+          </>
         )}
       </div>
 
@@ -613,9 +628,10 @@ export function PlaybooksPage() {
           </div>
           <button onClick={fetchExecutions} className="text-sm text-indigo-600 dark:text-indigo-400 hover:underline">Refresh</button>
         </div>
-        {executions.length === 0 ? (
+        {executions.length === 0 && runsPager.page === 1 ? (
           <p className="p-6 text-sm text-slate-500">No runs yet.</p>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-xs uppercase text-slate-500 bg-slate-50 dark:bg-slate-900/40">
@@ -645,6 +661,8 @@ export function PlaybooksPage() {
               </tbody>
             </table>
           </div>
+          <PaginationControls {...runsPager.controls(executions.length, executionsHasNext)} label="runs" />
+          </>
         )}
       </div>
 

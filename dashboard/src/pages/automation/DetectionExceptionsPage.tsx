@@ -4,6 +4,8 @@ import { authApi, detectionExceptionsApi, type DetectionException } from '../../
 import { apiErrorMessage } from '../../api/apiError';
 import { ConfirmDialog } from '../../components/Modal';
 import { CreateExceptionModal } from '../../components/alerts/CreateExceptionModal';
+import { PaginationControls } from '../../components/PaginationControls';
+import { useClientPagination } from '../../hooks/useClientPagination';
 
 type ExceptionState = 'active' | 'disabled' | 'expired';
 const stateOf = (exception: DetectionException): ExceptionState => exception.expires_at && new Date(exception.expires_at).getTime() <= Date.now() ? 'expired' : exception.enabled ? 'active' : 'disabled';
@@ -67,6 +69,7 @@ export function DetectionExceptionsPage() {
 
     const term = search.trim().toLowerCase();
     const visible = items.filter(item => (filter === 'all' || stateOf(item) === filter) && [item.name, item.reason, item.rule_title, item.rule_id, item.hostname, item.agent_id, ...item.conditions.map(c => `${c.field} ${c.op} ${c.value}`)].join(' ').toLowerCase().includes(term));
+    const pager = useClientPagination(visible, { namespace: 'exceptions', resetKey: `${filter}|${term}` });
     const active = items.filter(item => stateOf(item) === 'active').length;
     const expired = items.filter(item => stateOf(item) === 'expired').length;
     const hits = items.reduce((count, item) => count + item.hit_count, 0);
@@ -107,7 +110,7 @@ export function DetectionExceptionsPage() {
                 <p className="mt-2 text-xs text-slate-500">{error && !items.length ? 'Use Refresh to try again.' : items.length ? 'Change the search or state filter.' : 'Create a precise exception from an alert using “False Positive…”, or choose New exception.'}</p>
             </div> : <div className="space-y-3">
                 <p className="text-xs text-slate-500">Showing {visible.length} of {items.length} exceptions · Hit counts update periodically.</p>
-                {visible.map(exception => {
+                {pager.pageRows.map(exception => {
                     const state = stateOf(exception);
                     return <article key={exception.id} aria-label={exception.name} className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800">
                         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -136,6 +139,7 @@ export function DetectionExceptionsPage() {
                         <p className="mt-3 break-words border-t border-slate-100 pt-3 text-[11px] text-slate-400 dark:border-slate-700">Created by {exception.created_by || '—'} · {date(exception.created_at)}</p>
                     </article>;
                 })}
+                <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800"><PaginationControls {...pager.controls} label="exceptions" /></div>
             </div>}
         {creating && <CreateExceptionModal isOpen onClose={() => setCreating(false)} onCreated={() => load()} />}
         {deleting && <ConfirmDialog isOpen onClose={() => { if (!mutation.current) setDeleting(null); }} onConfirm={() => void remove()} title="Delete detection exception" message={`Delete “${deleting.name}”? Future matching activity will be evaluated without this exception.`} confirmText="Delete exception" variant="danger" isLoading={!!busy} errorMessage={actionError} />}

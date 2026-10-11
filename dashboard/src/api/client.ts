@@ -641,15 +641,23 @@ export interface RolesPermissionsMatrixPayload {
 // ============================================================================
 
 // Phase 2 — Endpoint Risk Intelligence
+/** Current risk of one existing endpoint: active alerts seen within the window. */
 export interface EndpointRiskSummary {
     agent_id: string;
-    total_alerts: number;
+    total_alerts: number;   // active alerts in the window
     peak_risk_score: number;
     avg_risk_score: number;
     critical_count: number; // risk_score >= 90
     high_count: number;     // risk_score 70-89
-    open_count: number;
+    medium_count?: number;  // risk_score 40-69
+    open_count: number;     // untriaged (status open)
     last_alert_at: string;
+    hostname?: string;
+    os_type?: string;
+    agent_status?: string;
+    device_criticality?: string;
+    role_risk?: string;
+    network_anomaly?: string;
 }
 
 /** Rows per server request: every list endpoint caps `limit` at 100. */
@@ -722,9 +730,10 @@ export const alertsApi = {
         return response.data;
     },
     // Phase 2: aggregated per-agent risk posture from connection-manager
-    endpointRisk: async () => {
-        const response = await connectionApi.get<{ data: EndpointRiskSummary[]; total: number }>(
-            '/api/v1/alerts/endpoint-risk'
+    /** windowDays: how recently an alert must have been active to count (server default 7). */
+    endpointRisk: async (windowDays?: number) => {
+        const response = await connectionApi.get<{ data: EndpointRiskSummary[]; total: number; window_days?: number }>(
+            '/api/v1/alerts/endpoint-risk', { params: windowDays ? { window_days: windowDays } : undefined }
         );
         return response.data;
     },
@@ -1459,6 +1468,7 @@ export interface SignatureHashRow {
     severity?: string;
     source?: string;
     version: number;
+    first_seen?: string;
 }
 
 export interface SignatureListResponse {
@@ -1644,8 +1654,8 @@ export const vulnerabilityApi = {
         search?: string;
         kev_only?: boolean;
         edr_signal_only?: boolean;
-    }) => {
-        const response = await connectionApi.get<VulnerabilityListResponse>('/api/v1/vuln/findings', { params });
+    }, signal?: AbortSignal) => {
+        const response = await connectionApi.get<VulnerabilityListResponse>('/api/v1/vuln/findings', { params, signal });
         return response.data;
     },
     getFinding: async (id: string) => {
@@ -1730,6 +1740,11 @@ export const signaturesApi = {
             stats?: { count: number; max_version: number };
             meta?: { request_id?: string; timestamp?: string };
         }>('/api/v1/signatures/sync');
+        return response.data;
+    },
+    /** Keyset-paginated catalog, newest first; search = exact SHA-256 or name/family text. */
+    catalog: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<SignatureHashRow>> => {
+        const response = await connectionApi.get<Paged<SignatureHashRow>>('/api/v1/signatures/catalog', { params, signal });
         return response.data;
     },
     list: async (params?: { since_version?: number; limit?: number }): Promise<SignatureListResponse> => {
@@ -2290,8 +2305,11 @@ export const commandsApi = {
         return response.data;
     },
     list: async (params?: { limit?: number; offset?: number; cursor?: string; status?: string; command_type?: string; agent_id?: string; sort_by?: string; sort_order?: string; from?: string; to?: string }) => {
-        const response = await connectionApi.get<Paged<CommandListItem>>('/api/v1/commands', { params });
-        return response.data;
+        const { offset: _offset, ...rest } = params ?? {};
+        void _offset; // commands use cursors
+        const { last, data } = await readUpTo<CommandListItem, Paged<CommandListItem>>(rest.limit ?? 25, async (limit, cursor) =>
+            (await connectionApi.get<Paged<CommandListItem>>('/api/v1/commands', { params: { ...rest, limit, ...(cursor ? { cursor } : {}) } })).data);
+        return { ...last, data };
     },
     get: async (commandId: string) => {
         const response = await connectionApi.get<{ data: CommandListItem }>(`/api/v1/commands/${commandId}`);

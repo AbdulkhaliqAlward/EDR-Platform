@@ -195,7 +195,7 @@ func (h *Handlers) DeleteEnrollmentToken(c echo.Context) error {
 	}
 
 	// Audit: token deleted
-	h.fireAudit(c, "TOKEN_DELETED", "token", id, "", false, "")
+	h.fireAudit(c, "token_deleted", "token", id, "", false, "")
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "deleted"})
 }

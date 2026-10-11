@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { changeFilters, changePage, emptyPage, readPage, pageSearch, mergePageSearch, type Paged } from './paginationState';
+import { changeFilters, changePage, emptyPage, firstPage, readPage, pageSearch, mergePageSearch, type Paged } from './paginationState';
 
 const EMPTY_ROWS: never[] = [];
 
@@ -52,7 +52,8 @@ export function usePaginatedQuery<T>({ name, defaults = {}, fetchPage, enabled =
     const canNavigate = query.isSuccess && !query.isFetching && !query.isPlaceholderData && !missingDefaults;
     const next = () => { if (canNavigate) setSearch(old => changePage(old, info, 'next')); };
     const previous = () => { if (canNavigate) setSearch(old => changePage(old, info, 'prev')); };
-    return { ...query, ...state, params, info, rows: query.data?.data ?? EMPTY_ROWS, next, previous, setFilters,
+    const first = () => { if (canNavigate) setSearch(old => firstPage(old)); };
+    return { ...query, ...state, params, info, rows: query.data?.data ?? EMPTY_ROWS, next, previous, first, setFilters,
         setPageSize: (limit: number) => setFilters({ limit: String(limit) }),
         reset: () => setFilters({}),
         busy: query.isFetching || missingDefaults,

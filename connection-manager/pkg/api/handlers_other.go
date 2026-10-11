@@ -325,16 +325,29 @@ func (h *Handlers) GetEndpointRisk(c echo.Context) error {
 		return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "Database is unavailable")
 	}
 
-	summaries, err := h.alertRepo.GetEndpointRiskSummary(c.Request().Context())
+	// window_days: how recently an alert must have been active to count
+	// (default 7, 1-90). Older open alerts no longer inflate current risk.
+	days := 7
+	if v := c.QueryParam("window_days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 90 {
+			return errorResponse(c, http.StatusBadRequest, "INVALID_PARAM", "window_days must be between 1 and 90")
+		}
+		days = n
+	}
+	ctx, cancel := context.WithTimeout(c.Request().Context(), pagination.QueryTimeout)
+	defer cancel()
+	summaries, err := h.alertRepo.GetEndpointRiskSummary(ctx, time.Now().Add(-time.Duration(days)*24*time.Hour))
 	if err != nil {
 		h.logger.WithError(err).Error("Failed to fetch endpoint risk summary")
 		return errorResponse(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to compute endpoint risk summary")
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"data":  summaries,
-		"total": len(summaries),
-		"meta":  responseMeta(c),
+		"data":        summaries,
+		"total":       len(summaries),
+		"window_days": days,
+		"meta":        responseMeta(c),
 	})
 }
 
@@ -959,15 +972,33 @@ func splitBearer(authHeader string) string {
 
 // actionGroupToDB maps frontend filter values to one or more DB action strings.
 // Returns a slice; if nil, use the value as-is (direct match).
+// Groups cover every action string the platform actually records (model
+// constants plus the dotted names used by newer handlers).
 var actionGroupToDB = map[string][]string{
-	"login":             {"user_login"},
-	"logout":            {"user_logout"},
-	"create":            {"user_created", "policy_created", "rule_created", "token_created", "agent_registered"},
-	"update":            {"user_updated", "policy_updated", "rule_updated"},
-	"delete":            {"user_deleted", "policy_deleted", "rule_deleted", "alert_deleted", "agent_deleted"},
+	"login":        {"user_login"},
+	"login_failed": {"user_login_failed", "auth_failed"},
+	"logout":       {"user_logout"},
+	"create": {"user_created", "policy_created", "rule_created", "token_created", "agent_registered", "role_created",
+		"response_script.create", "detection_exception.created"},
+	"update": {"user_updated", "policy_updated", "rule_updated", "role_updated", "password_changed",
+		"response_script.update", "detection_exception.updated", "change_settings"},
+	"delete": {"user_deleted", "policy_deleted", "rule_deleted", "alert_deleted", "agent_deleted", "agent.delete",
+		"role_deleted", "response_script.delete", "detection_exception.deleted", "token_deleted", "TOKEN_DELETED"},
+	"response":          {"execute_command", "isolate_network", "restore_network", "playbook.run"},
 	"execute_command":   {"execute_command"},
+	"isolation":         {"isolate_network", "restore_network"},
+	"playbook_run":      {"playbook.run"},
+	"alerts":            {"acknowledge_alert", "resolve_alert", "alert_deleted"},
 	"acknowledge_alert": {"acknowledge_alert"},
 	"resolve_alert":     {"resolve_alert"},
+	"agent_lifecycle": {"agent_registered", "agent_approved", "agent_suspended", "agent_deleted", "agent.delete",
+		"agent.build", "agent.uninstall_token.issue", "cert_issued", "cert_renewed", "cert_revoked"},
+	"tokens":      {"token_created", "token_revoked", "token_deleted", "TOKEN_DELETED"},
+	"access":      {"role_created", "role_updated", "role_deleted", "user_created", "user_updated", "user_deleted", "user_locked", "password_changed"},
+	"exceptions":  {"detection_exception.created", "detection_exception.updated", "detection_exception.deleted"},
+	"scripts":     {"response_script.create", "response_script.update", "response_script.delete"},
+	"policy":      {"policy_created", "policy_updated", "policy_deleted", "deploy_policy"},
+	"rate_limits": {"rate_limit_triggered"},
 }
 
 // ListAuditLogs returns audit logs from the database with filtering and pagination.

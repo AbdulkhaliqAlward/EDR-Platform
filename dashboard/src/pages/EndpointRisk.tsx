@@ -1,12 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
 import React, { useState, useMemo } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
     Cpu, AlertTriangle, TrendingUp, Shield, Search,
     ChevronRight, Activity, Clock, Zap,
     Monitor, RefreshCw
 } from 'lucide-react';
-import { alertsApi, agentsApi, type EndpointRiskSummary, type Agent } from '../api/client';
+import { alertsApi, type EndpointRiskSummary } from '../api/client';
 import { SkeletonKPICards, SkeletonChart } from '../components';
+import { PaginationControls } from '../components/PaginationControls';
+import { useClientPagination } from '../hooks/useClientPagination';
 
 // =========================================================================
 // Risk score helpers
@@ -115,22 +118,16 @@ const RiskArc = React.memo(function RiskArc({ score }: { score: number }) {
 // Endpoint Risk Card
 // =========================================================================
 
-interface MergedEndpoint extends EndpointRiskSummary {
-    hostname?: string;
-    os_type?: string;
-    agent_status?: string;
-    device_criticality?: string;
-    role_risk?: string;
-    network_anomaly?: string;
-}
+type MergedEndpoint = EndpointRiskSummary;
 
 const EndpointRiskCard = React.memo(function EndpointRiskCard({ ep, rank }: { ep: MergedEndpoint; rank: number }) {
     const tier = getRiskTier(ep.peak_risk_score);
 
     return (
-        <div className={`group relative flex items-center gap-4 p-4 rounded-xl border bg-white dark:bg-slate-800/60 hover:shadow-lg transition-all duration-300 cursor-default ${tier.glow} border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600`}>
+        <Link to={`/management/devices/${encodeURIComponent(ep.agent_id)}`} aria-label={`Open endpoint ${ep.hostname || ep.agent_id}`}
+            className={`group relative flex items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl border bg-white dark:bg-slate-800/60 hover:shadow-lg transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${tier.glow} border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600`}>
             {/* Rank badge */}
-            <div className="shrink-0 w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-900/60 flex items-center justify-center">
+            <div className="hidden sm:flex shrink-0 w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-900/60 items-center justify-center">
                 <span className="text-xs font-bold text-slate-500 dark:text-slate-400">{rank}</span>
             </div>
 
@@ -185,6 +182,11 @@ const EndpointRiskCard = React.memo(function EndpointRiskCard({ ep, rank }: { ep
                             {ep.high_count} high
                         </span>
                     )}
+                    {(ep.medium_count ?? 0) > 0 && (
+                        <span className="flex items-center gap-1 px-2 py-0.5 bg-amber-500/10 text-amber-500 rounded-full border border-amber-500/20 font-semibold">
+                            {ep.medium_count} medium
+                        </span>
+                    )}
                     <span className="flex items-center gap-1 px-2 py-0.5 bg-slate-100 dark:bg-slate-900/60 text-slate-500 rounded-full border border-slate-200 dark:border-slate-700">
                         <AlertTriangle className="w-3 h-3" />
                         {ep.open_count} open
@@ -197,7 +199,7 @@ const EndpointRiskCard = React.memo(function EndpointRiskCard({ ep, rank }: { ep
             </div>
 
             {/* Risk bar column */}
-            <div className="shrink-0 flex flex-col items-end gap-1.5 w-24">
+            <div className="hidden sm:flex shrink-0 flex-col items-end gap-1.5 w-24">
                 <div className="flex items-baseline gap-1">
                     <span className={`text-xs font-bold ${tier.color}`}>avg</span>
                     <span className={`text-sm font-bold ${tier.color}`}>{ep.avg_risk_score.toFixed(0)}</span>
@@ -208,11 +210,11 @@ const EndpointRiskCard = React.memo(function EndpointRiskCard({ ep, rank }: { ep
                         style={{ width: `${ep.avg_risk_score}%` }}
                     />
                 </div>
-                <span className="text-[10px] text-slate-400">{ep.total_alerts} alerts total</span>
+                <span className="text-[10px] text-slate-400">{ep.total_alerts} active alert{ep.total_alerts === 1 ? '' : 's'}</span>
             </div>
 
             <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-300 shrink-0 transition-colors" />
-        </div>
+        </Link>
     );
 });
 
@@ -287,105 +289,52 @@ function EmptyState() {
 // Main Page
 // =========================================================================
 
+const WINDOWS = [
+    { days: 1, label: '24 hours' },
+    { days: 7, label: '7 days' },
+    { days: 30, label: '30 days' },
+    { days: 90, label: '90 days' },
+] as const;
+type Tier = 'all' | 'critical' | 'high' | 'medium' | 'low';
+const tierOf = (score: number): Exclude<Tier, 'all'> => score >= 90 ? 'critical' : score >= 70 ? 'high' : score >= 40 ? 'medium' : 'low';
+
 export default function EndpointRisk() {
-    const [search, setSearch] = useState('');
-    const [tierFilter, setTierFilter] = useState<'all' | 'critical' | 'high' | 'medium' | 'low'>('all');
+    const [params, setParams] = useSearchParams();
+    const windowDays = WINDOWS.some(w => String(w.days) === params.get('window')) ? Number(params.get('window')) : 7;
+    const tierParam = params.get('tier') as Tier | null;
+    const tierFilter: Tier = tierParam && ['critical', 'high', 'medium', 'low'].includes(tierParam) ? tierParam : 'all';
+    const [search, setSearch] = useState(params.get('q') || '');
+    const setParam = (key: string, value: string | null) => setParams(old => {
+        const next = new URLSearchParams(old);
+        if (value) next.set(key, value); else next.delete(key);
+        next.delete('page');
+        return next;
+    }, { replace: true });
 
-    const { data: riskData, isLoading: riskLoading, refetch, isFetching } = useQuery({
-        queryKey: ['endpointRisk'],
-        queryFn: () => alertsApi.endpointRisk(),
+    // The server returns only existing, non-deleted endpoints with their
+    // identity, so no client-side merging (which conflated different machines
+    // sharing a hostname) and no capped agent list is needed.
+    const { data: riskData, isLoading: riskLoading, isError, refetch, isFetching } = useQuery({
+        queryKey: ['endpointRisk', windowDays],
+        queryFn: () => alertsApi.endpointRisk(windowDays),
         refetchInterval: 30000,
+        refetchIntervalInBackground: false,
     });
+    const endpoints: MergedEndpoint[] = useMemo(() => riskData?.data ?? [], [riskData]);
 
-    const { data: agentsData } = useQuery({
-        queryKey: ['agents', 'all'],
-        queryFn: () => agentsApi.list({ limit: 500 }),
-    });
+    const term = search.trim().toLowerCase();
+    const filtered = useMemo(() => endpoints.filter(ep =>
+        (!term || (ep.hostname || '').toLowerCase().includes(term) || ep.agent_id.toLowerCase().includes(term)) &&
+        (tierFilter === 'all' || tierOf(ep.peak_risk_score) === tierFilter)), [endpoints, term, tierFilter]);
+    const pager = useClientPagination(filtered, { resetKey: `${windowDays}|${tierFilter}|${term}` });
 
-    // Merge risk data with agent metadata and collapse by logical endpoint key.
-    // Source-of-truth remains backend aggregation; this is a UI safety dedupe layer.
-    const merged: MergedEndpoint[] = useMemo(() => {
-        const summaries = riskData?.data ?? [];
-        const agentMap = new Map<string, Agent>();
-        agentsData?.data?.forEach(a => agentMap.set(a.id, a));
-        const mergedByLogicalKey = new Map<string, MergedEndpoint>();
-
-        for (const s of summaries) {
-            const agent = agentMap.get(s.agent_id);
-            const hostname = agent?.hostname;
-            const logicalKey = hostname?.trim().toLowerCase() || s.agent_id;
-            const candidate: MergedEndpoint = {
-                ...s,
-                hostname,
-                os_type: agent?.os_type,
-                agent_status: agent?.status,
-                device_criticality: agent?.metadata?.device_criticality || 'normal',
-                role_risk: agent?.metadata?.role_risk || 'normal',
-                network_anomaly: agent?.metadata?.network_anomaly || 'none',
-            };
-
-            const existing = mergedByLogicalKey.get(logicalKey);
-            if (!existing) {
-                mergedByLogicalKey.set(logicalKey, candidate);
-                continue;
-            }
-
-            mergedByLogicalKey.set(logicalKey, {
-                ...existing,
-                // Keep a stable ID for actions/navigation while merging metrics.
-                agent_id: existing.agent_id,
-                hostname: existing.hostname || candidate.hostname,
-                os_type: existing.os_type || candidate.os_type,
-                agent_status: existing.agent_status || candidate.agent_status,
-                device_criticality: existing.device_criticality !== 'normal' ? existing.device_criticality : candidate.device_criticality,
-                role_risk: existing.role_risk !== 'normal' ? existing.role_risk : candidate.role_risk,
-                network_anomaly: existing.network_anomaly !== 'none' ? existing.network_anomaly : candidate.network_anomaly,
-                total_alerts: existing.total_alerts + candidate.total_alerts,
-                peak_risk_score: Math.max(existing.peak_risk_score, candidate.peak_risk_score),
-                avg_risk_score: Math.max(existing.avg_risk_score, candidate.avg_risk_score),
-                critical_count: existing.critical_count + candidate.critical_count,
-                high_count: existing.high_count + candidate.high_count,
-                open_count: existing.open_count + candidate.open_count,
-                last_alert_at: new Date(existing.last_alert_at) > new Date(candidate.last_alert_at)
-                    ? existing.last_alert_at
-                    : candidate.last_alert_at,
-            });
-        }
-
-        return Array.from(mergedByLogicalKey.values()).sort((a, b) =>
-            b.peak_risk_score - a.peak_risk_score ||
-            b.critical_count - a.critical_count
-        );
-    }, [riskData, agentsData]);
-
-    // Filter
-    const filtered = useMemo(() => {
-        return merged.filter(ep => {
-            const q = search.toLowerCase();
-            const matchesSearch = !q ||
-                ep.hostname?.toLowerCase().includes(q) ||
-                ep.agent_id.toLowerCase().includes(q);
-            const score = ep.peak_risk_score;
-            const matchesTier =
-                tierFilter === 'all' ? true :
-                    tierFilter === 'critical' ? score >= 90 :
-                        tierFilter === 'high' ? score >= 70 && score < 90 :
-                            tierFilter === 'medium' ? score >= 40 && score < 70 :
-                                score < 40;
-            return matchesSearch && matchesTier;
-        });
-    }, [merged, search, tierFilter]);
-
-    // KPI summary
-    const kpis = useMemo(() => {
-        const data = riskData?.data ?? [];
-        return {
-            total: data.length,
-            critical: data.filter(d => d.peak_risk_score >= 90).length,
-            highRisk: data.filter(d => d.peak_risk_score >= 70).length,
-            totalOpen: data.reduce((acc, d) => acc + d.open_count, 0),
-        };
-    }, [riskData]);
+    // KPIs use exactly the same rows as the list.
+    const kpis = useMemo(() => ({
+        total: endpoints.length,
+        critical: endpoints.filter(d => d.peak_risk_score >= 90).length,
+        highRisk: endpoints.filter(d => d.peak_risk_score >= 70).length,
+        totalOpen: endpoints.reduce((acc, d) => acc + d.open_count, 0),
+    }), [endpoints]);
 
     if (riskLoading) {
         return (
@@ -402,136 +351,97 @@ export default function EndpointRisk() {
         { key: 'critical', label: 'Critical', color: 'text-rose-500' },
         { key: 'high', label: 'High', color: 'text-orange-500' },
         { key: 'medium', label: 'Medium', color: 'text-amber-500' },
-        { key: 'low', label: 'Low / Clean', color: 'text-emerald-500' },
+        { key: 'low', label: 'Low', color: 'text-emerald-500' },
     ] as const;
+    const windowLabel = WINDOWS.find(w => w.days === windowDays)?.label ?? `${windowDays} days`;
 
     return (
-        <div className="relative flex flex-col min-h-[calc(100vh-5rem)] lg:min-h-[calc(100vh-3.5rem)] -mx-4 sm:-mx-6 lg:-mx-8 -my-4 sm:-my-6 lg:-my-8 p-4 sm:p-6 lg:p-8 bg-slate-200 dark:bg-gradient-to-br dark:from-slate-900 dark:via-[#0b1120] dark:to-slate-900 transition-colors">
-            {/* Ambient glows */}
-            <div className="absolute top-0 right-0 w-[500px] h-[500px] pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(244,63,94,0.05) 0%, transparent 70%)' }} />
-            <div className="absolute bottom-0 left-0 w-[500px] h-[500px] pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.05) 0%, transparent 70%)' }} />
-
-            <div className="relative  w-full space-y-6">
-
-                {/* Header */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
-                        <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-300">
-                            Endpoint Risk
-                        </h2>
-                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                            Ranked endpoint risk · refreshes every 30s
-                        </p>
-                    </div>
-                    <button
-                        onClick={() => refetch()}
-                        disabled={isFetching}
-                        className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors shadow-sm"
-                    >
-                        <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
-                        Refresh
+        <div className="relative space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+                <div>
+                    <h2 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">Endpoint Risk</h2>
+                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
+                        Endpoints ranked by their highest-risk active alert. Only alerts that still need attention
+                        (open, acknowledged or under investigation) and were active in the last {windowLabel} count.
+                        Resolved, false-positive and exception-suppressed alerts, and removed endpoints, are excluded.
+                    </p>
+                </div>
+                <div className="flex items-center gap-2">
+                    <label className="text-xs text-slate-500 flex items-center gap-2">Activity window
+                        <select aria-label="Activity window" value={windowDays} onChange={e => setParam('window', e.target.value)}
+                            className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1.5 text-sm text-slate-800 dark:text-slate-100">
+                            {WINDOWS.map(w => <option key={w.days} value={w.days}>Last {w.label}</option>)}
+                        </select>
+                    </label>
+                    <button onClick={() => refetch()} disabled={isFetching}
+                        className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors shadow-sm">
+                        <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
                     </button>
                 </div>
-
-                {/* KPI Cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <KPICard
-                        label="Active Endpoints"
-                        value={kpis.total}
-                        sub="with open alert activity"
-                        icon={Monitor}
-                        accent="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
-                    />
-                    <KPICard
-                        label="Critical Risk"
-                        value={kpis.critical}
-                        sub="peak score ≥ 90"
-                        icon={Zap}
-                        accent="bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20"
-                    />
-                    <KPICard
-                        label="High Risk or Above"
-                        value={kpis.highRisk}
-                        sub="peak score ≥ 70"
-                        icon={TrendingUp}
-                        accent="bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20"
-                    />
-                    <KPICard
-                        label="Total Open Alerts"
-                        value={kpis.totalOpen}
-                        sub="across all endpoints"
-                        icon={Activity}
-                        accent="bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
-                    />
-                </div>
-
-                {/* Distribution chart */}
-                {merged.length > 0 && <RiskDistributionBar summaries={merged} />}
-
-                {/* Filters */}
-                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                    {/* Search */}
-                    <div className="relative w-full sm:w-72">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                            type="text"
-                            placeholder="Search by hostname or agent ID…"
-                            value={search}
-                            onChange={e => setSearch(e.target.value)}
-                            className="w-full pl-9 pr-4 py-2.5 text-sm bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
-                        />
-                    </div>
-
-                    {/* Tier filter chips */}
-                    <div className="flex items-center gap-2 flex-wrap">
-                        {tierButtons.map(btn => (
-                            <button
-                                key={btn.key}
-                                onClick={() => setTierFilter(btn.key)}
-                                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all ${tierFilter === btn.key
-                                    ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-transparent'
-                                    : 'bg-white dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-slate-300'
-                                    }`}
-                            >
-                                {'color' in btn && <span className={`${btn.color} mr-1`}>●</span>}{btn.label}
-                            </button>
-                        ))}
-                    </div>
-
-                    <div className="ml-auto text-xs text-slate-400 font-medium">
-                        {filtered.length} endpoint{filtered.length !== 1 ? 's' : ''}
-                    </div>
-                </div>
-
-                {/* Ranked list */}
-                {filtered.length === 0 ? (
-                    merged.length === 0 ? <EmptyState /> : (
-                        <div className="text-center py-16 text-slate-500 text-sm">No endpoints match your current filters.</div>
-                    )
-                ) : (
-                    <div className="space-y-2 pb-8">
-                        {filtered.map((ep, i) => (
-                            <EndpointRiskCard key={ep.agent_id} ep={ep} rank={i + 1} />
-                        ))}
-                    </div>
-                )}
-
-                {/* Legend */}
-                {merged.length > 0 && (
-                    <div className="flex items-center gap-6 justify-center pb-6 text-xs text-slate-500 flex-wrap">
-                        <span className="font-semibold uppercase tracking-wider">Score tiers:</span>
-                        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-rose-500" />Critical ≥90</span>
-                        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-orange-500" />High 70–89</span>
-                        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-amber-500" />Medium 40–69</span>
-                        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-emerald-500" />Low &lt;40</span>
-                        <span className="flex items-center gap-2">
-                            <Cpu className="w-3.5 h-3.5" />Scores computed by RiskScorer at alert time — see Context tab in Alerts for full breakdown
-                        </span>
-                    </div>
-                )}
             </div>
+
+            {isError && (
+                <div role="alert" className="flex items-center gap-2 rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 p-3 text-sm text-rose-700 dark:text-rose-400">
+                    <AlertTriangle className="w-4 h-4 shrink-0" /> Unable to load endpoint risk. <button type="button" className="underline" onClick={() => refetch()}>Retry</button>
+                </div>
+            )}
+
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <KPICard label="Endpoints at risk" value={kpis.total} sub={`active alerts in ${windowLabel}`} icon={Monitor}
+                    accent="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20" />
+                <KPICard label="Critical" value={kpis.critical} sub="peak score ≥ 90" icon={Zap}
+                    accent="bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20" />
+                <KPICard label="High or above" value={kpis.highRisk} sub="peak score ≥ 70" icon={TrendingUp}
+                    accent="bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20" />
+                <KPICard label="Untriaged alerts" value={kpis.totalOpen} sub="status open, all listed endpoints" icon={Activity}
+                    accent="bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20" />
+            </div>
+
+            {endpoints.length > 0 && <RiskDistributionBar summaries={endpoints} />}
+
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                <div className="relative w-full sm:w-72">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <input type="search" aria-label="Search endpoints" placeholder="Search by hostname or agent ID…" value={search}
+                        onChange={e => { setSearch(e.target.value); setParam('q', e.target.value.trim() || null); }}
+                        className="w-full pl-9 pr-4 py-2.5 text-sm bg-white dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/50" />
+                </div>
+                <div className="flex items-center gap-2 flex-wrap" role="group" aria-label="Risk tier">
+                    {tierButtons.map(btn => (
+                        <button key={btn.key} type="button" aria-pressed={tierFilter === btn.key} onClick={() => setParam('tier', btn.key === 'all' ? null : btn.key)}
+                            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all ${tierFilter === btn.key
+                                ? 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-transparent'
+                                : 'bg-white dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-slate-300'}`}>
+                            {'color' in btn && <span className={`${btn.color} mr-1`}>●</span>}{btn.label}
+                        </button>
+                    ))}
+                </div>
+                <div className="sm:ml-auto text-xs text-slate-400 font-medium">{filtered.length} endpoint{filtered.length !== 1 ? 's' : ''}</div>
+            </div>
+
+            {filtered.length === 0 ? (
+                endpoints.length === 0 ? <EmptyState /> : <div className="text-center py-16 text-slate-500 text-sm">No endpoints match your current filters.</div>
+            ) : (
+                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/40 dark:bg-slate-900/30">
+                    <div className="space-y-2 p-2">
+                        {pager.pageRows.map((ep, i) => (
+                            <EndpointRiskCard key={ep.agent_id} ep={ep} rank={(pager.page - 1) * pager.controls.info.limit + i + 1} />
+                        ))}
+                    </div>
+                    <PaginationControls {...pager.controls} label="endpoints" />
+                </div>
+            )}
+
+            {endpoints.length > 0 && (
+                <div className="flex items-center gap-x-6 gap-y-2 justify-center pb-6 text-xs text-slate-500 flex-wrap">
+                    <span className="font-semibold uppercase tracking-wider">Score tiers:</span>
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-rose-500" />Critical ≥90</span>
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-orange-500" />High 70–89</span>
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-amber-500" />Medium 40–69</span>
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-emerald-500" />Low &lt;40</span>
+                    <span className="flex items-center gap-2"><Cpu className="w-3.5 h-3.5" />Same thresholds as the detection engine's risk levels</span>
+                </div>
+            )}
         </div>
     );
 }
-
-

@@ -33,8 +33,8 @@ func (r *PostgresAuditLogRepository) Create(ctx context.Context, log *models.Aud
 		INSERT INTO audit_logs (
 			id, user_id, username, action, resource_type, resource_id,
 			old_value, new_value, result, error_message,
-			ip_address, user_agent, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
+			ip_address, user_agent, created_at, details
+		) VALUES ($1, NULLIF($2, '00000000-0000-0000-0000-000000000000'::uuid), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULLIF($14, ''))`
 
 	_, err := r.pool.Exec(ctx, query,
 		log.ID,
@@ -50,6 +50,7 @@ func (r *PostgresAuditLogRepository) Create(ctx context.Context, log *models.Aud
 		log.IPAddress,
 		log.UserAgent,
 		log.Timestamp,
+		log.Details,
 	)
 
 	if err != nil {
@@ -64,7 +65,7 @@ func (r *PostgresAuditLogRepository) GetByID(ctx context.Context, id uuid.UUID) 
 	query := `
 		SELECT id, COALESCE(user_id,'00000000-0000-0000-0000-000000000000'::uuid), COALESCE(username,''), action, COALESCE(resource_type,''), COALESCE(resource_id,'00000000-0000-0000-0000-000000000000'::uuid),
 			old_value, new_value, result, COALESCE(error_message,''),
-			COALESCE(ip_address,''), COALESCE(user_agent,''), created_at
+			COALESCE(ip_address,''), COALESCE(user_agent,''), created_at, COALESCE(details,'')
 		FROM audit_logs
 		WHERE id = $1`
 
@@ -83,6 +84,7 @@ func (r *PostgresAuditLogRepository) GetByID(ctx context.Context, id uuid.UUID) 
 		&log.IPAddress,
 		&log.UserAgent,
 		&log.Timestamp,
+		&log.Details,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -149,7 +151,7 @@ func auditWhere(filter AuditLogFilter) (string, []interface{}) {
 		args = append(args, filter.Actions)
 		argNum++
 	}
-	fields := map[string]string{"staff": "username", "affected": "concat_ws(' ',resource_type,resource_id::text)", "oldVal": "old_value::text", "newVal": "new_value::text", "extra": "error_message", "session": "id::text", "search": "concat_ws(' ',username,action,resource_type,resource_id::text,ip_address::text)"}
+	fields := map[string]string{"staff": "username", "affected": "concat_ws(' ',resource_type,resource_id::text)", "oldVal": "old_value::text", "newVal": "new_value::text", "extra": "concat_ws(' ',details,error_message)", "session": "id::text", "search": "concat_ws(' ',username,action,resource_type,resource_id::text,ip_address::text,details)"}
 	for _, key := range []string{"staff", "affected", "oldVal", "newVal", "extra", "session", "search"} {
 		if value := filter.Text[key]; value != "" {
 			where += fmt.Sprintf(" AND %s ILIKE $%d", fields[key], argNum)
@@ -192,7 +194,7 @@ func (r *PostgresAuditLogRepository) List(ctx context.Context, filter AuditLogFi
 	args = append(args, p.Limit+1)
 	query := `SELECT id,COALESCE(user_id,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE(username,''),action,COALESCE(resource_type,''),COALESCE(resource_id,'00000000-0000-0000-0000-000000000000'::uuid),
        to_jsonb(left(old_value::text,256)),to_jsonb(left(new_value::text,256)),result,COALESCE(left(error_message,256),''),
-       COALESCE(ip_address,''),''::text,created_at FROM audit_logs` + where + seek + " ORDER BY " + order + fmt.Sprintf(" LIMIT $%d", len(args))
+       COALESCE(ip_address,''),''::text,created_at,COALESCE(left(details,256),'') FROM audit_logs` + where + seek + " ORDER BY " + order + fmt.Sprintf(" LIMIT $%d", len(args))
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -217,6 +219,7 @@ func (r *PostgresAuditLogRepository) List(ctx context.Context, filter AuditLogFi
 			&log.IPAddress,
 			&log.UserAgent,
 			&log.Timestamp,
+			&log.Details,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan audit log row: %w", err)

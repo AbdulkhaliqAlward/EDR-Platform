@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileCode, Plus, Pencil, Trash2, X, Shield, Clock, AlertTriangle } from 'lucide-react';
+import { FileCode, Plus, Pencil, Trash2, X, Shield, Clock, AlertTriangle, Search } from 'lucide-react';
 import { agentsApi, responseScriptsApi, type ResponseScript, type ResponseScriptInput } from '../../api/client';
 import { useToast } from '../../components';
+import { PaginationControls } from '../../components/PaginationControls';
+import { useClientPagination } from '../../hooks/useClientPagination';
 
 const EMPTY_FORM: ResponseScriptInput = { name: '', description: '', cmd: '', timeout_seconds: 300, enabled: true };
 
@@ -42,6 +44,13 @@ export function ScriptLibraryPage() {
     queryKey: ['response-scripts'],
     queryFn: () => responseScriptsApi.list(),
   });
+  const [query, setQuery] = useState('');
+  const filteredScripts = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return scripts;
+    return scripts.filter(x => [x.name, x.description, x.cmd].some(v => (v || '').toLowerCase().includes(q)));
+  }, [scripts, query]);
+  const scriptPager = useClientPagination(filteredScripts, { namespace: 'scripts', resetKey: query.trim().toLowerCase() });
 
   const saveMutation = useMutation({
     mutationFn: (input: ResponseScriptInput) =>
@@ -155,6 +164,16 @@ export function ScriptLibraryPage() {
 
       {/* List */}
       <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
+        {scripts.length > 0 && (
+          <div className="p-4 border-b border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-3">
+            <label className="relative flex-1 min-w-[200px] max-w-md">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input type="search" aria-label="Search scripts" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search name, description or command…"
+                className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm" />
+            </label>
+            <span className="text-xs text-slate-500">{filteredScripts.length} of {scripts.length} scripts</span>
+          </div>
+        )}
         {isLoading ? (
           <div className="p-12 text-center">
             <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-teal-600"></div>
@@ -170,8 +189,10 @@ export function ScriptLibraryPage() {
             No scripts yet.{canManage ? ' Click "New Script" to add the first one.' : ''}
           </div>
         ) : (
+          <>
           <div className="divide-y divide-slate-200 dark:divide-slate-700/80">
-            {scripts.map((s) => (
+            {filteredScripts.length === 0 && <p className="p-6 text-sm text-slate-500">No scripts match this search.</p>}
+            {scriptPager.pageRows.map((s) => (
               <div key={s.id} className={`p-5 flex flex-col lg:flex-row lg:items-start gap-4 ${s.enabled ? '' : 'opacity-70'}`}>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
@@ -219,6 +240,8 @@ export function ScriptLibraryPage() {
               </div>
             ))}
           </div>
+          {filteredScripts.length > 0 && <PaginationControls {...scriptPager.controls} label="scripts" />}
+          </>
         )}
       </div>
 

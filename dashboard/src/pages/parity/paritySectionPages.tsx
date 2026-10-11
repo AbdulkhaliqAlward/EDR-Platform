@@ -1,6 +1,7 @@
 import { usePageSearch } from '../../hooks/usePageSearch';
 import { usePaginatedQuery } from '../../hooks/usePaginatedQuery';
 import { PaginationControls } from '../../components/PaginationControls';
+import { useClientPagination } from '../../hooks/useClientPagination';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -567,7 +568,7 @@ export function SecurityEndpointZeroTrustPage() {
                             Endpoint Risk (full board) →
                         </Link>
                         <Link to="/soc/correlation" className="text-cyan-600 dark:text-cyan-400 hover:underline font-medium">
-                            SOC Correlation →
+                            Activity Correlation →
                         </Link>
                     </div>
                 </>
@@ -1707,7 +1708,7 @@ export function ManagedSecurityIncidentsPage() {
                         </tbody>
                     </table>
                     <PaginationControls info={listQ.info} page={listQ.page} count={rows.length} busy={listQ.busy}
-                        onNext={listQ.next} onPrevious={listQ.previous} onSize={listQ.setPageSize} />
+                        onNext={listQ.next} onFirst={listQ.first} onPrevious={listQ.previous} onSize={listQ.setPageSize} />
                 </div>
             )}
 
@@ -2642,11 +2643,14 @@ export function ManagementNetworkPage() {
         retry: 1,
     });
 
+    // The whole fleet (≤1000, read as 100-row pages) feeds the worst-first
+    // ordering and the attention summary; the table itself is paged below.
     const listQ = useQuery({
         queryKey: ['management-network-fleet', 1000],
         queryFn: () => agentsApi.list({ limit: 1000, offset: 0 }),
         staleTime: 30_000,
-        refetchInterval: 30_000,
+        refetchInterval: 60_000,
+        refetchIntervalInBackground: false,
     });
 
     const rawRows = listQ.data?.data ?? [];
@@ -2680,6 +2684,12 @@ export function ManagementNetworkPage() {
             .filter((x) => x.reasons.length > 0)
             .slice(0, 8);
     }, [rows]);
+
+    const [fleetSearch, setFleetSearch] = useState('');
+    const fleetTerm = fleetSearch.trim().toLowerCase();
+    const visibleRows = useMemo(() => !fleetTerm ? rows : rows.filter((a) =>
+        [a.hostname, a.id, getEffectiveStatus(a), ...(a.ip_addresses ?? [])].some((v) => String(v ?? '').toLowerCase().includes(fleetTerm))), [rows, fleetTerm]);
+    const fleetPager = useClientPagination(visibleRows, { namespace: 'fleet', resetKey: fleetTerm });
 
     const staleLabel = `>${Math.round(STALE_THRESHOLD_MS / 1000)}s since last_seen`;
 
@@ -2850,7 +2860,14 @@ export function ManagementNetworkPage() {
                 </div>
             )}
 
-            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/95 dark:bg-slate-800/90 backdrop-blur-sm shadow-sm">
+            <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/95 dark:bg-slate-800/90 backdrop-blur-sm shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 p-3 border-b border-slate-200 dark:border-slate-700/60">
+                <input type="search" aria-label="Search fleet" value={fleetSearch} onChange={(e) => setFleetSearch(e.target.value)}
+                    placeholder="Search host, agent ID, IP or status…"
+                    className="w-full sm:w-80 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm" />
+                <span className="text-xs text-slate-500">{visibleRows.length.toLocaleString()} of {rows.length.toLocaleString()} endpoints</span>
+            </div>
+            <div className="overflow-x-auto">
                 <table className="min-w-full text-left text-sm">
                     <thead className="bg-slate-50 dark:bg-slate-800/80 text-slate-600 dark:text-slate-400 text-xs uppercase">
                         <tr>
@@ -2869,7 +2886,10 @@ export function ManagementNetworkPage() {
                         </tr>
                     </thead>
                     <tbody>
-                        {rows.map((a) => {
+                        {visibleRows.length === 0 && (
+                            <tr><td colSpan={12} className="px-3 py-8 text-center text-sm text-slate-500">{rows.length ? 'No endpoints match this search.' : 'No enrolled endpoints yet.'}</td></tr>
+                        )}
+                        {fleetPager.pageRows.map((a) => {
                             const eff = getEffectiveStatus(a);
                             const stale =
                                 (a.status === 'online' || a.status === 'degraded') && eff === 'offline';
@@ -2918,6 +2938,8 @@ export function ManagementNetworkPage() {
                         })}
                     </tbody>
                 </table>
+            </div>
+            {visibleRows.length > 0 && <PaginationControls {...fleetPager.controls} label="endpoints" />}
             </div>
 
             <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -3069,7 +3091,7 @@ export function ManagementRmmPage() {
                         </tbody>
                     </table>
                 </div>
-                <PaginationControls info={cmdQ.info} page={cmdQ.page} count={cmds.length} busy={cmdQ.busy} onNext={cmdQ.next} onPrevious={cmdQ.previous} onSize={cmdQ.setPageSize} />
+                <PaginationControls info={cmdQ.info} page={cmdQ.page} count={cmds.length} busy={cmdQ.busy} onNext={cmdQ.next} onFirst={cmdQ.first} onPrevious={cmdQ.previous} onSize={cmdQ.setPageSize} />
             </div>
         </div>
     );

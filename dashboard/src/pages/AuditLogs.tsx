@@ -10,57 +10,150 @@ import {
     X,
     RefreshCw,
     Shield,
+    ShieldOff,
     AlertTriangle,
     Settings,
     ChevronDown,
     Trash2,
     Filter,
     FileSpreadsheet,
+    FileCode,
+    FileKey,
+    KeyRound,
+    Lock,
+    LogIn,
+    LogOut,
+    Package,
+    Play,
+    Server,
+    Terminal,
+    UserPlus,
+    Loader2,
 } from 'lucide-react';
 import { auditApi, authApi, type AuditLog } from '../api/client';
 import { Modal, DateRangePicker, type DateRange, SkeletonTable } from '../components';
 import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
 import { usePageFilters } from '../hooks/usePageFilters';
 import { PaginationControls } from '../components/PaginationControls';
+import { collectPages } from '../api/collectPages';
 
+// Every action string the server records (model constants and the dotted
+// names used by newer handlers). Unknown actions still render generically.
 const ACTION_ICONS: Record<string, { icon: typeof Activity; color: string }> = {
-    login: { icon: User, color: 'text-green-500' },
-    logout: { icon: User, color: 'text-slate-500' },
-    login_failed: { icon: X, color: 'text-red-500' },
-    create: { icon: Check, color: 'text-green-500' },
-    update: { icon: RefreshCw, color: 'text-blue-500' },
-    delete: { icon: X, color: 'text-red-500' },
-    execute_command: { icon: Activity, color: 'text-orange-500' },
-    acknowledge_alert: { icon: Check, color: 'text-yellow-500' },
-    resolve_alert: { icon: Shield, color: 'text-green-500' },
-    update_policy: { icon: Settings, color: 'text-indigo-500' },
+    user_login: { icon: LogIn, color: 'text-green-500' },
+    user_logout: { icon: LogOut, color: 'text-slate-500' },
+    user_login_failed: { icon: X, color: 'text-red-500' },
+    auth_failed: { icon: X, color: 'text-red-500' },
+    user_locked: { icon: Lock, color: 'text-red-500' },
+    password_changed: { icon: KeyRound, color: 'text-amber-500' },
+    user_created: { icon: UserPlus, color: 'text-green-500' },
+    user_updated: { icon: RefreshCw, color: 'text-blue-500' },
+    user_deleted: { icon: Trash2, color: 'text-red-500' },
+    role_created: { icon: Shield, color: 'text-green-500' },
+    role_updated: { icon: Shield, color: 'text-blue-500' },
+    role_deleted: { icon: Shield, color: 'text-red-500' },
+    execute_command: { icon: Terminal, color: 'text-orange-500' },
     isolate_network: { icon: AlertTriangle, color: 'text-red-600' },
     restore_network: { icon: Check, color: 'text-green-600' },
-    register: { icon: Check, color: 'text-green-500' },
+    'playbook.run': { icon: Play, color: 'text-indigo-500' },
+    acknowledge_alert: { icon: Check, color: 'text-yellow-500' },
+    resolve_alert: { icon: Shield, color: 'text-green-500' },
+    alert_deleted: { icon: Trash2, color: 'text-red-500' },
+    agent_registered: { icon: Server, color: 'text-green-500' },
+    agent_approved: { icon: Server, color: 'text-green-500' },
+    agent_suspended: { icon: Server, color: 'text-amber-500' },
+    agent_deleted: { icon: Server, color: 'text-red-500' },
+    'agent.delete': { icon: Server, color: 'text-red-500' },
+    'agent.build': { icon: Package, color: 'text-cyan-500' },
+    'agent.uninstall_token.issue': { icon: KeyRound, color: 'text-amber-500' },
+    cert_issued: { icon: FileKey, color: 'text-green-500' },
+    cert_renewed: { icon: FileKey, color: 'text-blue-500' },
+    cert_revoked: { icon: FileKey, color: 'text-red-500' },
+    token_created: { icon: KeyRound, color: 'text-green-500' },
+    token_revoked: { icon: KeyRound, color: 'text-red-500' },
+    token_deleted: { icon: KeyRound, color: 'text-red-500' },
+    TOKEN_DELETED: { icon: KeyRound, color: 'text-red-500' },
+    'response_script.create': { icon: FileCode, color: 'text-green-500' },
+    'response_script.update': { icon: FileCode, color: 'text-blue-500' },
+    'response_script.delete': { icon: FileCode, color: 'text-red-500' },
+    'detection_exception.created': { icon: ShieldOff, color: 'text-green-500' },
+    'detection_exception.updated': { icon: ShieldOff, color: 'text-blue-500' },
+    'detection_exception.deleted': { icon: ShieldOff, color: 'text-red-500' },
+    policy_created: { icon: Settings, color: 'text-green-500' },
+    policy_updated: { icon: Settings, color: 'text-indigo-500' },
+    policy_deleted: { icon: Settings, color: 'text-red-500' },
     deploy_policy: { icon: Activity, color: 'text-blue-500' },
-    revoke_token: { icon: X, color: 'text-red-500' },
     change_settings: { icon: Settings, color: 'text-slate-500' },
+    rate_limit_triggered: { icon: AlertTriangle, color: 'text-amber-500' },
 };
+
+/** Friendly names for actions whose raw string reads poorly. */
+const ACTION_LABELS: Record<string, string> = {
+    user_login: 'Sign in',
+    user_logout: 'Sign out',
+    user_login_failed: 'Failed sign-in',
+    auth_failed: 'Authentication failed',
+    execute_command: 'Command executed',
+    isolate_network: 'Network isolated',
+    restore_network: 'Network restored',
+    'playbook.run': 'Playbook run',
+    'agent.build': 'Agent package built',
+    'agent.uninstall_token.issue': 'Uninstall token issued',
+    'agent.delete': 'Agent removed',
+    TOKEN_DELETED: 'Token deleted',
+};
+
+/** Event-name filter: server-side groups (see actionGroupToDB). */
+const ACTION_FILTERS: { value: string; label: string }[] = [
+    { value: '', label: 'All events' },
+    { value: 'login', label: 'Sign in' },
+    { value: 'login_failed', label: 'Failed sign-in' },
+    { value: 'logout', label: 'Sign out' },
+    { value: 'create', label: 'Create (any object)' },
+    { value: 'update', label: 'Update (any object)' },
+    { value: 'delete', label: 'Delete (any object)' },
+    { value: 'response', label: 'Response actions' },
+    { value: 'isolation', label: 'Network isolation' },
+    { value: 'playbook_run', label: 'Playbook runs' },
+    { value: 'alerts', label: 'Alert triage' },
+    { value: 'agent_lifecycle', label: 'Agent lifecycle' },
+    { value: 'tokens', label: 'Enrollment tokens' },
+    { value: 'access', label: 'Users & roles' },
+    { value: 'exceptions', label: 'Detection exceptions' },
+    { value: 'scripts', label: 'Response scripts' },
+    { value: 'policy', label: 'Policies' },
+    { value: 'rate_limits', label: 'Rate limiting' },
+];
 
 const RESOURCE_BADGES: Record<string, { label: string; color: string }> = {
     user: { label: 'User', color: 'bg-blue-500/10 text-blue-500 border border-blue-500/20' },
+    role: { label: 'Role', color: 'bg-blue-500/10 text-blue-400 border border-blue-500/20' },
     agent: { label: 'Agent', color: 'bg-green-500/10 text-green-500 border border-green-500/20' },
+    agent_binary: { label: 'Agent package', color: 'bg-green-500/10 text-green-400 border border-green-500/20' },
+    certificate: { label: 'Certificate', color: 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20' },
     alert: { label: 'Alert', color: 'bg-orange-500/10 text-orange-500 border border-orange-500/20' },
+    incident: { label: 'Incident', color: 'bg-orange-500/10 text-orange-400 border border-orange-500/20' },
     rule: { label: 'Rule', color: 'bg-rose-500/10 text-rose-500 border border-rose-500/20' },
+    detection_exception: { label: 'Exception', color: 'bg-rose-500/10 text-rose-400 border border-rose-500/20' },
     policy: { label: 'Policy', color: 'bg-indigo-500/10 text-indigo-500 border border-indigo-500/20' },
     command: { label: 'Command', color: 'bg-cyan-500/10 text-cyan-500 border border-cyan-500/20' },
+    playbook_execution: { label: 'Playbook run', color: 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' },
+    response_script: { label: 'Script', color: 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20' },
+    automation_settings: { label: 'Automation', color: 'bg-purple-500/10 text-purple-500 border border-purple-500/20' },
     session: { label: 'Session', color: 'bg-purple-500/10 text-purple-500 border border-purple-500/20' },
     system: { label: 'System', color: 'bg-slate-500/10 text-slate-500 border border-slate-500/20' },
-    dashboard: { label: 'Dashboard', color: 'bg-teal-500/10 text-teal-500 border border-teal-500/20' },
     settings: { label: 'Settings', color: 'bg-slate-500/10 text-slate-400 border border-slate-500/20' },
     token: { label: 'Token', color: 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20' },
 };
 
+const RESOURCE_FILTERS = Object.entries(RESOURCE_BADGES)
+    .filter(([key]) => key !== 'session' && key !== 'system')
+    .map(([value, b]) => ({ value, label: b.label }));
+
 function formatAction(action: string): string {
-    return action
-        .split('_')
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(' ');
+    if (ACTION_LABELS[action]) return ACTION_LABELS[action];
+    const words = action.toLowerCase().split(/[_.]+/).filter(Boolean);
+    return words.map((word, i) => (i === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word)).join(' ');
 }
 
 function fmtCellValue(v: Record<string, unknown> | undefined | null): string {
@@ -203,7 +296,7 @@ function exportToCSV(logs: AuditLog[]) {
         'Old value',
         'New value',
         'Extra info',
-        'Session / trace ID',
+        'Log ID',
         'Result',
         'IP',
     ];
@@ -214,7 +307,7 @@ function exportToCSV(logs: AuditLog[]) {
         affectedObjectLabel(log),
         fmtCellValue(log.old_value),
         fmtCellValue(log.new_value),
-        log.details || '',
+        log.details || log.error_message || '',
         log.id,
         log.result,
         log.ip_address || '',
@@ -241,6 +334,8 @@ export default function AuditLogs() {
     const [filters, setFilters] = usePageFilters(pager.params, { action: '', resource_type: '', user_id: '', search: '', staff: '', affected: '', oldVal: '', newVal: '', extra: '', session: '' }, pager.setFilters);
     const [filterPanelOpen, setFilterPanelOpen] = useState(true);
     const [exportMenuOpen, setExportMenuOpen] = useState(false);
+    const [exporting, setExporting] = useState(false);
+    const [exportError, setExportError] = useState<string | null>(null);
     const exportMenuRef = useRef<HTMLDivElement>(null);
 
 
@@ -255,6 +350,22 @@ export default function AuditLogs() {
     const { isLoading, error, isFetching, refetch } = pager;
     const logs = pager.rows;
     const filteredLogs = logs;
+    // Export every log matching the current filters (not just this page),
+    // walking cursor pages of 100; bounded at 10,000 rows.
+    const exportAll = async () => {
+        setExporting(true);
+        setExportError(null);
+        try {
+            const base: Record<string, string> = { ...pager.params, limit: '100' };
+            delete base.cursor;
+            const all = await collectPages((cursor) => auditApi.page(cursor ? { ...base, cursor } : base), 10000);
+            exportToCSV(all);
+        } catch (e) {
+            setExportError((e as Error).message || 'Export failed');
+        } finally {
+            setExporting(false);
+        }
+    };
     const detail = useQuery({ queryKey: ['audit-detail', selectedLog?.id], enabled: !!selectedLog,
         queryFn: () => auditApi.get(selectedLog!.id) });
 
@@ -288,8 +399,10 @@ export default function AuditLogs() {
             <div className="mb-3 shrink-0">
                 <h2 className="text-lg font-bold text-slate-900 dark:text-white">Audit Logs</h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Platform activity (Standard grid — columns align with Platform audit viewer)
+                    Who did what, to which object, when and from where — sign-ins, response actions, configuration and agent lifecycle.
+                    Entries are append-only; open a row for full before/after values.
                 </p>
+                {exportError && <p role="alert" className="mt-2 text-xs text-rose-600 dark:text-rose-400">{exportError}</p>}
             </div>
 
             {/* dm-toolbar–like strip */}
@@ -300,25 +413,16 @@ export default function AuditLogs() {
                     borderColor: 'var(--xc-nav-border, rgba(255,255,255,0.08))',
                 }}
             >
-                <button
-                    type="button"
-                    disabled
-                    title="Delete logs is not enabled for this deployment"
-                    className="inline-flex items-center gap-2 px-2 py-1.5 rounded text-[13px] text-[var(--xc-nav-text,#c0ced6)] opacity-40 cursor-not-allowed border border-transparent"
-                >
-                    <Trash2 className="w-4 h-4 shrink-0" />
-                    <span className="hidden sm:inline">Delete logs</span>
-                </button>
 
                 <div className="relative" ref={exportMenuRef}>
                     <button
                         type="button"
                         onClick={() => setExportMenuOpen((o) => !o)}
-                        disabled={filteredLogs.length === 0}
+                        disabled={filteredLogs.length === 0 || exporting}
                         className="inline-flex items-center gap-2 px-2 py-1.5 rounded text-[13px] text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))] disabled:opacity-40 border border-transparent"
                     >
-                        <Download className="w-4 h-4 shrink-0" />
-                        <span>Export</span>
+                        {exporting ? <Loader2 className="w-4 h-4 shrink-0 animate-spin" /> : <Download className="w-4 h-4 shrink-0" />}
+                        <span>{exporting ? 'Exporting…' : 'Export'}</span>
                         <ChevronDown className={`w-3.5 h-3.5 transition-transform ${exportMenuOpen ? 'rotate-180' : ''}`} />
                     </button>
                     {exportMenuOpen && (
@@ -333,12 +437,12 @@ export default function AuditLogs() {
                                 type="button"
                                 className="w-full text-left px-3 py-2 text-[13px] text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))] flex items-center gap-2"
                                 onClick={() => {
-                                    exportToCSV(filteredLogs);
                                     setExportMenuOpen(false);
+                                    void exportAll();
                                 }}
                             >
                                 <FileSpreadsheet className="w-4 h-4" />
-                                Export to CSV
+                                Export all matching to CSV
                             </button>
                         </div>
                     )}
@@ -395,20 +499,7 @@ export default function AuditLogs() {
                                 onChange={(e) => setFilters((f) => ({ ...f, action: e.target.value }))}
                                 className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1.5 text-sm min-w-[180px]"
                             >
-                                <option value="">All</option>
-                                <option value="login">Login</option>
-                                <option value="logout">Logout</option>
-                                <option value="create">Create</option>
-                                <option value="update">Update</option>
-                                <option value="delete">Delete</option>
-                                <option value="execute_command">Execute Command</option>
-                                <option value="acknowledge_alert">Acknowledge Alert</option>
-                                <option value="resolve_alert">Resolve Alert</option>
-                                <option value="isolate_network">Isolate</option>
-                                <option value="deploy_policy">Deploy Policy</option>
-                                <option value="revoke_token">Revoke Token</option>
-                                <option value="change_settings">Change Settings</option>
-                                <option value="register">Register</option>
+                                {ACTION_FILTERS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                             </select>
                         </div>
                         <div>
@@ -421,15 +512,7 @@ export default function AuditLogs() {
                                 className="rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1.5 text-sm min-w-[140px]"
                             >
                                 <option value="">All types</option>
-                                <option value="user">User</option>
-                                <option value="agent">Agent</option>
-                                <option value="alert">Alert</option>
-                                <option value="rule">Rule</option>
-                                <option value="policy">Policy</option>
-                                <option value="command">Command</option>
-                                <option value="system">System</option>
-                                <option value="settings">Settings</option>
-                                <option value="token">Token</option>
+                                {RESOURCE_FILTERS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                             </select>
                         </div>
                         <div className="flex-1 min-w-[200px]">
@@ -440,7 +523,7 @@ export default function AuditLogs() {
                                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                                 <input
                                     type="text"
-                                    placeholder="User, action, resource…"
+                                    placeholder="User, action, object, IP or details…"
                                     value={filters.search}
                                     onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
                                     className="w-full rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 pl-8 pr-2 py-1.5 text-sm"
@@ -455,7 +538,7 @@ export default function AuditLogs() {
                                 ['oldVal', 'Old value', filters.oldVal],
                                 ['newVal', 'New value', filters.newVal],
                                 ['extra', 'Extra info', filters.extra],
-                                ['session', 'Session / trace ID', filters.session],
+                                ['session', 'Log ID', filters.session],
                             ] as const
                         ).map(([key, label, val]) => (
                             <div key={key}>
@@ -515,7 +598,7 @@ export default function AuditLogs() {
                                         Extra info
                                     </th>
                                     <th className="py-2.5 px-3 text-[11px] font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-400 whitespace-nowrap font-mono text-xs">
-                                        Session ID
+                                        Log ID
                                     </th>
                                     <th className="py-2.5 px-3 text-[11px] font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-400 whitespace-nowrap w-[180px]">
                                         Log creation date
@@ -547,17 +630,21 @@ export default function AuditLogs() {
                                                     </div>
                                                     <div className="min-w-0">
                                                         <span className="text-cyan-600 dark:text-cyan-400 font-medium truncate block">
-                                                            {log.username}
+                                                            {log.username || 'system'}
                                                         </span>
+                                                        {log.ip_address && <span className="block text-[11px] font-mono text-slate-500 truncate" title="Client IP">{log.ip_address}</span>}
                                                     </div>
                                                 </div>
                                             </td>
                                             <td className="py-2 px-3 align-top">
                                                 <div className="flex items-center gap-2">
                                                     <Icon className={`w-4 h-4 shrink-0 ${iconConfig.color}`} />
-                                                    <span className="text-slate-800 dark:text-slate-200">
+                                                    <span className="text-slate-800 dark:text-slate-200" title={log.action}>
                                                         {formatAction(log.action)}
                                                     </span>
+                                                    {log.result && log.result !== 'success' && (
+                                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase bg-rose-500/10 text-rose-500 border border-rose-500/20">{log.result}</span>
+                                                    )}
                                                 </div>
                                             </td>
                                             <td className="py-2 px-3 align-top">
@@ -580,7 +667,7 @@ export default function AuditLogs() {
                                                 {fmtCellValue(log.new_value)}
                                             </td>
                                             <td className="py-2 px-3 align-top text-xs text-slate-600 dark:text-slate-400 max-w-[200px] break-words">
-                                                {log.details || '—'}
+                                                {log.details || log.error_message || '—'}
                                             </td>
                                             <td className="py-2 px-3 align-top font-mono text-[11px] text-slate-500 dark:text-slate-400 max-w-[140px] truncate" title={log.id}>
                                                 {log.id}
@@ -607,7 +694,7 @@ export default function AuditLogs() {
                 )}
 
                 <PaginationControls info={pager.info} page={pager.page} count={logs.length} busy={pager.busy}
-                    onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
+                    onNext={pager.next} onFirst={pager.first} onPrevious={pager.previous} onSize={pager.setPageSize} label="log entries" />
             </div>
 
             {selectedLog && !detail.data ? <Modal isOpen onClose={() => setSelectedLog(null)} title="Audit Log Details">

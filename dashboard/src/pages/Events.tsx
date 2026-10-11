@@ -201,7 +201,7 @@ export default function Events() {
                     </div>
                 )}
 
-                <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} total={q.data?.total} onNext={q.next} onPrevious={q.previous} onSize={q.setPageSize} />
+                <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} total={q.data?.total} onNext={q.next} onFirst={q.first} onPrevious={q.previous} onSize={q.setPageSize} />
 
                 <EventDetailModal eventId={detailId} onClose={() => setDetailId(null)} fetchEnabled={canView} />
             </div>

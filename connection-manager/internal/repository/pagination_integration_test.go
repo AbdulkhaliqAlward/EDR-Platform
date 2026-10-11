@@ -14,6 +14,7 @@ import (
 	"github.com/edr-platform/connection-manager/pkg/audit"
 	"github.com/edr-platform/connection-manager/pkg/models"
 	"github.com/edr-platform/shared/pagination"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -113,7 +114,7 @@ func TestPaginationMigrationUpgradeAndInvalidIndex(t *testing.T) {
 	}
 	var version int
 	var dirty bool
-	if err := pool.QueryRow(ctx, "SELECT version,dirty FROM schema_migrations").Scan(&version, &dirty); err != nil || version != 69 || dirty {
+	if err := pool.QueryRow(ctx, "SELECT version,dirty FROM schema_migrations").Scan(&version, &dirty); err != nil || version != 70 || dirty {
 		t.Fatalf("version=%d dirty=%v err=%v", version, dirty, err)
 	}
 	agent := fixtureAgent(t, pool)
@@ -321,6 +322,13 @@ func TestAuditPagesPostgres(t *testing.T) {
 	if _, err = pool.Exec(ctx, string(ddl)); err != nil {
 		t.Fatal(err)
 	}
+	details, err := os.ReadFile(filepath.Join("..", "database", "migrations", "070_audit_logs_details.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, string(details)); err != nil {
+		t.Fatal(err)
+	}
 	_, err = pool.Exec(ctx, `INSERT INTO audit_logs(id,action,created_at,old_value) SELECT md5(n::text)::uuid,'login',now()-interval '1 hour',jsonb_build_object('payload',repeat('heavy',1000)) FROM generate_series(1,63)n`)
 	if err != nil {
 		t.Fatal(err)
@@ -363,5 +371,25 @@ func TestAuditPagesPostgres(t *testing.T) {
 	}
 	if len(seen) != 63 {
 		t.Fatalf("missing rows: %d", len(seen))
+	}
+
+	// Details (the handler's description of what happened) are stored,
+	// returned by list and detail, and searchable as "Extra info".
+	entry := models.NewAuditLog(uuid.Nil, "analyst", "playbook.run", "playbook_execution", uuid.New()).
+		WithDetails("playbook Contain host run on agent WS-042")
+	if err := repo.Create(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	full, err := repo.GetByID(ctx, entry.ID)
+	if err != nil || full.Details != "playbook Contain host run on agent WS-042" {
+		t.Fatalf("details not persisted: %v %+v", err, full)
+	}
+	p, err := pagination.Parse(url.Values{}, pagination.Options{Scope: "audit-test", DefaultSort: "created_at", Sorts: map[string]string{"created_at": "created_at"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := repo.List(ctx, AuditLogFilter{Page: &p, Text: map[string]string{"extra": "WS-042"}})
+	if err != nil || len(rows) != 1 || rows[0].Details != full.Details {
+		t.Fatalf("details not searchable: %v %d", err, len(rows))
 	}
 }

@@ -440,7 +440,7 @@ export default function Rules() {
                     </div>
 
                     <PaginationControls info={pager.info} page={pager.page} count={pager.rows.length} busy={pager.busy}
-                        onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
+                        onNext={pager.next} onFirst={pager.first} onPrevious={pager.previous} onSize={pager.setPageSize} />
                     {/* Footer */}
                     <div className="shrink-0 px-5 py-3 bg-slate-50/60 dark:bg-slate-900/40 border-t border-slate-200 dark:border-slate-800/60 text-xs text-slate-500 dark:text-slate-400 flex justify-between items-center">
                         <span>

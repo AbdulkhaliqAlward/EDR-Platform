@@ -24,7 +24,7 @@ type AlertRepository interface {
 	GetStats(ctx context.Context) (*AlertStats, error)
 	// GetEndpointRiskSummary returns per-agent risk posture ordered by peak risk score DESC.
 	// Added for Phase 2 Endpoint Risk Intelligence page.
-	GetEndpointRiskSummary(ctx context.Context) ([]*models.EndpointRiskSummary, error)
+	GetEndpointRiskSummary(ctx context.Context, since time.Time) ([]*models.EndpointRiskSummary, error)
 }
 
 // AlertFilter for querying alerts.
@@ -331,37 +331,53 @@ func (r *PostgresAlertRepository) GetStats(ctx context.Context) (*AlertStats, er
 // Canonicalization strategy:
 //   1) Direct match: sigma_alerts.agent_id == agents.id
 //   2) Re-enrollment bridge: sigma_alerts.agent_id == agents.metadata.previous_agent_id
-//   3) Fallback: keep sigma_alerts.agent_id as-is when no mapping exists
 //
-// This preserves historical attribution while presenting a single logical endpoint row.
-func (r *PostgresAlertRepository) GetEndpointRiskSummary(ctx context.Context) ([]*models.EndpointRiskSummary, error) {
+// Alerts that map to no existing (non-deleted) agent are excluded: a removed
+// endpoint leaves the board. since bounds how recently an alert must have been
+// active (last_seen_at) to count.
+func (r *PostgresAlertRepository) GetEndpointRiskSummary(ctx context.Context, since time.Time) ([]*models.EndpointRiskSummary, error) {
+	// Only alerts that still need attention count toward risk:
+	//   - active statuses only (suppressed / resolved / false_positive / closed
+	//     never inflate an endpoint's score);
+	//   - active within the window (last_seen_at, so a recurring alert stays
+	//     current while a stale one ages out);
+	//   - the endpoint must exist and not be deleted: removing an agent removes
+	//     it from the board. Re-enrolled agents inherit alerts filed under
+	//     their previous_agent_id.
+	// Tiers match the engine's risk levels: critical >= 90, high 70-89, medium 40-69.
 	query := `
 		WITH mapped AS (
 			SELECT
-				COALESCE(curr.id::text, prev.id::text, sa.agent_id) AS canonical_agent_id,
+				COALESCE(curr.id, prev.id)            AS agent_uuid,
 				sa.risk_score,
 				sa.status,
-				sa.timestamp
+				COALESCE(sa.last_seen_at, sa.timestamp) AS seen_at
 			FROM sigma_alerts sa
 			LEFT JOIN agents curr ON curr.id::text = sa.agent_id
-			LEFT JOIN agents prev ON prev.metadata->>'previous_agent_id' = sa.agent_id
-			WHERE sa.status NOT IN ('resolved', 'false_positive', 'closed')
+			LEFT JOIN agents prev ON curr.id IS NULL AND prev.metadata->>'previous_agent_id' = sa.agent_id
+			WHERE sa.status IN ('open', 'acknowledged', 'in_progress', 'investigating')
+			  AND COALESCE(sa.last_seen_at, sa.timestamp) >= $1
 		)
 		SELECT
-			canonical_agent_id                                  AS agent_id,
-			COUNT(*)                                            AS total_alerts,
-			MAX(risk_score)                                     AS peak_risk_score,
-			ROUND(AVG(risk_score)::numeric, 1)                  AS avg_risk_score,
-			COUNT(*) FILTER (WHERE risk_score >= 90)            AS critical_count,
-			COUNT(*) FILTER (WHERE risk_score >= 70
-			                   AND risk_score < 90)             AS high_count,
-			COUNT(*) FILTER (WHERE status = 'open')             AS open_count,
-			MAX(timestamp)                                      AS last_alert_at
-		FROM mapped
-		GROUP BY canonical_agent_id
-		ORDER BY peak_risk_score DESC, critical_count DESC`
+			a.id::text,
+			COUNT(*)                                                   AS total_alerts,
+			MAX(m.risk_score)                                          AS peak_risk_score,
+			ROUND(AVG(m.risk_score)::numeric, 1)::float8               AS avg_risk_score,
+			COUNT(*) FILTER (WHERE m.risk_score >= 90)                 AS critical_count,
+			COUNT(*) FILTER (WHERE m.risk_score >= 70 AND m.risk_score < 90) AS high_count,
+			COUNT(*) FILTER (WHERE m.risk_score >= 40 AND m.risk_score < 70) AS medium_count,
+			COUNT(*) FILTER (WHERE m.status = 'open')                  AS open_count,
+			MAX(m.seen_at)                                             AS last_alert_at,
+			COALESCE(a.hostname, ''), COALESCE(a.os_type, ''), COALESCE(a.status, ''),
+			COALESCE(a.metadata->>'device_criticality', ''), COALESCE(a.metadata->>'role_risk', ''),
+			COALESCE(a.metadata->>'network_anomaly', '')
+		FROM mapped m
+		JOIN agents a ON a.id = m.agent_uuid AND a.status <> 'deleted'
+		GROUP BY a.id
+		ORDER BY peak_risk_score DESC, critical_count DESC, high_count DESC, a.id
+		LIMIT 5000`
 
-	rows, err := r.db.Query(ctx, query)
+	rows, err := r.db.Query(ctx, query, since)
 	if err != nil {
 		return nil, fmt.Errorf("endpoint risk summary query failed: %w", err)
 	}
@@ -378,8 +394,11 @@ func (r *PostgresAlertRepository) GetEndpointRiskSummary(ctx context.Context) ([
 			&avgRisk,
 			&s.CriticalCount,
 			&s.HighCount,
+			&s.MediumCount,
 			&s.OpenCount,
 			&s.LastAlertAt,
+			&s.Hostname, &s.OSType, &s.AgentStatus,
+			&s.DeviceCriticality, &s.RoleRisk, &s.NetworkAnomaly,
 		); err != nil {
 			return nil, fmt.Errorf("endpoint risk summary scan failed: %w", err)
 		}
@@ -389,5 +408,5 @@ func (r *PostgresAlertRepository) GetEndpointRiskSummary(ctx context.Context) ([
 	if summaries == nil {
 		summaries = []*models.EndpointRiskSummary{}
 	}
-	return summaries, nil
+	return summaries, rows.Err()
 }

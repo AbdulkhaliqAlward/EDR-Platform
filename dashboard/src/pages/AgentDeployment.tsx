@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
     Download, Shield, Server, Key, Terminal, CheckCircle,
     AlertTriangle, Copy, Loader2, HardDrive, Info,
@@ -62,6 +62,7 @@ function BuildModal({
         filename: string;
         token: string;
         build_id: string;
+        install_command: string;
     } | null>(null);
 
     // Persist form state on change
@@ -113,11 +114,17 @@ function BuildModal({
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
+            // A build with embedded server settings needs only the token; a
+            // "skip config" build must be told where the server is.
+            const install = skip
+                ? `echo '${result.token}' | .\\edr-agent.exe -install -token-stdin -server-ip <SERVER_IP> -server-domain <DOMAIN> -server-port 47051`
+                : `echo '${result.token}' | .\\edr-agent.exe -install -token-stdin`;
             setBuildResult({
                 sha256: result.sha256,
                 filename: result.filename,
                 token: result.token,
                 build_id: result.build_id,
+                install_command: install,
             });
             setBuildProgress('');
             clearFormState();
@@ -221,13 +228,11 @@ function BuildModal({
                             <span className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 block">Install Command (run as Administrator):</span>
                             <div className="relative group">
                                 <div className="bg-slate-900 dark:bg-black rounded-lg p-3 font-mono text-xs text-green-400 break-all">
-                                    {`echo '${buildResult.token}' | .\\edr-agent.exe -install -token-stdin -server-ip <SERVER_IP> -server-domain <DOMAIN>`}
+                                    {buildResult.install_command}
                                 </div>
                                 <button
                                     onClick={() => {
-                                        navigator.clipboard.writeText(
-                                            `echo '${buildResult.token}' | .\\edr-agent.exe -install -token-stdin -server-ip <SERVER_IP> -server-domain <DOMAIN>`
-                                        );
+                                        navigator.clipboard.writeText(buildResult.install_command);
                                     }}
                                     className="absolute top-1.5 right-1.5 p-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
                                     title="Copy install command"
@@ -494,7 +499,7 @@ export default function AgentDeployment() {
                         Agent Deployment
                     </h2>
                     <p className="text-slate-500 dark:text-slate-400 mt-1">
-                        Build, configure, and deploy the MITRAS agent to endpoint machines.
+                        Build a bound agent binary, install it on Windows endpoints and verify enrollment.
                     </p>
                 </div>
                 {authApi.canBuildAgent() && (
@@ -516,10 +521,11 @@ export default function AgentDeployment() {
                         <div className="p-2 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
                             <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
                         </div>
-                        <h3 className="font-semibold text-slate-900 dark:text-white">Secure Build</h3>
+                        <h3 className="font-semibold text-slate-900 dark:text-white">Bound, token-free binary</h3>
                     </div>
                     <p className="text-sm text-slate-600 dark:text-slate-400">
-                        CA certificate is embedded at build time — no insecure network fetch required.
+                        Each build embeds the platform CA, the server address (unless skipped) and a one-way binding to its
+                        enrollment token — never the token itself.
                     </p>
                 </div>
 
@@ -528,13 +534,14 @@ export default function AgentDeployment() {
                         <div className="p-2 bg-cyan-100 dark:bg-cyan-900/30 rounded-lg">
                             <Key className="w-5 h-5 text-cyan-600 dark:text-cyan-400" />
                         </div>
-                        <h3 className="font-semibold text-slate-900 dark:text-white">Valid Tokens</h3>
+                        <h3 className="font-semibold text-slate-900 dark:text-white">Unused enrollment tokens</h3>
                     </div>
                     <p className="text-sm text-slate-600 dark:text-slate-400">
                         {tokensLoading ? (
                             <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Loading...</span>
                         ) : (
-                            <><span className="text-2xl font-bold text-cyan-600 dark:text-cyan-400">{validTokens.length}</span> enrollment tokens available for agent builds.</>
+                            <><span className="text-2xl font-bold text-cyan-600 dark:text-cyan-400">{validTokens.length}</span> available. Each token builds <strong>one</strong> agent.{' '}
+                                <Link to="/security/tokens" className="text-cyan-600 dark:text-cyan-400 hover:underline">Manage tokens</Link></>
                         )}
                     </p>
                 </div>
@@ -544,10 +551,11 @@ export default function AgentDeployment() {
                         <div className="p-2 bg-violet-100 dark:bg-violet-900/30 rounded-lg">
                             <HardDrive className="w-5 h-5 text-violet-600 dark:text-violet-400" />
                         </div>
-                        <h3 className="font-semibold text-slate-900 dark:text-white">Cross-Platform</h3>
+                        <h3 className="font-semibold text-slate-900 dark:text-white">Windows x64</h3>
                     </div>
                     <p className="text-sm text-slate-600 dark:text-slate-400">
-                        Agents are compiled as Windows x64 binaries, ready for deployment on any Windows endpoint.
+                        A single <code className="px-1 bg-slate-100 dark:bg-slate-700 rounded text-xs font-mono">edr-agent.exe</code> that installs itself as the
+                        <code className="px-1 bg-slate-100 dark:bg-slate-700 rounded text-xs font-mono">EDRAgent</code> service (LocalSystem).
                     </p>
                 </div>
             </div>
@@ -561,53 +569,51 @@ export default function AgentDeployment() {
                         Deployment Guide
                     </h2>
 
-                    <StepCard step={1} title="Build the Agent" icon={Cpu}>
+                    <StepCard step={1} title="Build the agent" icon={Cpu}>
                         <p>
-                            Click <strong className="text-cyan-600 dark:text-cyan-400">"Build Agent"</strong> above
-                            to configure and compile a pre-configured agent binary. The build process embeds the CA
-                            certificate and your selected enrollment token directly into the binary.
+                            Click <strong className="text-cyan-600 dark:text-cyan-400">Build Agent</strong>, choose an unused enrollment token and
+                            enter the server IP, domain and gRPC port (default <code className="px-1 bg-slate-100 dark:bg-slate-700 rounded text-xs font-mono">47051</code>).
+                            The binary downloads automatically and the token is shown <strong>once</strong> — copy it now; it is not stored anywhere you can retrieve it later.
                         </p>
                     </StepCard>
 
-                    <StepCard step={2} title="Transfer to Endpoint" icon={HardDrive}>
+                    <StepCard step={2} title="Transfer to the endpoint" icon={HardDrive}>
                         <p>
-                            Copy the downloaded <code className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-700 rounded text-xs font-mono">edr-agent.exe</code> to
-                            the target Windows machine. Use a secure transfer method (USB, internal share, SCCM, etc.).
+                            Copy <code className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-700 rounded text-xs font-mono">edr-agent.exe</code> to the Windows machine
+                            over a trusted channel (internal share, SCCM/Intune, USB). Optionally compare its SHA-256 with the value shown after the build.
                         </p>
                     </StepCard>
 
-                    <StepCard step={3} title="Install with Token (Secure)" icon={Shield}>
+                    <StepCard step={3} title="Install (token via stdin)" icon={Shield}>
                         <p>
-                            Pass the enrollment token via <strong>stdin</strong> — it never appears in the process list or shell history:
+                            In an <strong>elevated</strong> PowerShell, pipe the token so it never appears in the process list or shell history.
+                            Server settings come from the build:
                         </p>
-                        <CodeBlock
-                            label="Run as Administrator"
-                            code={`echo '<YOUR_TOKEN>' | .\\edr-agent.exe -install -token-stdin -server-ip 192.168.1.10 -server-domain edr.local`}
-                        />
+                        <CodeBlock label="Run as Administrator" code={`echo '<YOUR_TOKEN>' | .\\edr-agent.exe -install -token-stdin`} />
                         <p className="text-xs text-slate-500 dark:text-slate-400">
-                            The token is shown once after building. The binary contains <strong>zero</strong> token material.
+                            Built with “skip server config”? Add <code className="font-mono">-server-ip &lt;IP&gt; -server-domain &lt;DOMAIN&gt; -server-port 47051</code>.
+                            The installer checks DNS and TCP reachability before registering the service; the legacy
+                            <code className="font-mono"> -token &lt;TOKEN&gt;</code> flag still works but exposes the token in the process list.
                         </p>
                     </StepCard>
 
-                    <StepCard step={4} title="Install (Legacy Flag)" icon={Terminal}>
+                    <StepCard step={4} title="Verify" icon={CheckCircle}>
+                        <p>Confirm the service is running and the agent connected:</p>
+                        <CodeBlock code={`sc.exe query EDRAgent\nGet-Content C:\\ProgramData\\EDR\\logs\\agent.log -Tail 20`} />
                         <p>
-                            Alternatively, pass the token as a CLI flag (less secure — visible in process list):
+                            The endpoint appears in{' '}
+                            <Link to="/management/devices" className="text-cyan-600 dark:text-cyan-400 hover:underline inline-flex items-center gap-1">
+                                Devices (Fleet) <ChevronRight className="w-3 h-3" />
+                            </Link>{' '}
+                            within seconds of enrollment.
                         </p>
-                        <CodeBlock
-                            label="Run as Administrator"
-                            code={`.\\edr-agent.exe -install -token <YOUR_TOKEN> -server-ip 192.168.1.10 -server-domain edr.local`}
-                        />
                     </StepCard>
 
-                    <StepCard step={5} title="Verify Installation" icon={CheckCircle}>
-                        <p>Check that the agent service is running:</p>
-                        <CodeBlock code={`sc query EDRAgent\nGet-Content C:\\ProgramData\\EDR\\logs\\agent.log -Tail 20`} />
+                    <StepCard step={5} title="Upgrade or remove" icon={Terminal}>
                         <p>
-                            The agent should appear in the{' '}
-                            <a href="/endpoints" className="text-cyan-600 dark:text-cyan-400 hover:underline inline-flex items-center gap-1">
-                                Endpoints <ChevronRight className="w-3 h-3" />
-                            </a>{' '}
-                            page within seconds.
+                            Upgrade in place with <code className="px-1 bg-slate-100 dark:bg-slate-700 rounded text-xs font-mono">.\edr-agent.exe -update</code> (keeps
+                            identity and configuration). To remove an agent, use <strong>Uninstall</strong> on its device page while it is online, or generate an
+                            offline uninstall token there and run the command in the panel on the right.
                         </p>
                     </StepCard>
                 </div>
@@ -617,49 +623,45 @@ export default function AgentDeployment() {
                     <div className="card p-5">
                         <h3 className="font-semibold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
                             <Server className="w-4 h-4 text-cyan-500" />
-                            Architecture Overview
+                            How enrollment works
                         </h3>
-                        <div className="space-y-3 text-sm text-slate-600 dark:text-slate-400">
-                            <div className="flex items-start gap-2">
-                                <div className="w-2 h-2 rounded-full bg-cyan-500 mt-1.5 shrink-0" />
-                                <span><strong>Build server</strong> compiles agent with embedded CA cert + token</span>
-                            </div>
-                            <div className="flex items-start gap-2">
-                                <div className="w-2 h-2 rounded-full bg-emerald-500 mt-1.5 shrink-0" />
-                                <span><strong>Agent</strong> installs as Windows Service (SYSTEM account)</span>
-                            </div>
-                            <div className="flex items-start gap-2">
-                                <div className="w-2 h-2 rounded-full bg-violet-500 mt-1.5 shrink-0" />
-                                <span><strong>mTLS enrollment</strong> using embedded token for certificate provisioning</span>
-                            </div>
-                            <div className="flex items-start gap-2">
-                                <div className="w-2 h-2 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                                <span><strong>Connectivity check</strong> validates DNS + TCP before service registration</span>
-                            </div>
-                        </div>
+                        <ol className="space-y-3 text-sm text-slate-600 dark:text-slate-400 list-none">
+                            <li className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded-full bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 text-[11px] font-bold flex items-center justify-center shrink-0">1</span>
+                                <span>The installer checks the token locally against the binding baked into this build, so a token only works with its own binary.</span>
+                            </li>
+                            <li className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded-full bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 text-[11px] font-bold flex items-center justify-center shrink-0">2</span>
+                                <span>The agent enrolls over TLS (pinned to the embedded CA) and receives its own client certificate.</span>
+                            </li>
+                            <li className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded-full bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 text-[11px] font-bold flex items-center justify-center shrink-0">3</span>
+                                <span>From then on it streams telemetry and receives commands over mutual TLS; the token is no longer needed.</span>
+                            </li>
+                        </ol>
                     </div>
 
                     <div className="card p-5">
                         <h3 className="font-semibold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
                             <AlertTriangle className="w-4 h-4 text-amber-500" />
-                            Important Notes
+                            Important notes
                         </h3>
                         <ul className="space-y-2 text-sm text-slate-600 dark:text-slate-400">
                             <li className="flex items-start gap-2">
                                 <ChevronRight className="w-4 h-4 text-cyan-500 mt-0.5 shrink-0" />
-                                <span>Token is <strong className="text-slate-800 dark:text-slate-200">always required</strong> — cannot be skipped or overridden from CLI.</span>
+                                <span>An enrollment token can be used for <strong className="text-slate-800 dark:text-slate-200">one build only</strong>; create a new token for each additional binary.</span>
                             </li>
                             <li className="flex items-start gap-2">
                                 <ChevronRight className="w-4 h-4 text-cyan-500 mt-0.5 shrink-0" />
-                                <span>Run the installer as <strong className="text-slate-800 dark:text-slate-200">Administrator</strong> on the target machine.</span>
+                                <span>Run the installer as <strong className="text-slate-800 dark:text-slate-200">Administrator</strong>; it writes the hosts entry for the server domain idempotently.</span>
                             </li>
                             <li className="flex items-start gap-2">
                                 <ChevronRight className="w-4 h-4 text-cyan-500 mt-0.5 shrink-0" />
-                                <span>If the CA certificate is rotated, all agents must be <strong className="text-slate-800 dark:text-slate-200">rebuilt and redeployed</strong>.</span>
+                                <span>If the platform CA is rotated, rebuild and redeploy every agent.</span>
                             </li>
                             <li className="flex items-start gap-2">
                                 <ChevronRight className="w-4 h-4 text-cyan-500 mt-0.5 shrink-0" />
-                                <span>The hosts file is updated idempotently — reinstalling won't create duplicate entries.</span>
+                                <span>Offline uninstall only works with agents built by a version that embeds the uninstall key.</span>
                             </li>
                         </ul>
                     </div>
@@ -667,11 +669,12 @@ export default function AgentDeployment() {
                     <div className="card p-5">
                         <h3 className="font-semibold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
                             <Terminal className="w-4 h-4 text-cyan-500" />
-                            Uninstall Command
+                            Offline uninstall
                         </h3>
-                        <CodeBlock code={`.\\edr-agent.exe -uninstall -token <uninstall-token>`} />
+                        <CodeBlock code={`echo '<UNINSTALL_TOKEN>' | .\\edr-agent.exe -uninstall -token-stdin`} />
                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
-                            Requires an authorization token to prevent unauthorized uninstallation.
+                            Generate the token on the endpoint's device page (Uninstall → generate token). It is signed by the server,
+                            valid for that one endpoint only and expires after about 30 minutes.
                         </p>
                     </div>
                 </div>

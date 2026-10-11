@@ -91,13 +91,22 @@ type Alert struct {
 // from the /api/v1/agents endpoint that is already cached by React Query.
 type EndpointRiskSummary struct {
 	AgentID       string    `json:"agent_id"`
-	TotalAlerts   int64     `json:"total_alerts"`
+	TotalAlerts   int64     `json:"total_alerts"` // active alerts in the window
 	PeakRiskScore int       `json:"peak_risk_score"`
 	AvgRiskScore  float64   `json:"avg_risk_score"`
 	CriticalCount int64     `json:"critical_count"` // risk_score >= 90
 	HighCount     int64     `json:"high_count"`     // risk_score 70-89
-	OpenCount     int64     `json:"open_count"`     // status = 'open'
+	MediumCount   int64     `json:"medium_count"`   // risk_score 40-69
+	OpenCount     int64     `json:"open_count"`     // status = 'open' (untriaged)
 	LastAlertAt   time.Time `json:"last_alert_at"`
+	// Endpoint identity from the agents table (the endpoint must exist and not
+	// be deleted to appear at all).
+	Hostname          string `json:"hostname"`
+	OSType            string `json:"os_type"`
+	AgentStatus       string `json:"agent_status"`
+	DeviceCriticality string `json:"device_criticality,omitempty"`
+	RoleRisk          string `json:"role_risk,omitempty"`
+	NetworkAnomaly    string `json:"network_anomaly,omitempty"`
 }
 
 // IsOpen returns true if alert is open or in progress.

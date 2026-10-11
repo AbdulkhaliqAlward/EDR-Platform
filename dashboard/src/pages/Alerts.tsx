@@ -117,7 +117,7 @@ export default function Alerts() {
                         {/* Pagination */}
                         <div className="shrink-0 z-20">
                             <PaginationControls info={pagination.info} page={pagination.page} count={alerts.length} busy={pagination.busy}
-                                total={pagination.data?.total} onNext={pagination.next} onPrevious={pagination.previous} onSize={pagination.setPageSize} />
+                                total={pagination.data?.total} onNext={pagination.next} onFirst={pagination.first} onPrevious={pagination.previous} onSize={pagination.setPageSize} />
                         </div>
                     </div>
                 </div>

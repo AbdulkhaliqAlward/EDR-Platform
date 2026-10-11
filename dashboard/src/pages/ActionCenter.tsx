@@ -477,7 +477,7 @@ export default function ActionCenter() {
                             )}
                         </div>
 
-                        <PaginationControls info={pager.info} page={pager.page} count={commands.length} busy={pager.busy} total={pager.data?.total} onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
+                        <PaginationControls info={pager.info} page={pager.page} count={commands.length} busy={pager.busy} total={pager.data?.total} onNext={pager.next} onFirst={pager.first} onPrevious={pager.previous} onSize={pager.setPageSize} />
                     </div>
                     </>
                 )}
@@ -685,7 +685,7 @@ function AutoProcTerminationPanel({ showToast }: { showToast: (msg: string, type
                 )}
             </div>
 
-            <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} onNext={q.next} onPrevious={q.previous} onSize={q.setPageSize} />
+            <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} onNext={q.next} onFirst={q.first} onPrevious={q.previous} onSize={q.setPageSize} />
         </div>
 
         {/* Allow Confirmation Dialog */}

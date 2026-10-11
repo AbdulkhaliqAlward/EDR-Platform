@@ -504,6 +504,10 @@ type MalwareHashRepository interface {
 	// GetLatest returns the most recently inserted hashes, ordered newest-first.
 	GetLatest(ctx context.Context, limit int) ([]*models.MalwareHash, error)
 
+	// ListCatalog returns one keyset page of the catalog, newest first
+	// (version DESC, id DESC), optionally filtered by hash/name/family/source.
+	ListCatalog(ctx context.Context, f SignatureCatalogFilter) ([]*models.MalwareHash, error)
+
 	// GetSyncHistory returns the N most recent completed sync generations, newest first.
 	GetSyncHistory(ctx context.Context, limit int) ([]*SyncEpoch, error)
 

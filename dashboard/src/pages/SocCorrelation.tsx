@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -28,6 +28,8 @@ import {
 } from 'recharts';
 import { alertsApi, agentsApi, commandsApi, eventsApi, type Alert, type CmEventSummary, type CommandListItem } from '../api/client';
 import { DateRangePicker, type DateRange } from '../components/DateRangePicker';
+import { PaginationControls } from '../components/PaginationControls';
+import { useClientPagination } from '../hooks/useClientPagination';
 import StatCard from '../components/StatCard';
 import InsightHero from '../components/InsightHero';
 import EmptyState from '../components/EmptyState';
@@ -178,16 +180,18 @@ function kindLabel(kind: FusionKind): string {
     }
 }
 
+/** Per-source load bound for one endpoint and range (read as ≤100-row pages). */
+const LOAD_LIMIT = 500;
+const FOCUS_WINDOW_MS = 10 * 60 * 1000;
+
 export default function SocCorrelation() {
     const [agentId, setAgentId] = useState<string>('');
     const [range, setRange] = useState<DateRange>(() => last24hRange());
-    const [fusionPage, setFusionPage] = useState(0);
-    const [rawAlertsPage, setRawAlertsPage] = useState(0);
-
-    useEffect(() => {
-        setFusionPage(0);
-        setRawAlertsPage(0);
-    }, [agentId, range]);
+    // Timeline view filters: kinds shown, free text, and a focus window around
+    // one alert (±10 min) to see what happened before and after it.
+    const [kinds, setKinds] = useState<Record<FusionKind, boolean>>({ alert: true, command: true, event: true });
+    const [timelineSearch, setTimelineSearch] = useState('');
+    const [focus, setFocus] = useState<{ ts: number; title: string } | null>(null);
 
     const fromIso = isoOrNull(range.from);
     const toIso = isoOrNull(range.to);
@@ -219,8 +223,7 @@ export default function SocCorrelation() {
         queryFn: async () => {
             if (!agentId || !fromIso || !toIso) return { alerts: [] as Alert[], total: 0 };
             return alertsApi.list({
-                limit: 500,
-                offset: 0,
+                limit: LOAD_LIMIT,
                 agent_id: agentId,
                 date_from: fromIso,
                 date_to: toIso,
@@ -237,7 +240,7 @@ export default function SocCorrelation() {
         queryKey: ['correlation', 'commands', agentId, fromIso, toIso],
         queryFn: async () => {
             if (!agentId) return { data: [] as CommandListItem[], pagination: { total: 0, limit: 0, offset: 0, has_more: false } };
-            return commandsApi.list({limit: 100,agent_id: agentId,sort_by: 'issued_at',sort_order: 'desc',from:fromIso || undefined,to:toIso || undefined});
+            return commandsApi.list({ limit: LOAD_LIMIT, agent_id: agentId, sort_by: 'issued_at', sort_order: 'desc', from: fromIso || undefined, to: toIso || undefined });
         },
         enabled: !!agentId,
         staleTime: 20_000,
@@ -249,11 +252,10 @@ export default function SocCorrelation() {
         queryFn: async () => {
             if (!agentId || !fromIso || !toIso) return { rows: [] as CmEventSummary[], total: 0 };
             const r = await eventsApi.search({
-                filters: [{ field: 'agent_id', operator: 'eq', value: agentId }],
+                filters: [{ field: 'agent_id', operator: 'equals', value: agentId }],
                 logic: 'AND',
                 time_range: { from: fromIso, to: toIso },
-                limit: 500,
-                offset: 0,
+                limit: LOAD_LIMIT,
             });
             return { rows: r.data ?? [], total: r.pagination?.total ?? (r.data?.length ?? 0) };
         },
@@ -369,8 +371,25 @@ export default function SocCorrelation() {
                 tags
             });
         }
-        return rows.sort((a, b) => b.ts - a.ts).slice(0, 120);
+        return rows.sort((a, b) => b.ts - a.ts);
     }, [alerts, commands, eventRows]);
+
+    const timelineTerm = timelineSearch.trim().toLowerCase();
+    const visibleTimeline = useMemo(() => fusionTimeline.filter(row =>
+        kinds[row.kind] &&
+        (!focus || Math.abs(row.ts - focus.ts) <= FOCUS_WINDOW_MS) &&
+        (!timelineTerm || `${row.title} ${row.subtitle} ${row.tags?.map(t => t.label).join(' ') ?? ''}`.toLowerCase().includes(timelineTerm))),
+    [fusionTimeline, kinds, focus, timelineTerm]);
+    const timelinePager = useClientPagination(visibleTimeline, {
+        namespace: 'timeline',
+        resetKey: `${agentId}|${fromIso}|${toIso}|${kinds.alert}${kinds.command}${kinds.event}|${focus?.ts ?? ''}|${timelineTerm}`,
+    });
+    const alertsPager = useClientPagination(alerts, { namespace: 'alerts', resetKey: `${agentId}|${fromIso}|${toIso}` });
+    const truncatedSources = [
+        alerts.length >= LOAD_LIMIT && 'alerts',
+        commands.length >= LOAD_LIMIT && 'commands',
+        eventRows.length >= LOAD_LIMIT && 'telemetry',
+    ].filter(Boolean) as string[];
 
     const rangeHours = useMemo(() => {
         if (!range.from || !range.to) return 0;
@@ -387,12 +406,12 @@ export default function SocCorrelation() {
                 accent="cyan"
                 icon={GitBranch}
                 eyebrow="SOC correlation workspace"
-                title="Temporal fusion"
+                title="Endpoint Activity Correlation"
                 lead={
                     <>
-                        Align <strong className="text-white">Sigma detections</strong>, <strong className="text-white">C2 command history</strong>, and{' '}
-                        <strong className="text-white">connection-manager telemetry</strong> on one clock for a single host. Built for investigation storyboards — not a replacement for
-                        the full Alerts grid or Telemetry Search table.
+                        Correlate one endpoint's <strong className="text-white">detections</strong>, <strong className="text-white">response commands</strong> and{' '}
+                        <strong className="text-white">raw telemetry</strong> on a single timeline. Focus on an alert to see what ran
+                        on the host in the 10 minutes before and after it.
                     </>
                 }
                 actions={
@@ -609,30 +628,39 @@ export default function SocCorrelation() {
                             <div>
                                 <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
                                     <GitBranch className="w-4 h-4 text-emerald-400" />
-                                    Unified fusion timeline
+                                    Correlated activity timeline
                                 </h3>
                                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                                    Newest first — up to 120 entries across alerts, commands, and telemetry.
+                                    Newest first, across alerts, commands and telemetry ({fusionTimeline.length.toLocaleString()} entries loaded).
                                 </p>
                             </div>
-                            <div className="flex flex-wrap gap-3 text-[10px] uppercase font-semibold tracking-wide text-slate-500">
-                                <span className="flex items-center gap-1">
-                                    <span className="w-2 h-2 rounded-full bg-amber-500" /> Alert
-                                </span>
-                                <span className="flex items-center gap-1">
-                                    <span className="w-2 h-2 rounded-full bg-cyan-500" /> Command
-                                </span>
-                                <span className="flex items-center gap-1">
-                                    <span className="w-2 h-2 rounded-full bg-emerald-500" /> Telemetry
-                                </span>
+                            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Show entry types">
+                                {([['alert', 'Alerts', 'bg-amber-500'], ['command', 'Commands', 'bg-cyan-500'], ['event', 'Telemetry', 'bg-emerald-500']] as const).map(([kind, label, dot]) => (
+                                    <button key={kind} type="button" aria-pressed={kinds[kind]} onClick={() => setKinds(k => ({ ...k, [kind]: !k[kind] }))}
+                                        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold ${kinds[kind] ? 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200' : 'border-dashed border-slate-300 dark:border-slate-700 text-slate-400 line-through'}`}>
+                                        <span className={`w-2 h-2 rounded-full ${dot}`} />{label}
+                                    </button>
+                                ))}
+                                <input type="search" aria-label="Filter timeline" value={timelineSearch} onChange={e => setTimelineSearch(e.target.value)} placeholder="Filter timeline…"
+                                    className="w-44 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2.5 py-1 text-xs" />
                             </div>
                         </div>
-                        <div className="max-h-[420px] overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700/60 divide-y divide-slate-100 dark:divide-slate-800">
-                            {fusionTimeline.length === 0 ? (
-                                <div className="p-8 text-center text-sm text-slate-500 dark:text-slate-400">Nothing to show for this window.</div>
+                        {focus && (
+                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300/60 dark:border-amber-700/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                                <span>Focused on <strong>{focus.title}</strong> — showing activity from {new Date(focus.ts - FOCUS_WINDOW_MS).toLocaleTimeString()} to {new Date(focus.ts + FOCUS_WINDOW_MS).toLocaleTimeString()}</span>
+                                <button type="button" onClick={() => setFocus(null)} className="font-semibold underline">Clear focus</button>
+                            </div>
+                        )}
+                        {truncatedSources.length > 0 && (
+                            <p className="mb-3 text-xs text-slate-500">Only the {LOAD_LIMIT} most recent {truncatedSources.join(', ')} in this range are loaded — narrow the time range to correlate older activity.</p>
+                        )}
+                        <div className="rounded-lg border border-slate-200 dark:border-slate-700/60 overflow-hidden">
+                        <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                            {visibleTimeline.length === 0 ? (
+                                <div className="p-8 text-center text-sm text-slate-500 dark:text-slate-400">{fusionTimeline.length === 0 ? 'Nothing to show for this window.' : 'No entries match these filters.'}</div>
                             ) : (
                                 <>
-                                    {fusionTimeline.slice(fusionPage * 10, (fusionPage + 1) * 10).map((row) => (
+                                    {timelinePager.pageRows.map((row) => (
                                         <div key={`${row.kind}-${row.id}`} className={`flex gap-3 px-3 py-2.5 border-l-4 ${row.accent}`}>
                                             <div className="w-36 shrink-0 text-[11px] font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">
                                                 {new Date(row.ts).toLocaleString()}
@@ -653,33 +681,18 @@ export default function SocCorrelation() {
                                                 </div>
                                                 <div className="text-xs text-slate-600 dark:text-slate-400 font-mono leading-relaxed line-clamp-2" title={row.subtitle}>{row.subtitle}</div>
                                             </div>
+                                            {row.kind === 'alert' && (
+                                                <button type="button" onClick={() => setFocus(focus?.ts === row.ts ? null : { ts: row.ts, title: row.title })}
+                                                    className="self-start shrink-0 rounded-md border border-slate-200 dark:border-slate-700 px-2 py-1 text-[10px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">
+                                                    {focus?.ts === row.ts ? 'Unfocus' : 'Focus ±10 min'}
+                                                </button>
+                                            )}
                                         </div>
                                     ))}
-                                    {fusionTimeline.length > 10 && (
-                                        <div className="flex items-center justify-between px-4 py-3 bg-slate-50/50 dark:bg-slate-800/50">
-                                            <div className="text-xs text-slate-500 dark:text-slate-400">
-                                                Showing {fusionPage * 10 + 1} to {Math.min((fusionPage + 1) * 10, fusionTimeline.length)} of {fusionTimeline.length} entries
-                                            </div>
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={() => setFusionPage(p => Math.max(0, p - 1))}
-                                                    disabled={fusionPage === 0}
-                                                    className="px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-600 transition-colors"
-                                                >
-                                                    Prev
-                                                </button>
-                                                <button
-                                                    onClick={() => setFusionPage(p => Math.min(Math.ceil(fusionTimeline.length / 10) - 1, p + 1))}
-                                                    disabled={(fusionPage + 1) * 10 >= fusionTimeline.length}
-                                                    className="px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-600 transition-colors"
-                                                >
-                                                    Next
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
                                 </>
                             )}
+                        </div>
+                        {visibleTimeline.length > 0 && <PaginationControls {...timelinePager.controls} label="entries" />}
                         </div>
                     </div>
 
@@ -702,7 +715,7 @@ export default function SocCorrelation() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {alerts.slice(rawAlertsPage * 10, (rawAlertsPage + 1) * 10).map((a) => (
+                                        {alertsPager.pageRows.map((a) => (
                                             <tr key={a.id} className="border-t border-slate-100 dark:border-slate-800">
                                                 <td className="px-2 py-1.5 whitespace-nowrap">{new Date(a.timestamp).toLocaleString()}</td>
                                                 <td className="px-2 py-1.5 font-mono">{a.severity}</td>
@@ -718,29 +731,7 @@ export default function SocCorrelation() {
                                         )}
                                     </tbody>
                                 </table>
-                                {alerts.length > 10 && (
-                                    <div className="flex items-center justify-between px-3 py-2 border-t border-slate-200 dark:border-slate-700/60 bg-slate-50/50 dark:bg-slate-800/50">
-                                        <div className="text-[10px] text-slate-500">
-                                            Showing {rawAlertsPage * 10 + 1} to {Math.min((rawAlertsPage + 1) * 10, alerts.length)} of {alerts.length}
-                                        </div>
-                                        <div className="flex gap-1">
-                                            <button
-                                                onClick={() => setRawAlertsPage(p => Math.max(0, p - 1))}
-                                                disabled={rawAlertsPage === 0}
-                                                className="px-2 py-1 text-[10px] font-medium rounded border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-300 disabled:opacity-50 hover:bg-slate-50 dark:hover:bg-slate-600 transition-colors"
-                                            >
-                                                Prev
-                                            </button>
-                                            <button
-                                                onClick={() => setRawAlertsPage(p => Math.min(Math.ceil(alerts.length / 10) - 1, p + 1))}
-                                                disabled={(rawAlertsPage + 1) * 10 >= alerts.length}
-                                                className="px-2 py-1 text-[10px] font-medium rounded border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-300 disabled:opacity-50 hover:bg-slate-50 dark:hover:bg-slate-600 transition-colors"
-                                            >
-                                                Next
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
+                                {alerts.length > 0 && <PaginationControls {...alertsPager.controls} label="alerts" />}
                             </div>
                             <div>
                                 <div className="text-xs font-semibold text-slate-600 dark:text-slate-300 mb-2">Telemetry by type</div>

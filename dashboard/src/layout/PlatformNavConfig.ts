@@ -55,7 +55,7 @@ export const SOC_CONTEXT_TABS: ContextTab[] = [
     { to: '/rules', label: 'Detection Rules' },
     { to: '/responses', label: 'Command Center' },
     { to: '/soc/vulnerability', label: 'Vulnerability' },
-    { to: '/soc/correlation', label: 'Correlation' },
+    { to: '/soc/correlation', label: 'Activity Correlation' },
 ];
 
 /** Managed detection & response (MDR): service-level posture + incident queue — distinct from Security modules. */

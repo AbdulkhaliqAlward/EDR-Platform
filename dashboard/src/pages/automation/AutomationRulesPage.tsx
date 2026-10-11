@@ -6,6 +6,8 @@ import { Settings, TrendingUp, Clock, AlertTriangle, Plus, Activity, Power, X, C
 import { automationApi, authApi, type ResponsePlaybook } from '../../api/client';
 import { apiErrorMessage } from '../../api/apiError';
 import { useAutomationSettings } from '../../hooks/useAutomationSettings';
+import { PaginationControls } from '../../components/PaginationControls';
+import { useClientPagination } from '../../hooks/useClientPagination';
 
 interface AutomationRule {
   id: string;
@@ -101,6 +103,7 @@ export function AutomationRulesPage() {
   const location = useLocation();
   const [alertContext, setAlertContext] = useState<AlertContext | null>(null);
   const [rules, setRules] = useState<AutomationRule[]>([]);
+  const rulePager = useClientPagination(rules, { namespace: 'rules' });
   const [loading, setLoading] = useState(true);
   const { settings, loading: settingsLoading, error: settingsError, setCached, refresh } = useAutomationSettings();
   const [switchReason, setSwitchReason] = useState('');
@@ -494,8 +497,10 @@ export function AutomationRulesPage() {
             <p className="text-sm font-medium text-slate-500 mt-4">Loading rules...</p>
           </div>
         ) : (
+          <>
           <div className="divide-y divide-slate-200 dark:divide-slate-700/80">
-            {rules.map((rule) => (
+            {rules.length === 0 && <p className="p-6 text-sm text-slate-500">No automation rules configured yet.</p>}
+            {rulePager.pageRows.map((rule) => (
               <div key={rule.id} className={`p-6 transition-colors ${rule.enabled ? 'hover:bg-slate-50 dark:hover:bg-slate-800/40' : 'bg-slate-50/50 dark:bg-slate-800/20 opacity-80'}`}>
                 <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
                   <div className="flex-1">
@@ -620,6 +625,8 @@ export function AutomationRulesPage() {
               </div>
             ))}
           </div>
+          {rules.length > 0 && <PaginationControls {...rulePager.controls} label="rules" />}
+          </>
         )}
       </div>
 

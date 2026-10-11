@@ -511,7 +511,7 @@ export const PlatformAppShell = memo(function PlatformAppShell({ children }: { c
                                 Vulnerability
                             </DropdownLink>
                             <DropdownLink to="/soc/correlation" onNavigate={() => setOpenId(null)}>
-                                Correlation
+                                Activity Correlation
                             </DropdownLink>
                         </NavDropdown>
 

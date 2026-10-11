@@ -1148,7 +1148,7 @@ export default function Endpoints() {
             </div>
 
             <PaginationControls info={pager.info} page={pager.page} count={agents.length} busy={pager.busy} total={pager.data?.total}
-                onNext={pager.next} onPrevious={pager.previous} onSize={pager.setPageSize} />
+                onNext={pager.next} onFirst={pager.first} onPrevious={pager.previous} onSize={pager.setPageSize} />
             <CommandExecutionModal
                 isOpen={!!selectedAgent && !!selectedCommand}
                 onClose={() => {

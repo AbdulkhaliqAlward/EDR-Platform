@@ -1,13 +1,14 @@
 import { commandsApi } from '../api/client';
 import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
 import { PaginationControls } from '../components/PaginationControls';
+import { useClientPagination } from '../hooks/useClientPagination';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
     ArrowLeft, Activity, Terminal, Shield, HardDrive, Loader2,
     Server, Network, AlertTriangle, CheckCircle2, XCircle, Settings,
-    RefreshCw, ChevronLeft, ChevronRight, FileText, List, Package,
+    RefreshCw, FileText, List, Package,
     ShieldAlert, Pencil, Check, X as XIcon, Building2, Globe,
     Eye, Tag, Zap, Trash2
 } from 'lucide-react';
@@ -1293,8 +1294,6 @@ function ForensicsTab({ agentId }: { agentId: string }) {
     const [rows, setRows] = useState<ForensicEvent[]>([]);
     const [rawOpen, setRawOpen] = useState(false);
     const [rawEvent, setRawEvent] = useState<ForensicEvent | null>(null);
-    const [forPage, setForPage] = useState(1);
-    const FOR_PAGE_SIZE = 15;
 
     const collectionsQ = useQuery({
         queryKey: ['forensics', 'collections', agentId],
@@ -1357,6 +1356,7 @@ function ForensicsTab({ agentId }: { agentId: string }) {
     }, [eventsQ.data, eventsQ.isSuccess]);
 
     const nextCursor: number | undefined = (eventsQ.data as any)?.next_cursor;
+    const forensicPager = useClientPagination(rows, { namespace: 'forensic', resetKey: `${selectedCommandId}|${logType}` });
 
     const selected = collections.find((c) => c.command_id === selectedCommandId);
     const summaryCounts = selected?.summary?.counts || selected?.summary?.output_text || '';
@@ -1444,7 +1444,6 @@ function ForensicsTab({ agentId }: { agentId: string }) {
                             setLogType(e.target.value);
                             setCursor(undefined);
                             setRows([]);
-                            setForPage(1);
                         }}
                         className="w-full bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm"
                     >
@@ -1490,7 +1489,7 @@ function ForensicsTab({ agentId }: { agentId: string }) {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
-                            {rows.slice((forPage - 1) * FOR_PAGE_SIZE, forPage * FOR_PAGE_SIZE).map((e) => (
+                            {forensicPager.pageRows.map((e) => (
                                 <tr
                                     key={e.id}
                                     className="hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer"
@@ -1518,16 +1517,9 @@ function ForensicsTab({ agentId }: { agentId: string }) {
                         </tbody>
                     </table>
                 </div>
-                <div className="px-4 py-3 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                        <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={forPage <= 1} onClick={() => setForPage((p) => Math.max(1, p - 1))}>
-                            <ChevronLeft className="w-4 h-4" /> Previous
-                        </button>
-                        <span className="text-xs text-slate-500">Page <span className="font-semibold text-slate-700 dark:text-slate-200">{forPage}</span> of {Math.max(1, Math.ceil(rows.length / FOR_PAGE_SIZE))}</span>
-                        <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={forPage >= Math.max(1, Math.ceil(rows.length / FOR_PAGE_SIZE))} onClick={() => setForPage((p) => Math.min(Math.max(1, Math.ceil(rows.length / FOR_PAGE_SIZE)), p + 1))}>
-                            Next <ChevronRight className="w-4 h-4" />
-                        </button>
-                    </div>
+                <PaginationControls {...forensicPager.controls} label="events" />
+                <div className="px-4 py-3 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
+                    <span className="text-xs text-slate-500">{rows.length.toLocaleString()} events loaded{nextCursor ? ' · more are available on the server' : ''}</span>
                     <button
                         type="button"
                         disabled={!nextCursor || eventsQ.isFetching}
@@ -2119,8 +2111,6 @@ function SoftwareInventoryAgentTab({ agentId }: { agentId: string }) {
     const canRead = authApi.canViewEndpoints();
     const { showToast } = useToast();
     const [search, setSearch] = useState('');
-    const [page, setPage] = useState(1);
-    const pageSize = 10;
 
     const { data, isLoading, isError, refetch, isFetching } = useQuery({
         queryKey: ['agent-software-inventory', agentId],
@@ -2141,15 +2131,8 @@ function SoftwareInventoryAgentTab({ agentId }: { agentId: string }) {
         );
     }, [rows, search]);
 
-    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-    useEffect(() => {
-        if (page > totalPages) setPage(totalPages);
-    }, [page, totalPages]);
-
-    const pageRows = useMemo(() => {
-        const start = (page - 1) * pageSize;
-        return filtered.slice(start, start + pageSize);
-    }, [filtered, page]);
+    const softwarePager = useClientPagination(filtered, { namespace: 'software', resetKey: search.trim().toLowerCase() });
+    const pageRows = softwarePager.pageRows;
 
     if (!canRead) {
         return <p className="text-sm text-rose-600">You do not have permission to view endpoint software inventory.</p>;
@@ -2181,7 +2164,6 @@ function SoftwareInventoryAgentTab({ agentId }: { agentId: string }) {
                         value={search}
                         onChange={(e) => {
                             setSearch(e.target.value);
-                            setPage(1);
                         }}
                         placeholder="Name, publisher, version…"
                     />
@@ -2249,239 +2231,12 @@ function SoftwareInventoryAgentTab({ agentId }: { agentId: string }) {
                             </tbody>
                         </table>
                     </div>
-                    <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-700 text-xs">
-                        <span className="text-slate-500">
-                            Page {page} / {totalPages}
-                        </span>
-                        <div className="flex items-center gap-2">
-                            <button
-                                type="button"
-                                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                                disabled={page <= 1}
-                                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 disabled:opacity-50"
-                            >
-                                Prev
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                                disabled={page >= totalPages}
-                                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 disabled:opacity-50"
-                            >
-                                Next
-                            </button>
-                        </div>
-                    </div>
+                    <PaginationControls {...softwarePager.controls} label="applications" />
                 </div>
             )}
         </div>
     );
 }
-
-const NETWORK_PAGE_SIZE = 25;
-
-// @ts-ignore — legacy NetworkTab kept for reference; now replaced by AutoProcTerminationTab
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function _NetworkTab({ agentId, canViewAlerts }: { agentId: string; canViewAlerts: boolean }) {
-    const queryClient = useQueryClient();
-    const [detailId, setDetailId] = useState<string | null>(null);
-    const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(30);
-    const [page, setPage] = useState(1);
-
-    const { from, to } = useMemo(() => {
-        const toDate = new Date();
-        const fromDate = new Date(Date.now() - rangeDays * 24 * 60 * 60 * 1000);
-        return { from: fromDate.toISOString(), to: toDate.toISOString() };
-    }, [rangeDays]);
-
-    useEffect(() => {
-        setPage(1);
-    }, [rangeDays]);
-
-    const offset = (page - 1) * NETWORK_PAGE_SIZE;
-
-    const networkSearch = useQuery({
-        queryKey: ['events-search-network', agentId, from, to, offset, NETWORK_PAGE_SIZE],
-        queryFn: () =>
-            eventsApi.search({
-                filters: [
-                    { field: 'agent_id', operator: 'equals', value: agentId },
-                    { field: 'event_type', operator: 'equals', value: 'network' },
-                ],
-                logic: 'AND',
-                time_range: { from, to },
-                limit: NETWORK_PAGE_SIZE,
-                offset,
-            }),
-        enabled: !!agentId && canViewAlerts,
-        staleTime: 15_000,
-        retry: 1,
-    });
-
-    const rows = networkSearch.data?.data ?? [];
-    const total = networkSearch.data?.pagination?.total ?? 0;
-    const loading = networkSearch.isLoading;
-    const totalPages = Math.max(1, Math.ceil(total / NETWORK_PAGE_SIZE));
-
-    useEffect(() => {
-        if (page > totalPages) setPage(totalPages);
-    }, [page, totalPages]);
-
-    const eventsPageHref = useMemo(() => {
-        const p = new URLSearchParams();
-        p.set('agent_id', agentId);
-        p.set('event_type', 'network');
-        p.set('from', from);
-        p.set('to', to);
-        p.set('page', '1');
-        return `/events?${p.toString()}`;
-    }, [agentId, from, to]);
-
-    const refetchNetwork = () => {
-        void queryClient.invalidateQueries({ queryKey: ['events-search-network', agentId] });
-    };
-
-    return (
-        <div className="space-y-4 text-sm">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <p className="text-slate-600 dark:text-slate-400 max-w-3xl">
-                    Network activity captured from this endpoint. Click any row to view the full event details.
-                </p>
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <Link
-                        to={eventsPageHref}
-                        className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-600 bg-white/70 dark:bg-slate-900/50 text-cyan-700 dark:text-cyan-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    >
-                        Open in Events
-                    </Link>
-                    <button
-                        type="button"
-                        onClick={refetchNetwork}
-                        disabled={networkSearch.isFetching}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-600 bg-white/70 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
-                        title="Refresh list"
-                    >
-                        <RefreshCw className={`w-3.5 h-3.5 ${networkSearch.isFetching ? 'animate-spin' : ''}`} />
-                        Refresh
-                    </button>
-                </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Time range</span>
-                {([7, 30, 90] as const).map((d) => (
-                    <button
-                        key={d}
-                        type="button"
-                        onClick={() => setRangeDays(d)}
-                        className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${rangeDays === d
-                                ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-800 dark:text-cyan-200'
-                                : 'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                            }`}
-                    >
-                        Last {d} days
-                    </button>
-                ))}
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-                <span>
-                    {loading ? 'Loading…' : <>Showing {rows.length} row{rows.length !== 1 ? 's' : ''}</>}
-                    {!loading && total > 0 && (
-                        <>
-                            {' '}
-                            · total <span className="font-mono text-slate-700 dark:text-slate-200">{total}</span> in range
-                        </>
-                    )}
-                </span>
-                <span className="font-mono text-[10px] truncate max-w-[min(100%,420px)]" title={`${from} → ${to}`}>
-                    {from.slice(0, 19)}Z → {to.slice(0, 19)}Z
-                </span>
-            </div>
-
-            {loading ? (
-                <div className="flex justify-center py-12">
-                    <Loader2 className="w-8 h-8 animate-spin text-cyan-500" />
-                </div>
-            ) : rows.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-300 dark:border-slate-600 p-4 text-slate-500">
-                    No network events found in this time range. Try selecting a longer time range, or open{' '}
-                    <Link className="text-cyan-600 dark:text-cyan-400 underline" to={eventsPageHref}>
-                        Events
-                    </Link>
-                    for a broader search.
-                </div>
-            ) : (
-                <>
-                    <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
-                        <table className="w-full text-left text-xs">
-                            <thead className="bg-slate-100 dark:bg-slate-800/80 text-slate-600 uppercase">
-                                <tr>
-                                    <th className="p-2">Time</th>
-                                    <th className="p-2">Type</th>
-                                    <th className="p-2">Summary</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rows.map((e: CmEventSummary) => (
-                                    <tr
-                                        key={e.id}
-                                        role="button"
-                                        tabIndex={0}
-                                        className="border-t border-slate-100 dark:border-slate-800 cursor-pointer hover:bg-slate-50/90 dark:hover:bg-slate-800/40"
-                                        onClick={() => setDetailId(e.id)}
-                                        onKeyDown={(ev) => {
-                                            if (ev.key === 'Enter' || ev.key === ' ') {
-                                                ev.preventDefault();
-                                                setDetailId(e.id);
-                                            }
-                                        }}
-                                    >
-                                        <td className="p-2 whitespace-nowrap">{new Date(e.timestamp).toLocaleString()}</td>
-                                        <td className="p-2 font-mono">{e.event_type}</td>
-                                        <td className="p-2 max-w-xl truncate" title={e.summary}>
-                                            {e.summary}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-
-                    {totalPages > 1 && (
-                        <div className="flex items-center justify-between gap-3 pt-1">
-                            <button
-                                type="button"
-                                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40"
-                                disabled={page <= 1}
-                                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                            >
-                                <ChevronLeft className="w-4 h-4" /> Prev
-                            </button>
-                            <span className="text-xs text-slate-500">
-                                Page <span className="font-semibold text-slate-700 dark:text-slate-200">{page}</span> / {totalPages}
-                            </span>
-                            <button
-                                type="button"
-                                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40"
-                                disabled={page >= totalPages}
-                                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                            >
-                                Next <ChevronRight className="w-4 h-4" />
-                            </button>
-                        </div>
-                    )}
-                </>
-            )}
-
-            <EventDetailModal eventId={detailId} onClose={() => setDetailId(null)} fetchEnabled={canViewAlerts} />
-        </div>
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Auto-Proc Termination Tab (per-agent)
-// ─────────────────────────────────────────────────────────────────────────────
 
 const AUTO_PROC_PAGE_SIZE = 25;
 
@@ -2712,7 +2467,7 @@ function AutoProcTerminationTab({ agentId, canViewAlerts, canExec }: { agentId: 
                         </table>
                     </div>
 
-                    <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} onNext={q.next} onPrevious={q.previous} onSize={q.setPageSize} />
+                    <PaginationControls info={q.info} page={q.page} count={rows.length} busy={q.busy} onNext={q.next} onFirst={q.first} onPrevious={q.previous} onSize={q.setPageSize} />
                 </>
             )}
 
@@ -3469,7 +3224,7 @@ function ResponseTab({
                                 </tbody>
                             </table>
                         </div>
-                        <PaginationControls info={commandPager.info} page={commandPager.page} count={cmds.length} busy={commandPager.busy} onNext={commandPager.next} onPrevious={commandPager.previous} onSize={commandPager.setPageSize} />
+                        <PaginationControls info={commandPager.info} page={commandPager.page} count={cmds.length} busy={commandPager.busy} onNext={commandPager.next} onFirst={commandPager.first} onPrevious={commandPager.previous} onSize={commandPager.setPageSize} />
                     </>
                 )}
             </div>
@@ -3491,6 +3246,7 @@ function QuarantineTab({
     busy: boolean;
     online: boolean;
 }) {
+    const quarantinePager = useClientPagination(items, { namespace: 'quarantine' });
     return (
         <div className="space-y-4 animate-slide-up-fade">
             <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 text-sm">
@@ -3514,7 +3270,7 @@ function QuarantineTab({
                             {items.length === 0 ? (
                                 <tr><td colSpan={6} className="p-4 text-slate-500">No quarantine items</td></tr>
                             ) : (
-                                items.map((q) => (
+                                quarantinePager.pageRows.map((q) => (
                                     <tr key={q.id} className="border-t border-slate-100 dark:border-slate-800 align-top">
                                         <td className="p-2 font-mono break-all max-w-[200px]">{q.original_path}</td>
                                         <td className="p-2 font-mono break-all max-w-[200px]">{q.quarantine_path}</td>
@@ -3556,6 +3312,7 @@ function QuarantineTab({
                             )}
                         </tbody>
                     </table>
+                    {items.length > 0 && <PaginationControls {...quarantinePager.controls} label="items" />}
                 </div>
             )}
         </div>
@@ -3580,8 +3337,6 @@ function ActivityTab({
     agentId: string;
 }) {
     const [detailId, setDetailId] = useState<string | null>(null);
-    const [actPage, setActPage] = useState(1);
-    const ACT_PAGE_SIZE = 20;
 
     // Fetch network events to merge into the activity timeline
     const { data: netPayload } = useQuery({
@@ -3629,6 +3384,7 @@ function ActivityTab({
         rows.sort((a, b) => b.at - a.at);
         return rows;
     }, [alerts, events, networkEvents, canViewAlerts]);
+    const activityPager = useClientPagination(merged, { namespace: 'activity' });
 
     return (
         <div className="space-y-6">
@@ -3650,7 +3406,7 @@ function ActivityTab({
                 ) : (
                     <>
                         <ul className="space-y-2">
-                            {merged.slice((actPage - 1) * ACT_PAGE_SIZE, actPage * ACT_PAGE_SIZE).map((r) =>
+                            {activityPager.pageRows.map((r) =>
                                 r.kind === 'alert' ? (
                                     <li
                                         key={r.id}
@@ -3700,17 +3456,7 @@ function ActivityTab({
                                 )
                             )}
                         </ul>
-                        {merged.length > ACT_PAGE_SIZE && (
-                            <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-200 dark:border-slate-700 mt-3">
-                                <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={actPage <= 1} onClick={() => setActPage((p) => Math.max(1, p - 1))}>
-                                    <ChevronLeft className="w-4 h-4" /> Previous
-                                </button>
-                                <span className="text-xs text-slate-500">Page <span className="font-semibold text-slate-700 dark:text-slate-200">{actPage}</span> of {Math.max(1, Math.ceil(merged.length / ACT_PAGE_SIZE))}</span>
-                                <button type="button" className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium disabled:opacity-40" disabled={actPage >= Math.max(1, Math.ceil(merged.length / ACT_PAGE_SIZE))} onClick={() => setActPage((p) => Math.min(Math.max(1, Math.ceil(merged.length / ACT_PAGE_SIZE)), p + 1))}>
-                                    Next <ChevronRight className="w-4 h-4" />
-                                </button>
-                            </div>
-                        )}
+                        <PaginationControls {...activityPager.controls} label="activities" />
                     </>
                 )}
             </div>

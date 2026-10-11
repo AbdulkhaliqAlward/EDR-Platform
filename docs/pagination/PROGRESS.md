@@ -109,3 +109,82 @@ sudo docker compose logs --tail=100 connection-manager sigma-engine | grep -iE "
 ```
 
 The migrations run at startup: CM 064–069 and Sigma 024–026. Each file is one `CREATE INDEX CONCURRENTLY` statement, so writes are not blocked, but on large tables the first startup waits for the builds. If a build is interrupted, the service refuses to start and names the invalid index. In that case, drop that index (`DROP INDEX CONCURRENTLY <name>`) and restart.
+
+## Round 2 (2026-10-11): page sizes, remaining pages, Endpoint Risk, Audit Logs, Agent Deployment
+
+**Shared**
+- Page sizes are now 10 / 25 / 50 / 100 everywhere (`PAGE_SIZES` in `paginationState.ts`, default 25; the server still caps at 100).
+- `PaginationControls` gained:
+  - a page number ("Page N [of M]")
+  - a first-page button
+  - "No ⟨label⟩" empty text
+- `hooks/useClientPagination.ts`:
+  - `useClientPagination` pages full-list (small) responses with URL-synced page and size, a `resetKey`, and clamping when the list shrinks.
+  - `useOffsetPageState` serves small limit/offset server lists (limit + 1 probe or total).
+
+**Pages**
+
+| Page | Change |
+|---|---|
+| Incident Response Playbooks | Playbook list paged on the client; run history paged on the server (limit + 1, offset) |
+| Automation Rules | Paged on the client, with an empty state |
+| Response Script Library | Search (name, description, command) and paging on the client |
+| Detection Exceptions | Paged on the client (search and state filters reset to page 1) |
+| System · Signatures | Sync history raised from 50 to 200 and paged. New server-paginated **Signature catalog**: `GET /api/v1/signatures/catalog`, keyset on (version, id), exact SHA-256 or name/family search; the existing `/signatures` and NDJSON feed are untouched |
+| Vulnerability Management | Server-side search, filters and paging (it used to load 500 and filter in the browser). Severity chart taken from server stats. Export walks all matching rows (≤5,000). Selection is scoped to the visible page. The server `ORDER BY` gained the `f.id` tiebreaker |
+| Fleet Connectivity | Search plus paging on the client. Refresh every 60 s, only while the tab is visible (the attention summary still uses the whole fleet ≤1000) |
+| Endpoint details | Forensics events, software inventory, quarantine and activity use the shared pager (fixed sizes of 15/20/10 removed). The dead `_NetworkTab` (offset paging the server rejects) was removed |
+| Activity Correlation (renamed from "Temporal fusion") | Fixed the telemetry filter (`eq` → `equals`; it returned 400, so the telemetry section never loaded). Removed the silent 120-row cap. Filters by kind and text, a ±10 min focus around an alert, the shared pager, and a note when 500 rows are loaded per source. `commandsApi.list` reads >100 as multiple pages |
+
+**Endpoint Risk (server)**
+
+`GetEndpointRiskSummary(since)` now counts:
+- only active statuses: open, acknowledged, in_progress, investigating (suppressed, resolved and false-positive excluded)
+- only alerts active within `window_days` (default 7, 1–90, on `last_seen_at`)
+- only endpoints that exist and are not deleted
+
+It also returns hostname, OS, status and metadata.
+
+Covered by the integration test `TestEndpointRiskSummaryPostgres`.
+
+**Endpoint Risk (UI)**
+- Removed the hostname merge, which conflated different machines and took the max of averages.
+- Removed the 500-agent lookup.
+- KPIs come from the same rows as the list.
+- Activity window selector, tier and search filters in the URL.
+- Cards link to the device page.
+- Paging.
+- Mobile layout fixed: the hostname used to collapse to zero width at 390px.
+
+**Audit Logs**
+- **Migration CM 070** adds `audit_logs.details` (guarded `DO` block, metadata-only). Handler descriptions were built but never stored, so "Extra info" was always empty.
+- System audit entries with no user now store `user_id` as NULL. The zero UUID violated the FK and the asynchronous write was lost.
+- Duplicate login-success audit removed: the service and the handler both wrote one per sign-in.
+- Action groups cover every recorded action.
+- UI:
+  - real action and resource names and filters
+  - IP and result shown in rows
+  - the "Session ID" column relabelled "Log ID" (it showed the log id)
+  - export covers all matching rows (≤10,000), not just the current page
+  - the disabled "Delete logs" button removed
+- New `TOKEN_DELETED` actions are written as `token_deleted`; old rows stay filterable.
+
+**Agent Deployment**
+
+Content aligned with the agent and builder code:
+- the token is not embedded, only the build/HMAC binding
+- the server address is embedded unless skipped
+- one build per token
+- the install command no longer needs the server flags for normal builds
+- correct service name and log path
+- `-update`
+- offline uninstall uses `-token-stdin` with a token from the device page
+- links point to Devices and Tokens
+
+**Verification**
+- CM: `go vet` and `go test ./...` pass on real PostgreSQL. This includes the new endpoint risk and audit `details` tests and the migration upgrade to version 70.
+- Dashboard:
+  - `tsc` and `vite build` pass.
+  - Node unit tests: 24/24.
+  - Playwright passes: `pagination`, `pagination-pages`, `alerts-pagination`, the new `pagination-more` (6 pages × 390/1280 × light/dark), `detection-exceptions` and `alert-details`.
+- ESLint on the changed files shows no rule increase against HEAD.
