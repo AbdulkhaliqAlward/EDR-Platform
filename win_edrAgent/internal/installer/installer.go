@@ -433,7 +433,10 @@ func PingServer(serverIP, serverDomain, serverPort string) error {
 				"  Possible causes:\n"+
 				"  - The C2 server is not running or not listening on port %s\n"+
 				"  - A firewall is blocking the connection\n"+
-				"  - The server IP address is incorrect",
+				"  - The server IP address is incorrect\n"+
+				"  - Wrong gRPC port: Docker deployments publish it on a different port\n"+
+				"    (default 47051). Use the install command shown by the dashboard, or\n"+
+				"    pass -server-port <port>.",
 			addr, err, serverPort,
 		)
 		if IsWindowsSocketAccessDenied(err) {

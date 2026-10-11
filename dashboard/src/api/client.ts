@@ -1908,6 +1908,11 @@ export interface AgentBuildResponse {
 }
 
 export const agentBuildApi = {
+    /** Server address agents should use (prefills build/upgrade forms). */
+    defaults: async (): Promise<{ server_ip: string; server_domain: string; server_port: string; sources?: Record<string, string> }> => {
+        const response = await connectionApi.get('/api/v1/agent/build-defaults');
+        return response.data;
+    },
     /**
      * Build the agent binary. Returns JSON with the one-time token,
      * build metadata, and the base64-encoded .exe.

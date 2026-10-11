@@ -85,6 +85,13 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 		return errorResponse(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body")
 	}
 
+	// ── Validate server config BEFORE claiming the token ───────────────────
+	// A token allows exactly one build: rejecting the request after the
+	// BuildID is stored would burn the token without producing a binary.
+	if msg := validateBuildServerConfig(&req, h.grpcAddress); msg != "" {
+		return errorResponse(c, http.StatusBadRequest, "INVALID_SERVER_CONFIG", msg)
+	}
+
 	if h.enrollmentTokenRepo == nil {
 		return errorResponse(c, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
 			"Database unavailable — cannot validate token")
@@ -216,16 +223,6 @@ func (h *Handlers) BuildAgent(c echo.Context) error {
 			"Failed to store BuildID — build aborted")
 	}
 
-	// ── Validate server config if not skipping ─────────────────────────────
-	if !req.SkipConfig {
-		if req.ServerIP == "" || req.ServerDomain == "" {
-			return errorResponse(c, http.StatusBadRequest, "MISSING_CONFIG",
-				"server_ip and server_domain are required when not skipping config")
-		}
-	}
-	if req.ServerPort == "" {
-		req.ServerPort = "50051"
-	}
 
 	// ── Read CA certificate PEM ────────────────────────────────────────────
 	var caCertPEM string

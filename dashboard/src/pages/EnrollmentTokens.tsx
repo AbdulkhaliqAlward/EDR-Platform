@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { enrollmentTokensApi, authApi, type EnrollmentToken } from '../api/client';
 import { Modal, SkeletonTable } from '../components';
+import { agentInstallCommand, useAgentBuildDefaults } from '../hooks/useAgentBuildDefaults';
 
 // --------------------------------------------------------------------------
 // Generate Token Modal
@@ -305,6 +306,9 @@ interface BuildRevealPayload {
     description: string;
     serverIP?: string;
     serverDomain?: string;
+    serverPort?: string;
+    /** Complete command computed by the build dialog (preferred). */
+    installCommand?: string;
 }
 
 // --------------------------------------------------------------------------
@@ -320,8 +324,19 @@ export default function EnrollmentTokens() {
     // Post-build reveal state — populated from sessionStorage (written by AgentDeployment)
     const [buildReveal, setBuildReveal] = useState<{
         fakeToken: EnrollmentToken;
-        installCommand: string;
+        payload: BuildRevealPayload;
     } | null>(null);
+    const { settings: serverDefaults } = useAgentBuildDefaults(!!buildReveal);
+    // Ready-to-run command: the build dialog's own command, else the payload's
+    // values completed with the server-resolved address (never placeholders
+    // when the server address is known, always with the public gRPC port).
+    const revealCommand = buildReveal
+        ? buildReveal.payload.installCommand || agentInstallCommand(buildReveal.payload.token, {
+            serverIP: buildReveal.payload.serverIP || serverDefaults.serverIP,
+            serverDomain: buildReveal.payload.serverDomain || serverDefaults.serverDomain,
+            serverPort: buildReveal.payload.serverPort || serverDefaults.serverPort,
+        })
+        : '';
 
     // On mount: check if AgentDeployment left a post-build reveal payload.
     useEffect(() => {
@@ -330,9 +345,6 @@ export default function EnrollmentTokens() {
         sessionStorage.removeItem(BUILD_REVEAL_KEY); // consume immediately
         try {
             const payload: BuildRevealPayload = JSON.parse(raw);
-            const serverIP = payload.serverIP ?? '<SERVER_IP>';
-            const serverDomain = payload.serverDomain ?? '<DOMAIN>';
-            const cmd = `echo '${payload.token}' | .\\edr-agent.exe -install -token-stdin -server-ip ${serverIP} -server-domain ${serverDomain}`;
             // Construct a fake EnrollmentToken shell just to reuse TokenCreatedModal.
             setBuildReveal({
                 fakeToken: {
@@ -347,7 +359,7 @@ export default function EnrollmentTokens() {
                     created_by: 'build',
                     revoked_at: null,
                 },
-                installCommand: cmd,
+                payload,
             });
         } catch { /* ignore malformed payload */ }
     }, []);
@@ -661,7 +673,7 @@ export default function EnrollmentTokens() {
                     token={buildReveal.fakeToken}
                     isOpen={!!buildReveal}
                     onClose={() => setBuildReveal(null)}
-                    installCommand={buildReveal.installCommand}
+                    installCommand={revealCommand}
                     title="Agent Built — Save Your Token"
                 />
             )}

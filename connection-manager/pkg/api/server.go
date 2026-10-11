@@ -285,6 +285,7 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 
 	// ── Agent build (deployment) ─────────────────────────────────────────
 	protected.POST("/agent/build", handlers.BuildAgent, handlers.RequirePermission("agents", "write"))
+	protected.GET("/agent/build-defaults", handlers.GetAgentBuildDefaults, handlers.RequirePermission("agents", "read"))
 
 	// ── Agent packages (patch/upgrade) ───────────────────────────────────
 	// Create package requires auth; download is tokenized + short-lived and is public.

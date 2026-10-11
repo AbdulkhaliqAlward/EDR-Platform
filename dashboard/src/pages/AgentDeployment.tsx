@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { agentBuildApi, authApi, type EnrollmentToken } from '../api/client';
 import { Modal } from '../components';
+import { agentInstallCommand, useAgentBuildDefaults } from '../hooks/useAgentBuildDefaults';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Session-persistent form state
@@ -54,6 +55,21 @@ function BuildModal({
 }) {
     const navigate = useNavigate();
     const [form, setForm] = useState<BuildFormState>(loadFormState);
+    // Prefill the real server address (IP / domain / public gRPC port) each
+    // time the dialog opens; the operator can still edit the fields.
+    const { settings: serverDefaults, isResolved: defaultsResolved } = useAgentBuildDefaults(isOpen);
+    const defaultsApplied = useRef(false);
+    useEffect(() => {
+        if (!isOpen) { defaultsApplied.current = false; return; }
+        if (!defaultsResolved || defaultsApplied.current) return;
+        defaultsApplied.current = true;
+        setForm(prev => ({
+            ...prev,
+            serverIP: serverDefaults.serverIP || prev.serverIP,
+            serverDomain: serverDefaults.serverDomain || prev.serverDomain,
+            serverPort: serverDefaults.serverPort || prev.serverPort,
+        }));
+    }, [isOpen, defaultsResolved, serverDefaults.serverIP, serverDefaults.serverDomain, serverDefaults.serverPort]);
     const [isBuilding, setIsBuilding] = useState(false);
     const [buildProgress, setBuildProgress] = useState('');
     const [error, setError] = useState('');
@@ -114,11 +130,13 @@ function BuildModal({
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
-            // A build with embedded server settings needs only the token; a
-            // "skip config" build must be told where the server is.
-            const install = skip
-                ? `echo '${result.token}' | .\\edr-agent.exe -install -token-stdin -server-ip <SERVER_IP> -server-domain <DOMAIN> -server-port 47051`
-                : `echo '${result.token}' | .\\edr-agent.exe -install -token-stdin`;
+            // Complete, copy-paste-ready command with the real server address
+            // (works for embedded and "skip config" builds alike).
+            const install = agentInstallCommand(result.token, {
+                serverIP: form.serverIP || serverDefaults.serverIP,
+                serverDomain: form.serverDomain || serverDefaults.serverDomain,
+                serverPort: form.serverPort || serverDefaults.serverPort,
+            });
             setBuildResult({
                 sha256: result.sha256,
                 filename: result.filename,
@@ -135,8 +153,10 @@ function BuildModal({
                 token: result.token,
                 tokenId: form.tokenId,
                 description: tokens.find(t => t.id === form.tokenId)?.description ?? 'Agent Build',
-                serverIP: skip ? undefined : form.serverIP,
-                serverDomain: skip ? undefined : form.serverDomain,
+                serverIP: form.serverIP || serverDefaults.serverIP,
+                serverDomain: form.serverDomain || serverDefaults.serverDomain,
+                serverPort: form.serverPort || serverDefaults.serverPort,
+                installCommand: install,
             });
             sessionStorage.setItem('edr_post_build_reveal', revealPayload);
 

@@ -2,6 +2,7 @@ import { commandsApi } from '../api/client';
 import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
 import { PaginationControls } from '../components/PaginationControls';
 import { useClientPagination } from '../hooks/useClientPagination';
+import { useAgentBuildDefaults } from '../hooks/useAgentBuildDefaults';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
@@ -2609,6 +2610,20 @@ function ResponseTab({
         serverPort: string;
         installSysmon: boolean;
     }>({ serverIP: '', serverDomain: '', serverPort: '47051', installSysmon: false });
+    // Prefill the real server address each time the upgrade dialog opens.
+    const { settings: upgradeDefaults, isResolved: upgradeDefaultsResolved } = useAgentBuildDefaults(upgradeOpen);
+    const upgradeDefaultsApplied = useRef(false);
+    useEffect(() => {
+        if (!upgradeOpen) { upgradeDefaultsApplied.current = false; return; }
+        if (!upgradeDefaultsResolved || upgradeDefaultsApplied.current) return;
+        upgradeDefaultsApplied.current = true;
+        setUpgradeForm(f => ({
+            ...f,
+            serverIP: f.serverIP || upgradeDefaults.serverIP,
+            serverDomain: f.serverDomain || upgradeDefaults.serverDomain,
+            serverPort: upgradeDefaults.serverPort || f.serverPort,
+        }));
+    }, [upgradeOpen, upgradeDefaultsResolved, upgradeDefaults.serverIP, upgradeDefaults.serverDomain, upgradeDefaults.serverPort]);
     const [upgradeErrors, setUpgradeErrors] = useState<Record<string, string>>({});
     const [upgradeStep, setUpgradeStep] = useState<'form' | 'building' | 'pushing'>('form');
 
