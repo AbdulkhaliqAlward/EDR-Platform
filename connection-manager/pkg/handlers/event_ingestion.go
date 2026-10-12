@@ -25,6 +25,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/cache"
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/internal/service"
+	"github.com/edr-platform/connection-manager/pkg/agentclock"
 	"github.com/edr-platform/connection-manager/pkg/contextkeys"
 	"github.com/edr-platform/connection-manager/pkg/kafka"
 	"github.com/edr-platform/connection-manager/pkg/metrics"
@@ -53,6 +54,7 @@ type EventHandler struct {
 	quarantineRepo repository.QuarantineRepository // Optional: quarantine inventory from telemetry
 	eventRepo      repository.EventRepository      // Optional: durable event store for REST search
 	vulnRepo       repository.VulnerabilityRepository
+	clock          *agentclock.Tracker // agent clock offsets (nil = no normalisation)
 }
 
 // NewEventHandler creates a new event handler.
@@ -104,6 +106,12 @@ func (h *EventHandler) SetEventRepo(repo repository.EventRepository) {
 // SetVulnerabilityRepo sets optional vulnerability repository for scanner telemetry ingestion.
 func (h *EventHandler) SetVulnerabilityRepo(repo repository.VulnerabilityRepository) {
 	h.vulnRepo = repo
+}
+
+// SetClockTracker enables normalising event times onto the server clock
+// using each agent's measured clock offset.
+func (h *EventHandler) SetClockTracker(t *agentclock.Tracker) {
+	h.clock = t
 }
 
 // SetFallbackStore sets the PostgreSQL fallback store.
@@ -688,8 +696,17 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 	// 5b. STRICT JSON SCHEMA VALIDATION (#3)
 	// Every event MUST have event_type (string), timestamp (string), and severity (string).
 	// Events that fail validation are logged and dropped; valid events continue.
+	// The agent's clock may be off: put event times on the server clock
+	// (the original stays in agent_timestamp). Times the agent itself uses
+	// for verification — e.g. data.process_start_time for PID identity —
+	// are left on the agent clock on purpose.
+	clockOffset, clockKnown := h.clock.Offset(agentID)
 	validEvents := make([]map[string]interface{}, 0, len(events))
 	for i, ev := range events {
+		if clockKnown {
+			normalizeEventClock(ev, clockOffset)
+		}
+
 		// Normalize critical context fields using best-effort fallbacks so
 		// missing top-level fields can still be recovered from nested payloads.
 		enrichEventContextFields(ev)
@@ -789,6 +806,20 @@ func (h *EventHandler) processBatch(ctx context.Context, agentID string, batch *
 
 	// 10. Acknowledge
 	return batchAck(batch), nil
+}
+
+// normalizeEventClock moves an event's timestamp from the agent clock onto
+// the server clock, keeping the original as agent_timestamp.
+func normalizeEventClock(ev map[string]interface{}, offset time.Duration) {
+	ts, ok := ev["timestamp"].(string)
+	if !ok {
+		return
+	}
+	if fixed, changed := agentclock.Normalize(ts, offset); changed {
+		ev["agent_timestamp"] = ts
+		ev["timestamp"] = fixed
+		ev["clock_offset_ms"] = offset.Milliseconds()
+	}
 }
 
 // batchAck builds the response acknowledging durable acceptance of a batch.

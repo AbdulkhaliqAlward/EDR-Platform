@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/smtp"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,7 +159,7 @@ func (n *NotificationManager) buildSlackMessage(alert *domain.Alert, config map[
 				{"type": "mrkdwn", "text": fmt.Sprintf("*Rule:*\n%s", alert.RuleTitle)},
 				{"type": "mrkdwn", "text": fmt.Sprintf("*Severity:*\n%s", alert.Severity.String())},
 				{"type": "mrkdwn", "text": fmt.Sprintf("*Alert ID:*\n%s", alert.ID[:8])},
-				{"type": "mrkdwn", "text": fmt.Sprintf("*Time:*\n%s", alert.Timestamp.Format(time.RFC822))},
+				{"type": "mrkdwn", "text": fmt.Sprintf("*Time:*\n%s", displayTime(alert.Timestamp))},
 			},
 		},
 	}
@@ -231,7 +233,7 @@ func (n *NotificationManager) buildTeamsCard(alert *domain.Alert) map[string]int
 					{"name": "Rule", "value": alert.RuleTitle},
 					{"name": "Severity", "value": alert.Severity.String()},
 					{"name": "Alert ID", "value": alert.ID[:8]},
-					{"name": "Time", "value": alert.Timestamp.Format(time.RFC822)},
+					{"name": "Time", "value": displayTime(alert.Timestamp)},
 				},
 			},
 		},
@@ -319,8 +321,28 @@ body { font-family: Arial, sans-serif; }
 		alert.RuleTitle,
 		alert.Severity.String(),
 		alert.ID,
-		alert.Timestamp.Format(time.RFC3339),
+		displayTime(alert.Timestamp),
 	)
+}
+
+var (
+	displayZoneOnce sync.Once
+	displayZone     *time.Location
+)
+
+// displayTime renders a time in the platform display time zone (EDR_TIMEZONE,
+// the same zone the dashboards use; UTC when unset), e.g.
+// "12 Oct 2026 13:04:05 +03 (Asia/Riyadh)".
+func displayTime(t time.Time) string {
+	displayZoneOnce.Do(func() {
+		displayZone = time.UTC
+		if tz := strings.TrimSpace(os.Getenv("EDR_TIMEZONE")); tz != "" {
+			if loc, err := time.LoadLocation(tz); err == nil {
+				displayZone = loc
+			}
+		}
+	})
+	return t.In(displayZone).Format("02 Jan 2006 15:04:05 MST") + " (" + displayZone.String() + ")"
 }
 
 // sendWebhook sends HTTP POST to webhook URL.

@@ -114,6 +114,7 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	agents := protected.Group("/agents")
 	agents.GET("", handlers.ListAgents, handlers.RequirePermission("endpoints", "read"))
 	agents.GET("/stats", handlers.GetAgentStats, handlers.RequirePermission("endpoints", "read"))
+	agents.GET("/network-context", handlers.ListAgentNetworkContext, handlers.RequirePermission("endpoints", "read"))
 	agents.GET("/:id", handlers.GetAgent, handlers.RequirePermission("endpoints", "read"))
 	agents.PATCH("/:id", handlers.UpdateAgent, handlers.RequirePermission("endpoints", "manage"))
 	agents.PATCH("/:id/business-context", handlers.PatchAgentBusinessContext, handlers.RequirePermission("endpoints", "manage"))
@@ -227,6 +228,9 @@ func (s *Server) RegisterRoutes(handlers *Handlers) {
 	// Authenticated endpoint (no extra RBAC gate) to avoid false-negative
 	// "backend unreachable" UI states when role permission catalogs drift.
 	protected.GET("/reliability", handlers.GetReliabilityHealth)
+
+	// Server clock and display timezone (the platform's single time base).
+	protected.GET("/system/time", handlers.GetSystemTime)
 
 	// ── Context-aware policy controls ──────────────────────────────────────
 	contextPolicies := protected.Group("/context-policies")

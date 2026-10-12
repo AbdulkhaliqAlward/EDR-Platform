@@ -30,6 +30,17 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /app/bin/connection-manager \
     ./cmd/server
 
+# Offline IP geolocation for agent locations: DB-IP "IP to City Lite"
+# (CC BY 4.0, https://db-ip.com). Best effort — the image still builds
+# without it, and locations then show the address only. The layer is cached;
+# pass --build-arg GEOIP_REFRESH=<any new value> (e.g. the month) to refresh,
+# or GEOIP_DOWNLOAD=false to skip. EDR_GEOIP_DB can point at another .mmdb
+# (e.g. MaxMind GeoLite2-City) mounted into the container.
+FROM alpine:3.19 AS geoip
+ARG GEOIP_DOWNLOAD=true
+ARG GEOIP_REFRESH=initial
+RUN mkdir -p /geoip && if [ "$GEOIP_DOWNLOAD" = "true" ]; then       apk add --no-cache curl ca-certificates >/dev/null &&       for m in "$(date -u +%Y-%m)" "$(date -u -d "@$(( $(date +%s) - 2678400 ))" +%Y-%m)"; do         if curl -fsSL --retry 3 --max-time 600 "https://download.db-ip.com/free/dbip-city-lite-${m}.mmdb.gz" -o /tmp/geo.mmdb.gz            && gunzip -c /tmp/geo.mmdb.gz > /geoip/dbip-city-lite.mmdb; then rm -f /tmp/geo.mmdb.gz; echo "GeoIP: dbip-city-lite-${m}"; break; fi;         rm -f /tmp/geo.mmdb.gz /geoip/dbip-city-lite.mmdb;       done;       [ -s /geoip/dbip-city-lite.mmdb ] || echo "WARNING: GeoIP database not downloaded — agent locations disabled";     fi
+
 # Final stage — lightweight runtime
 FROM alpine:3.19
 
@@ -47,6 +58,9 @@ RUN mkdir -p /app/certs
 
 # Copy binary from builder
 COPY --from=builder /app/bin/connection-manager /app/connection-manager
+
+# GeoIP database (may be empty when the download was skipped or failed)
+COPY --from=geoip /geoip /app/geoip
 
 # Copy entrypoint script.
 # Strip any CRLF introduced by a Windows checkout (git core.autocrlf=true) before

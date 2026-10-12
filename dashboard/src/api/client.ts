@@ -957,7 +957,48 @@ export const appControlApi = {
     },
 };
 
+/** Where an agent connects from (geolocated server-side) and its clock offset. */
+export interface AgentNetworkContext {
+    agent_id: string;
+    hostname?: string;
+    public_ip?: string;
+    network_scope: 'public' | 'private' | 'unknown';
+    country_code?: string;
+    country?: string;
+    region?: string;
+    city?: string;
+    geo_source?: string;
+    geo_resolved_at?: string;
+    /** Server time minus agent time, in ms (event times are already corrected by this). */
+    clock_offset_ms?: number;
+    clock_measured_at?: string;
+    updated_at: string;
+}
+
+/** The platform's single time base (GET /api/v1/system/time). */
+export interface SystemTime {
+    server_time: string;
+    /** IANA zone (e.g. "Asia/Riyadh"); "" = offset only. */
+    timezone: string;
+    timezone_abbr: string;
+    utc_offset_seconds: number;
+    geoip: { enabled: boolean; source?: string; attribution_url?: string };
+}
+
+export const systemApi = {
+    time: async (): Promise<SystemTime> => {
+        const response = await connectionApi.get<SystemTime>('/api/v1/system/time');
+        return response.data;
+    },
+};
+
 export const agentsApi = {
+    /** Up to 200 agents per call. */
+    networkContext: async (ids: string[]): Promise<AgentNetworkContext[]> => {
+        if (ids.length === 0) return [];
+        const response = await connectionApi.get<{ data: AgentNetworkContext[] }>('/api/v1/agents/network-context', { params: { ids: ids.slice(0, 200).join(',') } });
+        return response.data.data ?? [];
+    },
     page: async (params: Record<string, string>, signal?: AbortSignal): Promise<Paged<Agent>> => {
         const response = await connectionApi.get<Paged<Agent> & { pagination: { total: number } }>('/api/v1/agents', { params, signal });
         return { ...response.data, total: { value: response.data.pagination.total, capped: false } };

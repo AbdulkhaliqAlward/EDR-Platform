@@ -72,6 +72,9 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )
 
-require github.com/edr-platform/shared v0.0.0
+require (
+	github.com/edr-platform/shared v0.0.0
+	github.com/oschwald/maxminddb-golang v1.13.1
+)
 
 replace github.com/edr-platform/shared => ../shared

@@ -31,6 +31,10 @@ services:
     environment:
       # Optional for remote agents: PUBLIC_API_BASE_URL=http://YOUR_LAN_IP:30082 (or https://edr.example.com)
       LOG_LEVEL: debug
+      # Platform display time zone (IANA name, e.g. Asia/Riyadh): every dashboard
+      # and notification shows times in this zone. Display only — storage and
+      # processing stay in UTC; agent event times are put on the server clock.
+      EDR_TIMEZONE: "${EDR_TIMEZONE:-UTC}"
       DATABASE_URL: "postgres://${POSTGRES_USER:?POSTGRES_USER missing in .env}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing in .env}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB missing in .env}?sslmode=disable"
       DATABASE_PASSWORD: "${POSTGRES_PASSWORD}"
       REDIS_ADDR: "redis:6379"
@@ -118,6 +122,8 @@ services:
       REDIS_ADDR: "redis:6379"
       # --- API ---
       API_PORT: "8080"
+      # Display time zone for Slack/Teams/e-mail alert notifications (same as connection-manager)
+      EDR_TIMEZONE: "${EDR_TIMEZONE:-UTC}"
       JWT_PUBLIC_KEY_PATH: "/app/certs/jwt_public.pem"
     volumes:
       - ./sigma_engine_go/sigma_rules:/app/sigma_rules:ro

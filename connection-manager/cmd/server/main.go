@@ -33,6 +33,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/api"
 	"github.com/edr-platform/connection-manager/pkg/audit"
+	"github.com/edr-platform/connection-manager/pkg/geoip"
 	"github.com/edr-platform/connection-manager/pkg/handlers"
 	"github.com/edr-platform/connection-manager/pkg/kafka"
 	"github.com/edr-platform/connection-manager/pkg/metrics"
@@ -535,6 +536,27 @@ func main() {
 	hbHandler := handlers.NewHeartbeatHandler(logger, redisClient, agentSvc)
 	logger.Info("HeartbeatHandler created")
 
+	// Agent clock offsets (event times are normalised onto the server clock)
+	// and geolocation of each agent's connection address (offline database).
+	geoPath := strings.TrimSpace(os.Getenv("EDR_GEOIP_DB"))
+	if geoPath == "" {
+		geoPath = "/app/geoip/dbip-city-lite.mmdb"
+	}
+	geoResolver, geoErr := geoip.Open(geoPath)
+	if geoErr != nil {
+		logger.WithError(geoErr).Warn("GeoIP database unavailable — agent locations will show the address only")
+	} else {
+		defer geoResolver.Close()
+		logger.WithField("source", geoResolver.Source()).Info("GeoIP database loaded")
+	}
+	var networkContextRepo *repository.AgentNetworkContextRepository
+	if dbPool != nil {
+		networkContextRepo = repository.NewAgentNetworkContextRepository(dbPool.Pool())
+	}
+	agentContext := handlers.NewAgentContextRecorder(logger, geoResolver, networkContextRepo)
+	hbHandler.SetContextRecorder(agentContext)
+	evtHandler.SetClockTracker(agentContext.Clock())
+
 	// Create gRPC server with ALL handlers injected
 	grpcServer, err := server.NewServer(cfg, logger, redisClient, tlsConfig, jwtManager, agentSvc, evtHandler, hbHandler)
 	if err != nil {
@@ -583,6 +605,7 @@ func main() {
 	// Wire fallback store stats into REST API reliability endpoint.
 	// Safe even if nil (endpoint returns enabled=false + reason).
 	apiHandlers.SetFallbackStore(fallbackStore)
+	apiHandlers.SetAgentNetworkContext(networkContextRepo, geoResolver)
 	// Wire the optional out-of-band approval service. nil is fine — when
 	// it is nil the gate becomes a no-op so deployments without SMTP /
 	// EC2_EMAIL_VERIFY behave exactly as before.

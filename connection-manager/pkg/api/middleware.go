@@ -17,6 +17,7 @@ import (
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/internal/service"
 	"github.com/edr-platform/connection-manager/pkg/audit"
+	"github.com/edr-platform/connection-manager/pkg/geoip"
 	"github.com/edr-platform/connection-manager/pkg/handlers"
 	"github.com/edr-platform/connection-manager/pkg/security"
 )
@@ -64,6 +65,9 @@ type Handlers struct {
 	respEngine          *responseEngineDeps                    // optional: server-side response engine
 	// optional: analyst-managed detection exceptions (applied by the sigma engine)
 	detectionExceptionRepo *repository.DetectionExceptionRepository
+	// optional: agent connection geolocation + clock offsets
+	networkContextRepo *repository.AgentNetworkContextRepository
+	geo                *geoip.Resolver
 }
 
 // NewHandlers creates a new handlers instance.

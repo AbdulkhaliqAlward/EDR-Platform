@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 
 	"github.com/edr-platform/connection-manager/internal/cache"
 	"github.com/edr-platform/connection-manager/internal/repository"
@@ -32,7 +33,14 @@ import (
 type HeartbeatHandler struct {
 	logger       *logrus.Logger
 	redis        *cache.RedisClient
-	agentService service.AgentService // Persists status/metrics to PostgreSQL
+	agentService service.AgentService  // Persists status/metrics to PostgreSQL
+	context      *AgentContextRecorder // clock offset + connection geolocation (optional)
+}
+
+// SetContextRecorder enables clock-offset measurement and geolocation of the
+// agent's connection address.
+func (h *HeartbeatHandler) SetContextRecorder(r *AgentContextRecorder) {
+	h.context = r
 }
 
 // NewHeartbeatHandler creates a new heartbeat handler.
@@ -62,6 +70,20 @@ func (h *HeartbeatHandler) Heartbeat(ctx context.Context, req *edrv1.HeartbeatRe
 
 	logger := h.logger.WithField("agent_id", agentID)
 	logger.Debug("Heartbeat received")
+
+	// 0. Clock offset (server receive time vs agent send time) and the
+	//    address the agent connects from. Non-blocking.
+	if h.context != nil {
+		peerAddr := ""
+		if p, ok := peer.FromContext(ctx); ok && p != nil && p.Addr != nil {
+			peerAddr = p.Addr.String()
+		}
+		var agentTime time.Time
+		if ts := req.GetTimestamp(); ts != nil && ts.IsValid() {
+			agentTime = ts.AsTime()
+		}
+		h.context.Observe(agentID, peerAddr, agentTime)
+	}
 
 	// 1. Update agent status in Redis (skip when Redis unavailable)
 	if h.redis != nil {
