@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/edr-platform/shared/pagination"
 	"strings"
@@ -67,7 +68,11 @@ func (r *PostgresRuleRepository) GetByID(ctx context.Context, id string) (*Rule,
 		FROM sigma_rules
 		WHERE id = $1`
 
-	return r.scanRule(r.pool.QueryRow(ctx, query, id))
+	rule, err := r.scanRule(r.pool.QueryRow(ctx, query, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil // not found: callers answer 404 / treat the id as free
+	}
+	return rule, err
 }
 
 // List retrieves rules matching the given filters.

@@ -8,6 +8,7 @@ import (
 	"github.com/edr-platform/shared/pagination"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/edr-platform/sigma-engine/internal/domain"
@@ -28,6 +29,9 @@ type RuleRuntime interface {
 	Validate(*database.Rule) error
 	Refresh(context.Context) error
 	Test(*database.Rule, map[string]interface{}) ([]*domain.DetectionResult, error)
+	// Eligibility reports whether Refresh would load the rule (quality filter
+	// and product whitelist), with the reason when it would not.
+	Eligibility(*database.Rule) (bool, string)
 }
 
 func (h *RuleHandler) validate(w http.ResponseWriter, row *database.Rule) bool {
@@ -64,13 +68,14 @@ func NewRuleHandler(repo database.RuleRepository, auditLogger *database.AuditLog
 // RegisterRoutes registers rule routes on the router.
 func (h *RuleHandler) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/sigma/rules", h.ListRules).Methods("GET")
-	r.HandleFunc("/sigma/rules", h.CreateRule).Methods("POST")
+	r.HandleFunc("/sigma/rules", requireRuleWriter(h.CreateRule)).Methods("POST")
+	r.HandleFunc("/sigma/rules/validate", requireRuleWriter(h.ValidateRuleContent)).Methods("POST")
 	r.HandleFunc("/sigma/rules/{rule_id}", h.GetRule).Methods("GET")
-	r.HandleFunc("/sigma/rules/{rule_id}", h.UpdateRule).Methods("PUT")
-	r.HandleFunc("/sigma/rules/{rule_id}", h.DeleteRule).Methods("DELETE")
-	r.HandleFunc("/sigma/rules/{rule_id}/enable", h.EnableRule).Methods("PATCH")
-	r.HandleFunc("/sigma/rules/{rule_id}/disable", h.DisableRule).Methods("PATCH")
-	r.HandleFunc("/sigma/rules/bulk-import", h.BulkImportRules).Methods("POST")
+	r.HandleFunc("/sigma/rules/{rule_id}", requireRuleWriter(h.UpdateRule)).Methods("PUT")
+	r.HandleFunc("/sigma/rules/{rule_id}", requireRuleWriter(h.DeleteRule)).Methods("DELETE")
+	r.HandleFunc("/sigma/rules/{rule_id}/enable", requireRuleWriter(h.EnableRule)).Methods("PATCH")
+	r.HandleFunc("/sigma/rules/{rule_id}/disable", requireRuleWriter(h.DisableRule)).Methods("PATCH")
+	r.HandleFunc("/sigma/rules/bulk-import", requireRuleWriter(h.BulkImportRules)).Methods("POST")
 	r.HandleFunc("/sigma/rules/{rule_id}/test", h.TestRule).Methods("POST")
 }
 
@@ -88,6 +93,7 @@ type RuleResponse struct {
 	MitreTechniques []string   `json:"mitre_techniques,omitempty"`
 	Author          string     `json:"author,omitempty"`
 	Source          string     `json:"source"`
+	Content         string     `json:"content,omitempty"` // Sigma YAML (detail view only)
 	DateCreated     *time.Time `json:"date_created,omitempty"`
 	DateModified    *time.Time `json:"date_modified,omitempty"`
 	CreatedAt       *time.Time `json:"created_at,omitempty"`
@@ -179,48 +185,25 @@ func (h *RuleHandler) CreateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate
-	if req.ID == "" {
-		writeError(w, http.StatusBadRequest, "Rule ID is required")
+	// The Sigma YAML is authoritative: metadata is derived from it by
+	// Validate; separate request fields are ignored so they can never
+	// disagree with what the detector evaluates.
+	rule, err := ruleFromContent(req.Content, req.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Title == "" {
-		writeError(w, http.StatusBadRequest, "Rule title is required")
-		return
-	}
-	if req.Content == "" {
-		writeError(w, http.StatusBadRequest, "Rule content is required")
-		return
-	}
-
-	// Check if rule exists
-	existing, _ := h.repo.GetByID(ctx, req.ID)
-	if existing != nil {
+	if existing, _ := h.repo.GetByID(ctx, rule.ID); existing != nil {
 		writeError(w, http.StatusConflict, "Rule with this ID already exists")
 		return
 	}
-
-	// Create rule
-	rule := &database.Rule{
-		ID:          req.ID,
-		Title:       req.Title,
-		Description: req.Description,
-		Content:     req.Content,
-		Severity:    req.Severity,
-		Category:    req.Category,
-		Product:     req.Product,
-		Status:      req.Status,
-		Enabled:     true,
-		Tags:        req.Tags,
-		Source:      "custom",
-		Version:     1,
-	}
-
-	if rule.Status == "" {
-		rule.Status = "stable"
-	}
-
 	if !h.validate(w, rule) {
+		return
+	}
+	// A rule the running detector would never load must not be stored as
+	// "active" silently.
+	if ok, reason := h.runtime.Eligibility(rule); !ok {
+		writeError(w, http.StatusUnprocessableEntity, "Rule is valid but would not be activated: "+reason)
 		return
 	}
 	created, err := h.repo.Create(ctx, rule)
@@ -258,7 +241,9 @@ func (h *RuleHandler) GetRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, toRuleResponse(rule))
+	resp := toRuleResponse(rule)
+	resp.Content = rule.Content
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // UpdateRule handles PUT /api/v1/sigma/rules/{rule_id}
@@ -280,17 +265,24 @@ func (h *RuleHandler) UpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update rule
-	existing.Title = req.Title
-	existing.Description = req.Description
-	existing.Content = req.Content
-	existing.Severity = req.Severity
-	existing.Category = req.Category
-	existing.Product = req.Product
-	existing.Status = req.Status
-	existing.Tags = req.Tags
-
+	// The Sigma YAML is authoritative (see CreateRule); the ID is immutable.
+	content := req.Content
+	if strings.TrimSpace(content) == "" {
+		content = existing.Content
+	}
+	parsed, err := ruleFromContent(content, ruleID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	existing.Content = parsed.Content
+	existing.Title, existing.Description, existing.Severity, existing.Status = "", "", "", ""
+	existing.Category, existing.Product, existing.Service, existing.Tags = "", "", "", nil
 	if !h.validate(w, existing) {
+		return
+	}
+	if ok, reason := h.runtime.Eligibility(existing); existing.Enabled && !ok {
+		writeError(w, http.StatusUnprocessableEntity, "Rule is valid but would not be activated: "+reason+" (disable it first to keep it stored)")
 		return
 	}
 	updated, err := h.repo.Update(ctx, ruleID, existing)

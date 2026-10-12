@@ -88,3 +88,30 @@ func TestRuleAPIActuallyEvaluatesEvent(t *testing.T) {
 		require.Equal(t, true, response.Details["evaluated"])
 	}
 }
+
+func TestRequireRuleWriter(t *testing.T) {
+	ok := requireRuleWriter(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	run := func(ctx context.Context) int {
+		rec := httptest.NewRecorder()
+		ok(rec, httptest.NewRequest("POST", "/api/v1/sigma/rules", nil).WithContext(ctx))
+		return rec.Code
+	}
+	user := func(roles ...string) context.Context {
+		ctx := context.WithValue(context.Background(), ctxAuthKind, "user")
+		if roles != nil {
+			ctx = context.WithValue(ctx, "user_roles", roles)
+		}
+		return ctx
+	}
+	if run(context.Background()) != http.StatusNoContent {
+		t.Fatal("service API-key call refused")
+	}
+	if run(user("Security")) != http.StatusNoContent || run(user("viewer", "admin")) != http.StatusNoContent {
+		t.Fatal("rule writer refused")
+	}
+	for _, ctx := range []context.Context{user("analyst"), user("viewer"), user()} {
+		if run(ctx) != http.StatusForbidden {
+			t.Fatal("non-writer allowed to change rules")
+		}
+	}
+}

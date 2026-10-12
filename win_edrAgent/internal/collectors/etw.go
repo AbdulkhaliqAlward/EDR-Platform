@@ -114,7 +114,21 @@ func goProcessEvent(evt *C.ParsedProcessEvent) {
 		processlineage.Default.Gap(time.Now())
 		eventTime = time.Now()
 	}
-	collector.enqueueProcess(procJob{start: opcode == 1, pid: pid, ppid: ppid, img: imageName, cmd: cmdLine, at: eventTime})
+	userSid := wcharToGo(&evt.userSid[0], 192)
+	// Register/close the process table entry synchronously, in kernel delivery
+	// order: file, image-load, network and pipe events that follow (handled on
+	// other queues) must find the process even if it lives for a millisecond.
+	switch opcode {
+	case 1:
+		image := imageName
+		if p := imageFromCommandLine(cmdLine); p != "" {
+			image = p
+		}
+		procTable.registerProvisional(pid, ppid, eventTime, image, cmdLine, userSid)
+	case 2:
+		procTable.markExited(pid, eventTime)
+	}
+	collector.enqueueProcess(procJob{start: opcode == 1, pid: pid, ppid: ppid, img: imageName, cmd: cmdLine, sid: userSid, at: eventTime})
 }
 
 //export goImageLoadEvent

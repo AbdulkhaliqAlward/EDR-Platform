@@ -399,6 +399,33 @@ export interface Rule {
     };
     created_at: string;
     updated_at: string;
+    source?: string;
+    /** Sigma YAML; returned by the detail endpoint only. */
+    content?: string;
+}
+
+/** Result of POST /api/v1/sigma/rules/validate (nothing is stored). */
+export interface RuleValidation {
+    valid: boolean;
+    error?: string;
+    id?: string;
+    title?: string;
+    description?: string;
+    severity?: string;
+    status?: string;
+    product?: string;
+    category?: string;
+    service?: string;
+    mitre_tactics?: string[];
+    mitre_techniques?: string[];
+    tags?: string[];
+    /** A rule with this id is already stored. */
+    exists: boolean;
+    /** The running detector would load it (quality filter + product whitelist). */
+    will_activate: boolean;
+    inactive_reason?: string;
+    tested: boolean;
+    matched: boolean;
 }
 
 export interface AlertStats {
@@ -757,12 +784,19 @@ export const rulesApi = {
         const response = await sigmaApi.get<Rule>(`/api/v1/sigma/rules/${id}`);
         return response.data;
     },
-    create: async (rule: Partial<Rule>) => {
-        const response = await sigmaApi.post<Rule>('/api/v1/sigma/rules', rule);
+    /** The Sigma YAML is authoritative: title, level, status, tags and logsource come from it. */
+    create: async (content: string) => {
+        const response = await sigmaApi.post<Rule>('/api/v1/sigma/rules', { content });
         return response.data;
     },
-    update: async (id: string, rule: Partial<Rule>) => {
-        const response = await sigmaApi.put<Rule>(`/api/v1/sigma/rules/${id}`, rule);
+    update: async (id: string, content: string) => {
+        const response = await sigmaApi.put<Rule>(`/api/v1/sigma/rules/${encodeURIComponent(id)}`, { content });
+        return response.data;
+    },
+    /** `id` (edit mode) must agree with the YAML id, exactly as on update. */
+    validate: async (content: string, opts: { event?: Record<string, unknown>; id?: string; signal?: AbortSignal } = {}) => {
+        const { event, id, signal } = opts;
+        const response = await sigmaApi.post<RuleValidation>('/api/v1/sigma/rules/validate', { content, event, id }, { signal });
         return response.data;
     },
     delete: async (id: string) => {

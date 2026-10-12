@@ -42,6 +42,7 @@ typedef struct {
     char  imageFileName[260];   // ANSI short name from kernel event
     LONGLONG eventTime;        // ProcessTrace converts this to UTC FILETIME
     WCHAR commandLine[4096];    // Unicode full command line
+    WCHAR userSid[192];         // "S-1-5-…" from the event's UserSID (empty if absent)
 } ParsedProcessEvent;
 
 // Image (DLL/EXE) load / unload event.

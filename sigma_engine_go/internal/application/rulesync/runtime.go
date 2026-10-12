@@ -234,3 +234,35 @@ func (r *Runtime) Test(row *database.Rule, raw map[string]interface{}) ([]*domai
 	}
 	return r.engine.TestRule(rule, event)
 }
+
+// Eligibility reports whether a valid stored rule would be loaded into the
+// running detector by Refresh (production quality filter and product
+// whitelist). A rule that passes Validate but fails here would be stored yet
+// never fire, so creation/update surfaces the reason instead.
+func (r *Runtime) Eligibility(row *database.Rule) (bool, string) {
+	rule, err := Parse(row)
+	if err != nil {
+		return false, err.Error()
+	}
+	if !r.quality.Allows(rule) {
+		reason := fmt.Sprintf("level %q / status %q is excluded by the detection quality filter", rule.Level, rule.Status)
+		if r.quality != nil {
+			reason = fmt.Sprintf("level %q / status %q is excluded by the detection quality filter (minimum level %q, allowed status %v, experimental skipped: %v)",
+				rule.Level, rule.Status, r.quality.MinLevel, r.quality.AllowedStatus, r.quality.SkipExperimental)
+		}
+		return false, reason
+	}
+	if len(r.products) > 0 && rule.LogSource.Product != nil && !r.products[strings.ToLower(*rule.LogSource.Product)] {
+		return false, fmt.Sprintf("logsource product %q is not collected by the agents (allowed: %v)", *rule.LogSource.Product, sortedKeys(r.products))
+	}
+	return true, ""
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}

@@ -11,6 +11,7 @@
 
 #include "etw_cgo.h"
 #include <string.h>
+#include <sddl.h>
 
 // Go callbacks (defined in etw.go via //export)
 extern void goProcessEvent(ParsedProcessEvent* evt);
@@ -126,12 +127,45 @@ static int tdhGetPointer(PEVENT_RECORD rec, LPCWSTR name, ULONGLONG* out) {
 // Parse Process Event — TDH ONLY, no manual offsets
 // =====================================================================
 
+// The kernel Process event's UserSID property is a TOKEN_USER structure
+// (pointer-sized SID pointer + DWORD attributes, padded) immediately followed
+// by the SID. Captured here, synchronously, so the user of a process that
+// exits within milliseconds is still known (its token cannot be opened later).
+static void tdhGetUserSid(PEVENT_RECORD rec, WCHAR* out, ULONG outChars) {
+    PROPERTY_DATA_DESCRIPTOR d;
+    BYTE buf[512];
+    ULONG ps = 0, skip;
+    PSID sid;
+    LPWSTR text = NULL;
+    out[0] = 0;
+    memset(&d, 0, sizeof(d));
+    d.PropertyName = (ULONGLONG)L"UserSID";
+    d.ArrayIndex   = ULONG_MAX;
+    if (TdhGetPropertySize(rec,0,NULL,1,&d,&ps) != ERROR_SUCCESS || ps == 0 || ps > sizeof(buf))
+        return;
+    memset(buf, 0, sizeof(buf));
+    if (TdhGetProperty(rec,0,NULL,1,&d,ps,buf) != ERROR_SUCCESS)
+        return;
+    skip = (rec->EventHeader.Flags & EVENT_HEADER_FLAG_64_BIT_HEADER) ? 16 : 8;
+    if (ps <= skip + 8)
+        return;
+    sid = (PSID)(buf + skip);
+    if (!IsValidSid(sid) || GetLengthSid(sid) > ps - skip)
+        return;
+    if (ConvertSidToStringSidW(sid, &text) && text != NULL) {
+        wcsncpy(out, text, outChars - 1);
+        out[outChars - 1] = 0;
+        LocalFree(text);
+    }
+}
+
 static void parseProcessEvent(PEVENT_RECORD rec, ParsedProcessEvent* out) {
     out->eventTime = rec->EventHeader.TimeStamp.QuadPart;
     tdhGetULONG(rec, L"ProcessId",  &out->processId);
     tdhGetULONG(rec, L"ParentId",   &out->parentId);
     tdhGetAnsi  (rec, L"ImageFileName", out->imageFileName, sizeof(out->imageFileName));
     tdhGetUnicode(rec, L"CommandLine",  out->commandLine,   sizeof(out->commandLine));
+    tdhGetUserSid(rec, out->userSid, sizeof(out->userSid) / sizeof(WCHAR));
 }
 
 // =====================================================================

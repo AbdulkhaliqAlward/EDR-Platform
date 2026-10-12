@@ -36,6 +36,7 @@ type procJob struct {
 	start     bool
 	pid, ppid uint32
 	img, cmd  string
+	sid       string // user SID from the kernel event (survives a fast exit)
 	at        time.Time
 }
 
@@ -278,6 +279,10 @@ type procRecord struct {
 	elevated                 bool
 	self                     bool // the EDR agent or a process it (transitively) started
 	exited                   time.Time
+	// provisional: registered synchronously from the kernel start event,
+	// before the pipeline measured the process. Lets events raised by a
+	// process that exits within milliseconds still be attributed.
+	provisional bool
 }
 
 const (
@@ -316,14 +321,59 @@ func (t *processTable) put(r *procRecord) {
 	if len(t.m) >= maxProcTableSize {
 		t.pruneLocked(time.Now(), true)
 	}
-	// Late workers for an older PID generation must not replace its new owner.
-	if old := t.m[r.pid]; old != nil && old.created.After(r.created) {
+	old := t.m[r.pid]
+	sameProvisional := old != nil && old.provisional && absDuration(old.created.Sub(r.created)) <= creationTolerance
+	// Late workers for an older PID generation must not replace its new owner
+	// (a provisional record of the SAME generation is completed, not a new owner).
+	if old != nil && old.created.After(r.created) && !sameProvisional {
 		t.mu.Unlock()
 		return
 	}
 	copy := *r
+	if sameProvisional {
+		// Keep what only the kernel event could provide for a fast process.
+		if copy.exited.IsZero() {
+			copy.exited = old.exited
+		}
+		if copy.userSid == "" {
+			copy.userSid, copy.user = old.userSid, old.user
+		}
+		if copy.cmdline == "" {
+			copy.cmdline = old.cmdline
+		}
+		copy.self = copy.self || old.self
+	}
 	t.m[r.pid] = &copy
 	t.mu.Unlock()
+}
+
+// registerProvisional records a process from its kernel start event, in
+// delivery order, before the asynchronous pipeline measures it. Never
+// replaces a measured record of the same or a newer generation.
+func (t *processTable) registerProvisional(pid, ppid uint32, at time.Time, image, cmdline, sid string) {
+	if pid == 0 || pid == 4 {
+		return
+	}
+	parent := t.parentOf(ppid, at)
+	r := &procRecord{pid: pid, ppid: ppid, created: at, image: image, cmdline: cmdline, userSid: sid,
+		user: accountForSID(sid), provisional: true}
+	r.self = ppid == agentPID || (parent != nil && parent.self)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if old := t.m[pid]; old != nil && !old.provisional && !old.created.Before(at.Add(-creationTolerance)) {
+		return // already measured (this generation or newer)
+	}
+	if len(t.m) >= maxProcTableSize {
+		t.pruneLocked(time.Now(), true)
+	}
+	t.m[pid] = r
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func (t *processTable) get(pid uint32) *procRecord {
@@ -633,6 +683,10 @@ func (c *ETWCollector) processStart(j procJob) {
 
 	parent := procTable.parentOf(ppid, created)
 	userSid, userName, isElevated, integrity := getPrivileges(pid)
+	if userSid == "" && j.sid != "" {
+		// Exited before its token could be opened: use the kernel event's SID.
+		userSid, userName = j.sid, accountForSID(j.sid)
+	}
 	rec := &procRecord{pid: pid, ppid: ppid, created: created, creationMeasured: creationMeasured, image: exePath, cmdline: cmdLine,
 		user: userName, userSid: userSid, integrity: integrity, elevated: isElevated}
 	rec.self = isAgentImage(exePath) || (parent != nil && parent.self) || ppid == agentPID

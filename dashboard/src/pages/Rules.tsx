@@ -5,9 +5,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, useMemo } from 'react';
 import {
     Plus, Search, Edit, Trash2, Shield, ChevronDown,
-    Activity, Settings2, CheckCircle, XCircle, Zap, Target
+    Activity, CheckCircle, XCircle, Zap, Target
 } from 'lucide-react';
 import { rulesApi, statsApi, authApi, type Rule } from '../api/client';
+import { RuleEditorModal } from './rules/RuleEditorModal';
 
 // ── iOS-style toggle switch ──────────────────────────────────────────────────
 function ToggleSwitch({
@@ -457,65 +458,9 @@ export default function Rules() {
                 </div>
             </div>
 
-            {/* ── Create/Edit Modal ── */}
+            {/* ── Create/Edit rule editor ── */}
             {showModal && (
-                <div className="fixed inset-0 bg-slate-900/40 dark:bg-slate-900/70 backdrop-blur-sm flex items-center justify-center z-50">
-                    <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl p-6 w-full max-w-lg border border-slate-200 dark:border-slate-700 mx-4" style={{ animation: 'slideInRight 0.18s ease-out' }}>
-                        <div className="flex items-center gap-3 mb-5">
-                            <div className="p-2.5 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
-                                <Settings2 className="w-5 h-5" />
-                            </div>
-                            <div>
-                                <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                                    {editingRule ? 'Edit Signature' : 'Deploy New Rule'}
-                                </h2>
-                                <p className="text-xs text-slate-500 dark:text-slate-400">Configure signature settings below</p>
-                            </div>
-                        </div>
-
-                        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/50 p-4 rounded-xl text-sm text-amber-700 dark:text-amber-300 mb-5 flex items-start gap-3">
-                            <Zap className="w-4 h-4 shrink-0 mt-0.5" />
-                            <span>
-                                Sigma rule authoring is managed via the CLI sigma engine.
-                                Use <code className="font-mono bg-amber-100 dark:bg-amber-900/40 px-1 rounded">sigma-cli</code> to create, test, and deploy new detection signatures.
-                            </span>
-                        </div>
-
-                        {editingRule && (
-                            <div className="bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-700 p-4 mb-5 space-y-2 text-sm">
-                                <div className="flex justify-between">
-                                    <span className="text-slate-500 dark:text-slate-400">Rule ID</span>
-                                    <span className="font-mono text-xs text-slate-700 dark:text-slate-300 truncate max-w-[220px]">{editingRule.id}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span className="text-slate-500 dark:text-slate-400">Severity</span>
-                                    <span className={`px-2 py-0.5 rounded text-[11px] font-bold border ${ SEV_BADGE[editingRule.severity] || SEV_BADGE.low }`}>{editingRule.severity?.toUpperCase()}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span className="text-slate-500 dark:text-slate-400">Status</span>
-                                    <span className={`text-xs font-semibold ${ editingRule.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500' }`}>
-                                        {editingRule.enabled ? '● Active' : '○ Disabled'}
-                                    </span>
-                                </div>
-                            </div>
-                        )}
-
-                        <div className="flex justify-end gap-3">
-                            <button
-                                onClick={() => setShowModal(false)}
-                                className="px-4 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm font-medium rounded-xl transition-colors"
-                            >
-                                Close
-                            </button>
-                            <button
-                                onClick={() => { window.open('https://github.com/SigmaHQ/sigma', '_blank'); }}
-                                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl transition-colors shadow-sm shadow-indigo-500/20"
-                            >
-                                Sigma Docs ↗
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                <RuleEditorModal key={editingRule?.id ?? 'new'} rule={editingRule} onClose={() => setShowModal(false)} />
             )}
         </div>
     );

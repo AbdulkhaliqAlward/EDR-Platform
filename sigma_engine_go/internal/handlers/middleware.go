@@ -319,7 +319,7 @@ func CombinedAuthMiddleware(jwtAuth *JWTAuth, tokenAuth *TokenAuth) func(http.Ha
 			// Strategy 1: Try RSA JWT validation (dashboard tokens)
 			if jwtAuth != nil {
 				if parsedToken, err := jwtAuth.ValidateJWT(token); err == nil {
-					ctx := r.Context()
+					ctx := context.WithValue(r.Context(), ctxAuthKind, "user")
 					if claims, ok := parsedToken.Claims.(jwt.MapClaims); ok {
 						if sub, ok := claims["sub"].(string); ok {
 							ctx = context.WithValue(ctx, "user_id", sub)

@@ -5,7 +5,10 @@ package collectors
 
 import (
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 // Process context for events raised BY a process (image loads, network
@@ -138,4 +141,40 @@ func imagePathAt(pid uint32, at time.Time) string {
 		return r.image
 	}
 	return ""
+}
+
+var (
+	sidAccountMu    sync.Mutex
+	sidAccountCache = map[string]string{}
+)
+
+// accountForSID resolves "S-1-5-…" to DOMAIN\user (cached; SIDs of local and
+// domain accounts resolve without network for cached logons). Returns "" when
+// the SID cannot be resolved.
+func accountForSID(sid string) string {
+	if sid == "" {
+		return ""
+	}
+	sidAccountMu.Lock()
+	if v, ok := sidAccountCache[sid]; ok {
+		sidAccountMu.Unlock()
+		return v
+	}
+	sidAccountMu.Unlock()
+	name := ""
+	if s, err := windows.StringToSid(sid); err == nil {
+		if account, domain, _, err := s.LookupAccount(""); err == nil && account != "" {
+			name = account
+			if domain != "" {
+				name = domain + `\` + account
+			}
+		}
+	}
+	sidAccountMu.Lock()
+	if len(sidAccountCache) > 4096 {
+		sidAccountCache = map[string]string{}
+	}
+	sidAccountCache[sid] = name
+	sidAccountMu.Unlock()
+	return name
 }
