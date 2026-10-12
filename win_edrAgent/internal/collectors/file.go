@@ -228,15 +228,7 @@ func (c *ETWCollector) handleFileIo(op fileIoOp) {
 	if isSelfPID(pid) {
 		return
 	}
-	procPath := getImagePath(pid)
-	procName := baseName(procPath)
-	if procName == "" {
-		procName = "unknown"
-	}
-
 	name := filepath.Base(filePath)
-	sid, user, elevated, integrity := getPrivileges(pid)
-	cmdLine := getCmdLine(pid)
 	data := map[string]interface{}{
 		"action":          action,
 		"path":            filePath,
@@ -245,14 +237,11 @@ func (c *ETWCollector) handleFileIo(op fileIoOp) {
 		"directory":       filepath.Dir(filePath),
 		"extension":       filepath.Ext(name),
 		"pid":             pid,
-		"process_name":    procName,
-		"process_path":    procPath,
-		"user_name":       user,
-		"user_sid":        sid,
-		"command_line":    cmdLine,
-		"is_elevated":     elevated,
-		"integrity_level": integrity,
 	}
+	// Writing process (image, command line, parent, user, start time): the
+	// process table keeps it for short-lived processes, and the generation
+	// check prevents attributing the write to a process that reused the PID.
+	enrichProcessContext(data, pid, op.at)
 
 	// AUTO-RESPONSE runs before de-duplication so a rewritten file is still
 	// evaluated; only real creations/overwrites can carry new content.

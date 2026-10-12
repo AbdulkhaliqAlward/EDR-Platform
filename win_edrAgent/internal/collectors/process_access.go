@@ -267,17 +267,11 @@ func goProcessAccessEvent(evt *C.ParsedProcessAccessEvent) {
 	}
 
 	// Resolve process names
-	callerPath := getImagePath(callerPid)
-	targetPath := getImagePath(targetPid)
+	at := time.Now()
+	callerPath := imagePathAt(callerPid, at)
+	targetPath := imagePathAt(targetPid, at)
 	callerName := baseName(callerPath)
 	targetName := baseName(targetPath)
-
-	if callerName == "" {
-		callerName = fmt.Sprintf("pid:%d", callerPid)
-	}
-	if targetName == "" {
-		targetName = fmt.Sprintf("pid:%d", targetPid)
-	}
 
 	callerNameLow := strings.ToLower(callerName)
 	targetNameLow := strings.ToLower(targetName)
@@ -326,12 +320,11 @@ func goProcessAccessEvent(evt *C.ParsedProcessAccessEvent) {
 			"TargetProcessId":     targetPid,
 		}
 
-		// Add user context for ML model
-		callerSid, callerUser, _, _ := getPrivileges(callerPid)
-		if callerUser != "" {
-			data["user_name"] = callerUser
-			data["user_sid"] = callerSid
-		}
+		// The acting (calling) process in the standard fields the alert view
+		// and the response engine use: pid, image, command line, parent,
+		// user, start time.
+		data["pid"] = callerPid
+		enrichProcessContext(data, callerPid, at)
 
 		collector.send(event.NewEvent(event.EventTypeProcessAccess, severity, data))
 		collector.logger.Infof("[PROCACCESS] %s (pid:%d) → %s (pid:%d) access=%s severity=%s",

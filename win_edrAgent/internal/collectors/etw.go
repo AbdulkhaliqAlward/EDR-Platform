@@ -133,7 +133,8 @@ func goImageLoadEvent(evt *C.ParsedImageLoadEvent) {
 		return
 	}
 
-	collector.enqueueAsync(func() { collector.handleImageLoad(pid, imagePath) })
+	at := time.Now() // delivery time; the queue may add latency before handling
+	collector.enqueueAsync(func() { collector.handleImageLoad(pid, imagePath, at) })
 }
 
 //export goFileIoEvent

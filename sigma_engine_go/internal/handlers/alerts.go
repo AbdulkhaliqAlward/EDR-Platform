@@ -417,12 +417,17 @@ func generateHumanSummary(alert *database.Alert) string {
 			// process image name on process events, the file name on file
 			// events (where the acting process is in process_name).
 			name, _ := data["name"].(string)
-			if v, ok := data["process_name"].(string); ok && v != "" {
+			if v, ok := data["process_name"].(string); ok && !placeholderName(v) {
 				processName = v
 				targetFile = name
-			} else if cd["event_type"] == "file" {
+			} else if image := firstString(data, "executable", "process_path", "Image"); image != "" {
+				// Older agents sent "unknown"/"pid:N" when the image was not
+				// captured; prefer the image itself when present.
+				processName = pathBase(image)
 				targetFile = name
-			} else {
+			} else if cd["event_type"] == "file" || cd["event_type"] == "image_load" {
+				targetFile = name
+			} else if cd["event_type"] == "process" {
 				processName = name
 			}
 		}
@@ -451,6 +456,23 @@ func generateHumanSummary(alert *database.Alert) string {
 		}
 		return action
 
+	case "image_load":
+		module := targetFile
+		if cd := alert.ContextData; cd != nil {
+			if data, ok := cd["data"].(map[string]interface{}); ok {
+				if m := firstString(data, "ImageLoaded", "path"); m != "" {
+					module = pathBase(m)
+				}
+			}
+		}
+		switch {
+		case processName != "" && module != "":
+			return fmt.Sprintf("%s loaded module \"%s\" (%s)", processName, module, alert.RuleTitle)
+		case module != "":
+			return fmt.Sprintf("Module \"%s\" loaded by an unidentified process (%s)", module, alert.RuleTitle)
+		}
+		return fmt.Sprintf("Detection rule triggered: %s", alert.RuleTitle)
+
 	case "file_event":
 		if targetFile != "" && processName != "" {
 			return fmt.Sprintf("%s created or modified suspicious file \"%s\"", processName, targetFile)
@@ -466,6 +488,26 @@ func generateHumanSummary(alert *database.Alert) string {
 		}
 		return fmt.Sprintf("Detection rule triggered: %s", alert.RuleTitle)
 	}
+}
+
+// placeholderName reports values that only say the process was not captured.
+func placeholderName(v string) bool {
+	v = strings.TrimSpace(strings.ToLower(v))
+	return v == "" || v == "unknown" || strings.HasPrefix(v, "pid:")
+}
+
+func firstString(data map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := data[k].(string); ok && strings.TrimSpace(s) != "" && !placeholderName(s) {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+func pathBase(p string) string {
+	parts := strings.Split(strings.ReplaceAll(p, "/", "\\"), "\\")
+	return parts[len(parts)-1]
 }
 
 // describeProcessAction creates a human-readable description of a process action.

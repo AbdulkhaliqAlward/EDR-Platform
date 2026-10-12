@@ -23,9 +23,9 @@ package collectors
 import "C"
 
 import (
-	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/edr-platform/win-agent/internal/event"
 	"github.com/edr-platform/win-agent/internal/logging"
@@ -178,7 +178,7 @@ func goPipeEvent(evt *C.ParsedPipeEvent) {
 	}
 
 	// 3. Skip agent's own processes
-	processName := baseName(getImagePath(pid))
+	at := time.Now() // attribution below runs asynchronously
 	if isSelfPID(pid) {
 		return
 	}
@@ -187,10 +187,6 @@ func goPipeEvent(evt *C.ParsedPipeEvent) {
 	action := "pipe_created"
 	if opcode != 64 { // 64 = FileIo Create
 		action = "pipe_connected"
-	}
-
-	if processName == "" {
-		processName = fmt.Sprintf("pid:%d", pid)
 	}
 
 	// Check for suspicious C2 pipe patterns → promote severity
@@ -204,29 +200,19 @@ func goPipeEvent(evt *C.ParsedPipeEvent) {
 
 	// Construct event with all fields needed by Sigma pipe_created/pipe_connected rules
 	go func() {
-		processPath := getImagePath(pid)
-
 		data := map[string]interface{}{
-			"action":       action,
-			"pipe_name":    pipeName, // Original case preserved
-			"pid":          pid,
-			"process_name": processName,
+			"action":    action,
+			"pipe_name": pipeName, // Original case preserved
+			"pid":       pid,
 			// Sigma-required fields (match Sysmon EventID 17/18)
 			"PipeName": `\\.\pipe\` + pipeName,
-			"Image":    processPath,
 		}
-		if processPath != "" {
-			data["process_path"] = processPath
-		}
-
-		// Add user context for ML model
-		_, userName, _, _ := getPrivileges(pid)
-		if userName != "" {
-			data["user_name"] = userName
-		}
+		// Creating/connecting process: image (Sigma Image), command line,
+		// parent, user, start time — also for processes that already exited.
+		enrichProcessContext(data, pid, at)
 
 		collector.send(event.NewEvent(event.EventTypePipe, severity, data))
-		collector.logger.Debugf("[PIPE] %s: pid=%d process=%s pipe=%s severity=%s",
-			action, pid, processName, pipeName, severity.String())
+		collector.logger.Debugf("[PIPE] %s: pid=%d process=%v pipe=%s severity=%s",
+			action, pid, data["process_name"], pipeName, severity.String())
 	}()
 }

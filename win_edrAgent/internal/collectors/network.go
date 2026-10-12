@@ -355,13 +355,6 @@ func (c *NetworkCollector) processConnection(protocol, localIP string, localPort
 
 	c.connectionsFound.Add(1)
 
-	// Process attribution
-	processName := baseName(getImagePath(pid))
-	processPath := getImagePath(pid)
-	if processName == "" {
-		processName = fmt.Sprintf("pid:%d", pid)
-	}
-
 	// Skip agent's own processes
 	if isSelfPID(pid) {
 		return
@@ -377,7 +370,7 @@ func (c *NetworkCollector) processConnection(protocol, localIP string, localPort
 		action = "connection_attempted"
 	}
 
-	evt := event.NewEvent(event.EventTypeNetwork, event.SeverityLow, map[string]interface{}{
+	data := map[string]interface{}{
 		"action":           action,
 		"direction":        direction,
 		"protocol":         protocol,
@@ -386,16 +379,17 @@ func (c *NetworkCollector) processConnection(protocol, localIP string, localPort
 		"destination_ip":   remoteIP,
 		"destination_port": int(remotePort),
 		"pid":              pid,
-		"process_name":     processName,
 		"state":            state,
 		// Sigma-compatible fields
-		"Image":            processPath,
-		"SourceIp":         localIP,
-		"SourcePort":       int(localPort),
-		"DestinationIp":    remoteIP,
-		"DestinationPort":  int(remotePort),
-		"Protocol":         protocol,
-	})
+		"SourceIp":        localIP,
+		"SourcePort":      int(localPort),
+		"DestinationIp":   remoteIP,
+		"DestinationPort": int(remotePort),
+		"Protocol":        protocol,
+	}
+	// Owning process: image, command line, parent, user, start time.
+	enrichProcessContext(data, pid, time.Now())
+	evt := event.NewEvent(event.EventTypeNetwork, event.SeverityLow, data)
 
 	// Apply filter
 	if c.filter == nil || !c.filter.ShouldFilter(evt) {

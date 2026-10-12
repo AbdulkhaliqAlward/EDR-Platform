@@ -272,8 +272,12 @@ type procRecord struct {
 	creationMeasured bool
 	image            string
 	cmdline          string
-	self             bool // the EDR agent or a process it (transitively) started
-	exited           time.Time
+	// Token identity captured at creation, so events raised after the
+	// process exits (image loads, network, DNS…) still carry the user.
+	user, userSid, integrity string
+	elevated                 bool
+	self                     bool // the EDR agent or a process it (transitively) started
+	exited                   time.Time
 }
 
 const (
@@ -628,7 +632,9 @@ func (c *ETWCollector) processStart(j procJob) {
 	}
 
 	parent := procTable.parentOf(ppid, created)
-	rec := &procRecord{pid: pid, ppid: ppid, created: created, creationMeasured: creationMeasured, image: exePath, cmdline: cmdLine}
+	userSid, userName, isElevated, integrity := getPrivileges(pid)
+	rec := &procRecord{pid: pid, ppid: ppid, created: created, creationMeasured: creationMeasured, image: exePath, cmdline: cmdLine,
+		user: userName, userSid: userSid, integrity: integrity, elevated: isElevated}
 	rec.self = isAgentImage(exePath) || (parent != nil && parent.self) || ppid == agentPID
 	procTable.put(rec)
 	if creationMeasured {
@@ -674,7 +680,6 @@ func (c *ETWCollector) processStart(j procJob) {
 		parentImage, parentCmd = getImagePath(ppid), getCmdLine(ppid)
 	}
 
-	userSid, userName, isElevated, integrity := getPrivileges(pid)
 	id := FileIdentityOf(exePath)
 
 	data := map[string]interface{}{

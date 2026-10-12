@@ -229,11 +229,8 @@ func goDnsEvent(evt *C.ParsedDnsEvent) {
 		return
 	}
 
-	// 4. Process attribution — resolve caller process image
-	processName := baseName(getImagePath(pid))
-	if processName == "" {
-		processName = fmt.Sprintf("pid:%d", pid)
-	}
+	// Captured at delivery: attribution below runs asynchronously.
+	at := time.Now()
 
 	// Skip DNS queries from the agent's own processes
 	if isSelfPID(pid) {
@@ -270,7 +267,6 @@ func goDnsEvent(evt *C.ParsedDnsEvent) {
 			"query_type":    typeStr,
 			"response_code": statusStr,
 			"pid":           pid,
-			"process_name":  processName,
 			// Sigma-required fields (field names match Sysmon EventID 22)
 			"QueryName":    queryNameLow,
 			"QueryStatus":  queryStatus,
@@ -281,16 +277,13 @@ func goDnsEvent(evt *C.ParsedDnsEvent) {
 			data["answer_count"] = len(answers)
 		}
 
-		// Process path for Sigma Image field
-		processPath := getImagePath(pid)
-		if processPath != "" {
-			data["process_path"] = processPath
-			data["Image"] = processPath
-		}
+		// Querying process (image → Sigma Image, command line, parent, user,
+		// start time), from the process table so exited processes keep it.
+		enrichProcessContext(data, pid, at)
 
 		collector.send(event.NewEvent(event.EventTypeDNS, event.SeverityLow, data))
-		collector.logger.Debugf("[DNS] Query: pid=%d process=%s domain=%s type=%s status=%s answers=%d",
-			pid, processName, queryNameLow, typeStr, statusStr, len(answers))
+		collector.logger.Debugf("[DNS] Query: pid=%d process=%v domain=%s type=%s status=%s answers=%d",
+			pid, data["process_name"], queryNameLow, typeStr, statusStr, len(answers))
 	}()
 }
 

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/edr-platform/win-agent/internal/event"
 	"github.com/edr-platform/win-agent/internal/logging"
@@ -140,7 +141,7 @@ func initHashPool(logger *logging.Logger) {
 //
 // OPTIMIZATION: Hashing is NON-BLOCKING. The event is sent immediately
 // with hash_sha256="" and a background worker enriches it asynchronously.
-func (c *ETWCollector) handleImageLoad(pid uint32, imagePath string) {
+func (c *ETWCollector) handleImageLoad(pid uint32, imagePath string, at time.Time) {
 	lower := strings.ToLower(imagePath)
 
 	// --- Noise filter: skip core OS DLLs that load in every process ---
@@ -159,13 +160,6 @@ func (c *ETWCollector) handleImageLoad(pid uint32, imagePath string) {
 
 	modName := baseName(imagePath)
 
-	// Enrich: process that loaded this module.
-	procPath := getImagePath(pid)
-	procName := baseName(procPath)
-	if procName == "" {
-		procName = "unknown"
-	}
-
 	// Self-exclusion: ignore image loads inside the agent itself or any
 	// helper process it spawned. Without this gate, the agent generates a
 	// burst of DLL-load events on every PowerShell helper invocation.
@@ -178,20 +172,22 @@ func (c *ETWCollector) handleImageLoad(pid uint32, imagePath string) {
 	isSigned := sig == "microsoft" || sig == "trusted"
 
 	// Create event IMMEDIATELY — no blocking on hash computation.
-	evt := event.NewEvent(event.EventTypeImageLoad, event.SeverityMedium, map[string]interface{}{
-		"action":       "loaded",
-		"path":         imagePath,
-		"name":         modName,
-		"hash_sha256":  "", // Will be enriched asynchronously by hash worker
-		"pid":          pid,
-		"process_name": procName,
-		"process_path": procPath,
-		"is_signed":    isSigned,
+	data := map[string]interface{}{
+		"action":           "loaded",
+		"path":             imagePath,
+		"name":             modName,
+		"hash_sha256":      "", // Will be enriched asynchronously by hash worker
+		"pid":              pid,
+		"is_signed":        isSigned,
+		"signature_status": sig,
 		// Sigma-compatible fields
 		"ImageLoaded": imagePath,
-		"Image":       procPath,
 		"Signed":      isSigned,
-	})
+	}
+	// The loading process: image, command line, parent, user, start time —
+	// from the process table, so short-lived processes are still attributed.
+	enrichProcessContext(data, pid, at)
+	evt := event.NewEvent(event.EventTypeImageLoad, event.SeverityMedium, data)
 
 	// Apply configurable filter.
 	if c.filter != nil && c.filter.ShouldFilter(evt) {

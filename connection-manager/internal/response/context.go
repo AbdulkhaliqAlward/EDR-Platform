@@ -106,7 +106,15 @@ func BuildAlertVars(a *repository.SigmaAlertRecord) AlertVars {
 		}
 		return ""
 	}
-	d := func(k string) string { return scalar(data[k]) }
+	// Placeholders older agents sent when the process was not captured
+	// ("unknown", "pid:1234") are not identities: treat them as missing.
+	d := func(k string) string {
+		s := scalar(data[k])
+		if l := strings.ToLower(strings.TrimSpace(s)); l == "unknown" || strings.HasPrefix(l, "pid:") {
+			return ""
+		}
+		return s
+	}
 	m := func(k string) string { return scalar(mf[k]) }
 
 	v["hostname"] = first(scalar(asMap(ctx["source"])["hostname"]), d("hostname"), scalar(ctx["hostname"]))
@@ -130,6 +138,10 @@ func BuildAlertVars(a *repository.SigmaAlertRecord) AlertVars {
 	v["user"] = first(d("user_name"), m("User"))
 	if eventType == "file" {
 		v["file_path"] = first(d("path"), d("target_filename"), m("TargetFilename"))
+	} else if eventType == "image_load" {
+		// The loaded module is the artifact (its hash is hash_sha256 below);
+		// the loading process stays in process_path / pid.
+		v["file_path"] = first(d("ImageLoaded"), d("path"), m("ImageLoaded"))
 	} else {
 		// Process alerts: the file to scan/quarantine is the process image.
 		v["file_path"] = first(d("target_filename"), m("TargetFilename"), v["process_path"])
