@@ -78,8 +78,9 @@ export function DetectionExceptionsPage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
                 <span className="rounded-xl border border-indigo-200 bg-indigo-50 p-2.5 dark:border-indigo-800 dark:bg-indigo-950/40"><ShieldOff className="h-5 w-5 text-indigo-600 dark:text-indigo-400" /></span>
-                <div className="min-w-0"><h1 className="text-xl font-bold text-slate-900 dark:text-white">Detection Exceptions</h1>
-                    <p className="mt-1 max-w-2xl text-sm text-slate-500">Review approved benign activity, its scope and how often detections were suppressed.</p>
+                <div className="min-w-0">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Orchestration</div>
+                    <h1 className="text-xl font-bold text-slate-900 dark:text-white">Detection Exceptions</h1>
                 </div>
             </div>
             <div className="flex items-center gap-2">

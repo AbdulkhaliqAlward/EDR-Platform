@@ -15,7 +15,6 @@ import InsightHero from '../../components/InsightHero';
 import {
     Activity,
     AlertTriangle,
-    BarChart3,
     BookOpen,
     Clock,
     Eye,
@@ -33,7 +32,6 @@ import {
     ShieldCheck,
     Terminal,
     Trash2,
-    TrendingUp,
     Wifi,
     WifiOff,
     X,
@@ -301,61 +299,11 @@ export function SecurityEndpointZeroTrustPage() {
                 
                 accent="indigo"
                 icon={ShieldCheck}
-                eyebrow="Identity & Access"
+                eyebrow="Security"
                 title="Endpoint Zero Trust"
-                lead={<>Monitor device trust continuously. This dashboard provides real-time visibility into <strong className="text-white">enrollment health, isolation posture, and certificate continuity</strong> to ensure only secure, authenticated endpoints can access corporate resources.</>}
             />
 
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Radio className="w-4 h-4 text-cyan-500 shrink-0" />
-                        vs Fleet connectivity
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/management/network">
-                            Fleet connectivity
-                        </Link>{' '}
-                        focuses on queues, drops, and addresses. Zero Trust here focuses on whether the <em>identity and health</em> of the agent still warrant trust.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Activity className="w-4 h-4 text-amber-500 shrink-0" />
-                        vs Endpoint risk
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/endpoint-risk">
-                            Endpoint risk
-                        </Link>{' '}
-                        ranks every host for triage. Below we only surface <strong>trust debt excerpts</strong> and exception queues derived from the same API.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <BookOpen className="w-4 h-4 text-violet-500 shrink-0" />
-                        vs Context policies
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/management/context-policies">
-                            Context policies
-                        </Link>{' '}
-                        adjust alert scoring weights. They do not replace device health, cert, or isolation evidence shown here.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Shield className="w-4 h-4 text-emerald-500 shrink-0" />
-                        vs Correlation
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/soc/correlation">
-                            Correlation
-                        </Link>{' '}
-                        fuses timelines for investigation. Zero Trust answers “should we still trust this device class of signals?” at a glance.
-                    </p>
-                </div>
-            </div>
+
 
             {loading && <div className="h-44 rounded-xl bg-slate-100 dark:bg-slate-800 animate-pulse" />}
 
@@ -675,61 +623,11 @@ export function SecuritySiemPage() {
                 
                 accent="cyan"
                 icon={ServerCrash}
-                eyebrow="Data Integration"
+                eyebrow="Security"
                 title="SIEM Forwarding"
-                lead={<>Manage your outbound security integrations. Configure <strong className="text-white">server-side destinations</strong> to automatically forward normalized alerts and telemetry to your preferred Security Information and Event Management (SIEM) platforms.</>}
             />
 
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Radio className="w-4 h-4 text-amber-500" />
-                        vs Telemetry Search
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/events">
-                            Telemetry Search
-                        </Link>{' '}
-                        queries events inside the platform. SIEM — X defines where copies could be shipped out.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <AlertTriangle className="w-4 h-4 text-orange-500" />
-                        vs Alerts
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/alerts">
-                            Alerts
-                        </Link>{' '}
-                        are detections for analysts. Connectors here are infrastructure endpoints, not alert rows.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <BookOpen className="w-4 h-4 text-violet-500" />
-                        vs Audit logs
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/system/audit-logs">
-                            Audit logs
-                        </Link>{' '}
-                        are the tamper-evident operator trail. SIEM connectors are separate forwarder configuration.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Activity className="w-4 h-4 text-emerald-500" />
-                        vs Correlation
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/soc/correlation">
-                            Correlation
-                        </Link>{' '}
-                        fuses timelines per host. SIEM — X does not visualize fused streams — it registers export sinks.
-                    </p>
-                </div>
-            </div>
+
 
             {listQ.isLoading && <div className="h-36 rounded-xl bg-slate-100 dark:bg-slate-800 animate-pulse" />}
 
@@ -1124,61 +1022,11 @@ export function ManagedSecurityOverviewPage() {
                 
                 accent="violet"
                 icon={Shield}
-                eyebrow="MDR Dashboard"
+                eyebrow="Managed Detection &amp; Response"
                 title="Operations Overview"
-                lead={<>Executive summary of your <strong className="text-white">Managed Detection and Response (MDR)</strong> operations. Monitor true alert volumes, track active incident queues, and assess endpoint risk levels instantly across your entire managed fleet.</>}
             />
 
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Zap className="w-4 h-4 text-amber-500" />
-                        vs Alerts workspace
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/alerts">
-                            /alerts
-                        </Link>{' '}
-                        is triage, filters, and bulk actions. Here you only see <strong>aggregates and a 12-row pulse</strong>.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <BarChart3 className="w-4 h-4 text-cyan-500" />
-                        vs Service Summary
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/dashboards/service">
-                            Service Summary
-                        </Link>{' '}
-                        broadens to reliability + platform KPIs. This page stays on <strong>threat queue + response + fleet touchpoints</strong>.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Terminal className="w-4 h-4 text-slate-500" />
-                        vs Command Center
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/responses">
-                            Command Center
-                        </Link>{' '}
-                        (<code className="text-[10px]">/responses</code>) is command history and execution. Here we surface <strong>pending/failed command totals</strong> as a backlog signal only.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <TrendingUp className="w-4 h-4 text-rose-500" />
-                        vs Endpoint Risk
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/endpoint-risk">
-                            Endpoint Risk
-                        </Link>{' '}
-                        is the full ranked board. Below is a <strong>top-6 managed excerpt</strong> for the same index.
-                    </p>
-                </div>
-            </div>
+
 
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 <StatCard
@@ -1486,49 +1334,11 @@ export function ManagedSecurityIncidentsPage() {
                 
                 accent="fuchsia"
                 icon={ListFilter}
-                eyebrow="Active Threats"
+                eyebrow="Managed Detection &amp; Response"
                 title="Incident Queue"
-                lead={<>Your operational command center for active incidents. Quickly triage, assign, and resolve <strong className="text-white">security alerts</strong> with full context, utilizing server-side filtering for rapid threat response and containment.</>}
             />
 
-            <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Zap className="w-4 h-4 text-amber-500" />
-                        vs Alerts workspace
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/alerts">
-                            /alerts
-                        </Link>{' '}
-                        adds streaming, drawer triage, and bulk status writes. This route is a <strong>managed-service style backlog</strong> with stable paging.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <BarChart3 className="w-4 h-4 text-cyan-500" />
-                        vs Operations overview
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/managed-security/overview">
-                            Operations overview
-                        </Link>{' '}
-                        is charts + excerpts. Here you work the <strong>full filterable list</strong> with correct totals.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Radio className="w-4 h-4 text-violet-500" />
-                        vs Endpoint / risk boards
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/endpoint-risk">
-                            Endpoint risk
-                        </Link>{' '}
-                        ranks hosts. This table stays <strong>alert-centric</strong> (one row per detection).
-                    </p>
-                </div>
-            </div>
+
 
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 <StatCard
@@ -2715,42 +2525,8 @@ export function ManagementNetworkPage() {
                 variant="light"
                 accent="cyan"
                 icon={Wifi}
-                eyebrow="Infrastructure"
+                eyebrow="Management"
                 title="Fleet Connectivity"
-                segments={[
-                    {
-                        heading: 'Data sources',
-                        children: (
-                            <>
-                                Fleet-wide posture from{' '}
-                                <code className="text-[11px] font-mono px-1 py-0.5 rounded bg-slate-200/90 dark:bg-slate-800">/api/v1agent statistics</code>; per-host queue, drops, and
-                                addresses come from the fleet registry (same data source as the Devices page).
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'Effective “live” status',
-                        children: (
-                            <>
-                                Registry <strong className="font-semibold text-slate-800 dark:text-slate-200">online/degraded</strong> is shown as{' '}
-                                <strong className="font-semibold text-slate-800 dark:text-slate-200">offline</strong> when more than {staleLabel} since{' '}
-                                <code className="text-[11px] font-mono px-1 rounded bg-slate-200/90 dark:bg-slate-800">last_seen</code> — identical to the Device Management grid.
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'Per-host depth',
-                        children: (
-                            <>
-                                Deep per-host network telemetry (interfaces, routes, DNS context) lives on the endpoint — open a host from{' '}
-                                <Link className="text-cyan-600 dark:text-cyan-400 font-semibold hover:underline" to="/management/devices">
-                                    Devices (Fleet)
-                                </Link>{' '}
-                                → <strong className="font-medium text-slate-800 dark:text-slate-200">Network</strong> tab on device detail.
-                            </>
-                        ),
-                    },
-                ]}
             />
 
             {statsQ.isLoading && !s && (
@@ -2973,9 +2749,8 @@ export function ManagementAccountPage() {
             <InsightHero
                 icon={ShieldAlert}
                 accent="cyan"
-                eyebrow="Management"
+                eyebrow="System"
                 title="Account Settings"
-                lead={<>View your account permissions, associated roles, and API access levels. For profile details, please visit your user profile.</>}
             />
 
             {u ? (
@@ -3054,7 +2829,6 @@ export function ManagementRmmPage() {
     return (
         <div className="space-y-6 w-full min-w-0 animate-slide-up-fade">
             <InsightHero icon={Terminal} accent="cyan" eyebrow="Management" title="Remote Management"
-                lead={<>Centralized view of all remote commands issued across the fleet. Use the <Link to="/management/devices" className="text-cyan-300 underline">Endpoint Detail</Link> Response tab to execute new commands.</>}
             />
             <div className="bg-white/95 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
                 <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">

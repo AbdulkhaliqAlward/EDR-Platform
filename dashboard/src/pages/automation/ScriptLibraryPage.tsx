@@ -118,10 +118,8 @@ export function ScriptLibraryPage() {
             <FileCode className="w-6 h-6 text-teal-600 dark:text-teal-400" />
           </div>
           <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Orchestration</div>
             <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Response Script Library</h1>
-            <p className="text-sm text-slate-500 mt-1">
-              Server-stored response commands that analysts can run on endpoints — no agent rebuild needed.
-            </p>
           </div>
         </div>
         {canManage && (

@@ -134,18 +134,8 @@ export default function SignaturesManagement() {
             <InsightHero
                 accent="emerald"
                 icon={ShieldCheck}
-                eyebrow="Server-managed signatures"
+                eyebrow="System"
                 title="Central malware hash feed"
-                segments={[
-                    {
-                        heading: 'Single source of truth',
-                        children: <>The connection-manager syncs and versions signatures, then all agents pull deltas from server endpoints.</>,
-                    },
-                    {
-                        heading: 'Fleet-wide push',
-                        children: <>Use one action to queue `update_signatures` to the whole fleet instead of per-device updates.</>,
-                    },
-                ]}
             />
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

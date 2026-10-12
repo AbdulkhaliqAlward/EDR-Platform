@@ -512,15 +512,13 @@ export default function AgentDeployment() {
             {/* Page Header */}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                 <div>
-                    <h2 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Management</div>
+                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
                         <div className="p-2.5 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-xl shadow-lg shadow-cyan-500/20">
                             <Download className="w-6 h-6 text-white" />
                         </div>
                         Agent Deployment
-                    </h2>
-                    <p className="text-slate-500 dark:text-slate-400 mt-1">
-                        Build a bound agent binary, install it on Windows endpoints and verify enrollment.
-                    </p>
+                    </h1>
                 </div>
                 {authApi.canBuildAgent() && (
                     <button

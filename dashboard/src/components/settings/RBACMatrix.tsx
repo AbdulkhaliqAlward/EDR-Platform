@@ -1,19 +1,7 @@
 import { useMemo, useState, useEffect, Fragment } from 'react';
-import { Link } from 'react-router-dom';
+
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import {
-    Save,
-    RefreshCw,
-    Shield,
-    AlertCircle,
-    Check,
-    Lock,
-    Users,
-    UserCircle,
-    Settings2,
-    ArrowUpRight,
-    Eye,
-} from 'lucide-react';
+import { Save, RefreshCw, Shield, AlertCircle, Check, Lock, Eye } from 'lucide-react';
 import { rolesApi, authApi, type Role, type Permission } from '../../api/client';
 import { ROLE_COLORS } from './types';
 import InsightHero from '../InsightHero';
@@ -176,27 +164,11 @@ export default function RBACMatrix() {
 
     return (
         <div className="space-y-6 w-full max-w-none animate-fade-in">
-            <InsightHero
+            <InsightHero eyebrow="System"
                 variant="light"
                 accent="cyan"
                 icon={Shield}
                 title="Authorization matrix"
-                lead={
-                    <>
-                        This screen is the <strong className="font-semibold text-slate-800 dark:text-slate-200">permission catalog</strong> merged with each role&apos;s grants. The
-                        connection-manager enforces these checks on every API call (
-                        <code className="text-[11px] font-mono px-1 rounded bg-slate-200/90 dark:bg-slate-800">RequirePermission</code>). It does{' '}
-                        <strong className="font-semibold text-slate-800 dark:text-slate-200">not</strong> create user accounts (
-                        <Link to="/system/access/users" className="text-cyan-600 dark:text-cyan-400 font-semibold hover:underline">
-                            Users
-                        </Link>
-                        ), personal profile, or dashboard-only preferences (
-                        <Link to="/settings/system" className="text-cyan-600 dark:text-cyan-400 font-semibold hover:underline">
-                            Settings
-                        </Link>
-                        ).
-                    </>
-                }
                 actions={
                     !canEdit ? (
                         <div className="flex items-center gap-2 shrink-0 rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50/90 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200 max-w-xs">
@@ -207,72 +179,7 @@ export default function RBACMatrix() {
                         </div>
                     ) : null
                 }
-            >
-                {matrixQ.data?.meta?.request_id ? (
-                    <p className="text-[11px] font-mono text-slate-400 dark:text-slate-500 mb-4">
-                        Request ID: {matrixQ.data.meta.request_id}
-                    </p>
-                ) : null}
-                <ul className="grid grid-cols-1 sm:grid-cols-3 gap-3 list-none p-0 m-0">
-                    <li>
-                        <Link
-                            to="/system/access/users"
-                            className="group flex h-full flex-col rounded-xl border border-slate-200/80 dark:border-slate-700 bg-white/70 dark:bg-slate-800/50 px-4 py-3 transition hover:border-cyan-300 dark:hover:border-cyan-700"
-                        >
-                            <span className="flex items-start justify-between gap-2">
-                                <span className="flex items-start gap-3 min-w-0">
-                                    <Users className="w-5 h-5 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5" />
-                                    <span className="font-semibold text-slate-900 dark:text-white group-hover:text-cyan-700 dark:group-hover:text-cyan-300">
-                                        Directory users
-                                    </span>
-                                </span>
-                                <ArrowUpRight className="w-4 h-4 shrink-0 text-slate-400 group-hover:text-cyan-600" />
-                            </span>
-                            <span className="mt-2 text-xs text-slate-500 dark:text-slate-400 pl-8 leading-relaxed">
-                                Assign a <strong className="font-medium">role name</strong> per account — not individual checkboxes here.
-                            </span>
-                        </Link>
-                    </li>
-                    <li>
-                        <Link
-                            to="/system/profile"
-                            className="group flex h-full flex-col rounded-xl border border-slate-200/80 dark:border-slate-700 bg-white/70 dark:bg-slate-800/50 px-4 py-3 transition hover:border-cyan-300 dark:hover:border-cyan-700"
-                        >
-                            <span className="flex items-start justify-between gap-2">
-                                <span className="flex items-start gap-3 min-w-0">
-                                    <UserCircle className="w-5 h-5 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5" />
-                                    <span className="font-semibold text-slate-900 dark:text-white group-hover:text-cyan-700 dark:group-hover:text-cyan-300">
-                                        Your profile
-                                    </span>
-                                </span>
-                                <ArrowUpRight className="w-4 h-4 shrink-0 text-slate-400 group-hover:text-cyan-600" />
-                            </span>
-                            <span className="mt-2 text-xs text-slate-500 dark:text-slate-400 pl-8 leading-relaxed">
-                                Signed-in user password and display — separate from RBAC definitions.
-                            </span>
-                        </Link>
-                    </li>
-                    <li>
-                        <Link
-                            to="/settings/system"
-                            className="group flex h-full flex-col rounded-xl border border-slate-200/80 dark:border-slate-700 bg-white/70 dark:bg-slate-800/50 px-4 py-3 transition hover:border-cyan-300 dark:hover:border-cyan-700"
-                        >
-                            <span className="flex items-start justify-between gap-2">
-                                <span className="flex items-start gap-3 min-w-0">
-                                    <Settings2 className="w-5 h-5 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5" />
-                                    <span className="font-semibold text-slate-900 dark:text-white group-hover:text-cyan-700 dark:group-hover:text-cyan-300">
-                                        Dashboard preferences
-                                    </span>
-                                </span>
-                                <ArrowUpRight className="w-4 h-4 shrink-0 text-slate-400 group-hover:text-cyan-600" />
-                            </span>
-                            <span className="mt-2 text-xs text-slate-500 dark:text-slate-400 pl-8 leading-relaxed">
-                                Theme and local UI toggles — not stored as role rows.
-                            </span>
-                        </Link>
-                    </li>
-                </ul>
-            </InsightHero>
+            />
 
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                 <div>

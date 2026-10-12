@@ -85,11 +85,8 @@ export default function Events() {
                         <Activity className="w-6 h-6" />
                     </div>
                     <div className="flex-1">
-                        <h2 className="text-2xl font-bold text-slate-900 dark:text-white">Telemetry Search</h2>
-                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                            Search stored telemetry via the event search panel. Click a row for{' '}
-                            its raw payload.
-                        </p>
+                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
+                        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Telemetry Search</h1>
                     </div>
                     <Link
                         to="/alerts"

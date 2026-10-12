@@ -346,10 +346,8 @@ export function ReportGenerator() {
                             <BarChart3 className="w-5 h-5" />
                         </div>
                         <div>
-                            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Report Generator</h2>
-                            <p className="text-sm text-slate-500 dark:text-slate-400">
-                                Create reports with charts and data visualizations
-                            </p>
+                            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Dashboards</div>
+                            <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Reports</h1>
                         </div>
                     </div>
                 </div>

@@ -397,11 +397,8 @@ export default function AuditLogs() {
         >
             {/* Title — compact, above Standard toolbar */}
             <div className="mb-3 shrink-0">
-                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Audit Logs</h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Who did what, to which object, when and from where — sign-ins, response actions, configuration and agent lifecycle.
-                    Entries are append-only; open a row for full before/after values.
-                </p>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">System</div>
+                <h1 className="text-lg font-bold text-slate-900 dark:text-white">Audit Logs</h1>
                 {exportError && <p role="alert" className="mt-2 text-xs text-rose-600 dark:text-rose-400">{exportError}</p>}
             </div>
 

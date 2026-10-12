@@ -405,15 +405,8 @@ export default function SocCorrelation() {
                 
                 accent="cyan"
                 icon={GitBranch}
-                eyebrow="SOC correlation workspace"
+                eyebrow="SOC"
                 title="Endpoint Activity Correlation"
-                lead={
-                    <>
-                        Correlate one endpoint's <strong className="text-white">detections</strong>, <strong className="text-white">response commands</strong> and{' '}
-                        <strong className="text-white">raw telemetry</strong> on a single timeline. Focus on an alert to see what ran
-                        on the host in the 10 minutes before and after it.
-                    </>
-                }
                 actions={
                     <div className="flex flex-wrap gap-2 text-xs">
                         <Link

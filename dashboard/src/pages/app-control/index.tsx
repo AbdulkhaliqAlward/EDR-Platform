@@ -78,12 +78,6 @@ export default function ApplicationControlPage() {
                 accent="violet"
                 eyebrow="Management"
                 title="Application Control"
-                lead={
-                    <>
-                        Fleet-wide application analytics: executions, vulnerabilities, network activity, special tools, and installed software.
-                        Use the tabs below to drill into each dataset.
-                    </>
-                }
             />
 
             {/* Tab bar */}

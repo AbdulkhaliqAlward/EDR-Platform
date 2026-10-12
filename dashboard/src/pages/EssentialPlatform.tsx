@@ -3,11 +3,9 @@ import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
     Shield,
-    Server,
     Activity,
     Terminal,
     Search,
-    Lock,
     RefreshCw,
     AlertCircle,
     CheckCircle2,
@@ -92,16 +90,9 @@ export default function EssentialPlatform() {
                         variant="light"
                         accent="cyan"
                         icon={Activity}
-                        eyebrow="Essential platform"
+                        eyebrow="Essential Platform"
                         title="Live deployment snapshot"
                         className="!rounded-xl border-0 shadow-none bg-transparent px-0 py-0 sm:py-1"
-                        lead={
-                            <>
-                                <p>
-                                    This dashboard provides a real-time, consolidated view of your active deployment and infrastructure health. Use this snapshot to instantly monitor overall system performance, operational status, and platform reliability before diving into detailed security posture analytics.
-                                </p>
-                            </>
-                        }
                         actions={
                             <button
                                 type="button"
@@ -188,90 +179,6 @@ export default function EssentialPlatform() {
                     )}
                 </section>
 
-                {/* Product overview — static documentation, intentionally not KPI charts */}
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 backdrop-blur p-6 sm:p-8">
-                    <div className="flex items-start gap-3">
-                        <div className="p-2 rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300">
-                            <Shield className="w-6 h-6" />
-                        </div>
-                        <div className="flex-1">
-                            <h2 className="text-2xl sm:text-3xl font-bold text-slate-900 dark:text-white tracking-tight">
-                                Essential Platform
-                            </h2>
-                            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mt-2 uppercase tracking-wide">
-                                Orientation — not a duplicate of SOC dashboards
-                            </p>
-                            <p className="text-sm text-slate-600 dark:text-slate-300 mt-3 leading-relaxed">
-                                This route is the <strong className="font-medium text-slate-800 dark:text-slate-200">entry narrative</strong>{' '}
-                                for what the product is and where to work next. Operational charts, alert triage, and drill-down analytics live
-                                under <strong className="font-medium">Dashboards</strong> and <strong className="font-medium">SOC</strong> — not
-                                here. The live strip above is only a compact pulse from the same APIs used elsewhere.
-                            </p>
-                            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm text-slate-600 dark:text-slate-300">
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-950/20 p-4">
-                                    <div className="font-semibold text-slate-900 dark:text-white">What problems it solves</div>
-                                    <ul className="mt-2 space-y-1 list-disc list-inside marker:text-cyan-600">
-                                        <li>Centralized visibility across endpoints (status, health, alerts).</li>
-                                        <li>Faster investigations with searchable telemetry and payload detail.</li>
-                                        <li>Auditable response actions through the command pipeline.</li>
-                                    </ul>
-                                </div>
-                                <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-950/20 p-4">
-                                    <div className="font-semibold text-slate-900 dark:text-white">Key capabilities</div>
-                                    <ul className="mt-2 space-y-1 list-disc list-inside marker:text-cyan-600">
-                                        <li>Detection and alerting (Sigma rules engine).</li>
-                                        <li>Device management and endpoint views.</li>
-                                        <li>Remote response (containment, forensics, blocking).</li>
-                                        <li>Governance (audit, RBAC, enrollment tokens).</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 backdrop-blur p-5 space-y-2">
-                        <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100 font-semibold">
-                            <Server className="w-4 h-4 text-cyan-500" /> Core services (architecture)
-                        </div>
-                        <ul className="text-sm text-slate-600 dark:text-slate-300 space-y-1 list-disc list-inside">
-                            <li>
-                                <strong className="font-medium">Connection Manager</strong> — agents, commands, audit, events, enrollment.
-                            </li>
-                            <li>
-                                <strong className="font-medium">Sigma Engine</strong> — detections, rules, alert statistics.
-                            </li>
-                            <li>
-                                <strong className="font-medium">Dashboard</strong> — analyst UI you are using now.
-                            </li>
-                        </ul>
-                    </div>
-
-                    <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 backdrop-blur p-5 space-y-2">
-                        <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100 font-semibold">
-                            <Activity className="w-4 h-4 text-cyan-500" /> Typical workflows
-                        </div>
-                        <ul className="text-sm text-slate-600 dark:text-slate-300 space-y-1 list-disc list-inside">
-                            <li>Monitor posture and fleet health in dashboards.</li>
-                            <li>Triage alerts and search telemetry from SOC.</li>
-                            <li>Execute responses from Command Center when permitted.</li>
-                            <li>Adjust policies, tokens, and roles under System / Management.</li>
-                        </ul>
-                    </div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 backdrop-blur p-5 space-y-3">
-                    <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100 font-semibold">
-                        <Lock className="w-4 h-4 text-cyan-500" /> Permissions
-                    </div>
-                    <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
-                        Routes are guarded server-side (e.g. <code className="text-xs font-mono">alerts:read</code>,{' '}
-                        <code className="text-xs font-mono">responses:execute</code>). The UI mirrors those checks; missing data above usually
-                        means the API returned an error — use Refresh or check Reliability Health.
-                    </p>
-                </div>
-
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <Link
                         to="/dashboards/service"
@@ -283,9 +190,7 @@ export default function EssentialPlatform() {
                             </span>
                             <ArrowUpRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
                         </div>
-                        <p className="text-sm text-slate-600 dark:text-slate-300 mt-2">
-                            Operational dashboards — threat pulse, charts, live KPIs (not the overview above).
-                        </p>
+
                     </Link>
                     <Link
                         to="/dashboards/endpoint"
@@ -297,7 +202,7 @@ export default function EssentialPlatform() {
                             </span>
                             <ArrowUpRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
                         </div>
-                        <p className="text-sm text-slate-600 dark:text-slate-300 mt-2">Fleet health, risk context, top endpoints.</p>
+
                     </Link>
                     <Link
                         to="/events"
@@ -309,7 +214,7 @@ export default function EssentialPlatform() {
                             </span>
                             <ArrowUpRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-500 shrink-0" />
                         </div>
-                        <p className="text-sm text-slate-600 dark:text-slate-300 mt-2">Search stored events and open payloads.</p>
+
                     </Link>
                 </div>
 

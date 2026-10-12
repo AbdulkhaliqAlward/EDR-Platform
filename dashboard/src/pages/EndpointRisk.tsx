@@ -359,12 +359,8 @@ export default function EndpointRisk() {
         <div className="relative space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
                 <div>
-                    <h2 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">Endpoint Risk</h2>
-                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
-                        Endpoints ranked by their highest-risk active alert. Only alerts that still need attention
-                        (open, acknowledged or under investigation) and were active in the last {windowLabel} count.
-                        Resolved, false-positive and exception-suppressed alerts, and removed endpoints, are excluded.
-                    </p>
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
+                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">Endpoint Risk</h1>
                 </div>
                 <div className="flex items-center gap-2">
                     <label className="text-xs text-slate-500 flex items-center gap-2">Activity window

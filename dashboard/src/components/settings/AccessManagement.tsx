@@ -1,11 +1,7 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-    Search, Plus, Edit3, Trash2, Lock, Unlock, RefreshCw,
-    X, AlertCircle, Check, UserPlus, ChevronDown, UserCircle, Shield, KeyRound, ChevronLeft, ChevronRight,
-    Users, ShieldCheck, ShieldOff,
-} from 'lucide-react';
+import { Search, Plus, Edit3, Trash2, Lock, Unlock, RefreshCw, X, AlertCircle, Check, UserPlus, ChevronDown, ChevronLeft, ChevronRight, Users, ShieldCheck, ShieldOff } from 'lucide-react';
 import { usersApi, authApi, type User } from '../../api/client';
 import { ROLE_COLORS, STATUS_STYLES } from './types';
 import { formatDateTime } from '../../utils/agentDisplay';
@@ -204,19 +200,11 @@ export default function AccessManagement() {
 
     return (
         <div className="space-y-6 w-full min-w-0 animate-fade-in">
-            <InsightHero
+            <InsightHero eyebrow="System"
                 variant="light"
                 accent="cyan"
                 icon={Users}
                 title="Directory users"
-                lead={
-                    <>
-                        Platform accounts stored in the connection service: create and manage logins, roles, and activation state. This is{' '}
-                        <strong className="font-semibold text-slate-800 dark:text-slate-200">not</strong> endpoint agents,{' '}
-                        <strong className="font-semibold text-slate-800 dark:text-slate-200">not</strong> the RBAC permission matrix, and{' '}
-                        <strong className="font-semibold text-slate-800 dark:text-slate-200">not</strong> your personal profile screen — each lives on its own route below.
-                    </>
-                }
                 actions={
                     authApi.canManageUsers() ? (
                         <button
@@ -228,51 +216,7 @@ export default function AccessManagement() {
                         </button>
                     ) : null
                 }
-            >
-                {listQ.data?.meta?.request_id ? (
-                    <p className="text-[11px] font-mono text-slate-400 dark:text-slate-500 mb-4">
-                        Request ID: {listQ.data.meta.request_id}
-                    </p>
-                ) : null}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <Link
-                        to="/system/profile"
-                        className="group flex items-start gap-3 rounded-xl border border-slate-200/80 dark:border-slate-700 bg-white/70 dark:bg-slate-800/50 px-4 py-3 transition hover:border-cyan-300 dark:hover:border-cyan-700"
-                    >
-                        <UserCircle className="w-5 h-5 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5" />
-                        <div>
-                            <div className="text-sm font-semibold text-slate-900 dark:text-white group-hover:text-cyan-700 dark:group-hover:text-cyan-300">
-                                Your profile
-                            </div>
-                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Signed-in user, display name, password</p>
-                        </div>
-                    </Link>
-                    <Link
-                        to="/system/access/roles"
-                        className="group flex items-start gap-3 rounded-xl border border-slate-200/80 dark:border-slate-700 bg-white/70 dark:bg-slate-800/50 px-4 py-3 transition hover:border-cyan-300 dark:hover:border-cyan-700"
-                    >
-                        <Shield className="w-5 h-5 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5" />
-                        <div>
-                            <div className="text-sm font-semibold text-slate-900 dark:text-white group-hover:text-cyan-700 dark:group-hover:text-cyan-300">
-                                Roles &amp; permissions
-                            </div>
-                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">RBAC matrix and permission sets</p>
-                        </div>
-                    </Link>
-                    <Link
-                        to="/management/account"
-                        className="group flex items-start gap-3 rounded-xl border border-slate-200/80 dark:border-slate-700 bg-white/70 dark:bg-slate-800/50 px-4 py-3 transition hover:border-cyan-300 dark:hover:border-cyan-700"
-                    >
-                        <KeyRound className="w-5 h-5 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5" />
-                        <div>
-                            <div className="text-sm font-semibold text-slate-900 dark:text-white group-hover:text-cyan-700 dark:group-hover:text-cyan-300">
-                                Account &amp; session
-                            </div>
-                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Management hub preferences</p>
-                        </div>
-                    </Link>
-                </div>
-            </InsightHero>
+            />
 
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <div>

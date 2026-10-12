@@ -1,18 +1,7 @@
 import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import {
-    Activity,
-    AlertTriangle,
-    BarChart3,
-    Database,
-    HardDrive,
-    Layers,
-    RefreshCw,
-    Route,
-    Server,
-    Wifi,
-} from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Activity, AlertTriangle, Database, HardDrive, RefreshCw, Route, Server } from 'lucide-react';
+
 import { reliabilityApi } from '../../api/client';
 import axios from 'axios';
 import InsightHero from '../../components/InsightHero';
@@ -120,75 +109,11 @@ export default function ReliabilityHealth() {
                 
                 accent="teal"
                 icon={Server}
-                eyebrow="Data plane durability"
+                eyebrow="System"
                 title="Reliability health"
-                segments={[
-                    {
-                        heading: 'Live API snapshot',
-                        children: (
-                            <>
-                                Pulled from <code className="text-[11px] text-teal-200/95 bg-white/10 px-1 rounded">GET /api/v1/reliability</code> — event-ingestion{' '}
-                                <strong className="text-white">fallback queue &amp; counters</strong> inside connection-manager (async writer, sync escape hatch, DB writes).
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'How to read counters',
-                        children: (
-                            <>
-                                Values are <strong className="text-white">cumulative since process start</strong> — useful for backlog pressure and drop diagnosis, not a historical time series.
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'Scope boundaries',
-                        children: (
-                            <>
-                                This is <strong className="text-white">not</strong> endpoint fleet health and <strong className="text-white">not</strong> Sigma alert volume — use Devices and Stats for those lenses.
-                            </>
-                        ),
-                    },
-                ]}
             />
 
-            <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <BarChart3 className="w-4 h-4 text-cyan-500" />
-                        vs Service Summary
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/dashboards/service">
-                            Service Summary
-                        </Link>{' '}
-                        mixes commands, Sigma totals, and a <strong>compact</strong> reliability line. Here you get the <strong>full fallback matrix</strong> only.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Wifi className="w-4 h-4 text-sky-500" />
-                        vs Fleet connectivity
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/management/network">
-                            Fleet connectivity
-                        </Link>{' '}
-                        focuses on <strong>agents</strong> (queues per host, IPs). Reliability health is <strong>server-side ingestion plumbing</strong>.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Layers className="w-4 h-4 text-violet-500" />
-                        vs Stats / KPIs
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/stats">
-                            Stats
-                        </Link>{' '}
-                        summarizes alert/rule trends. Reliability health is <strong>ingestion plumbing only</strong> — use it when investigating telemetry loss or backlog pressure.
-                    </p>
-                </div>
-            </div>
+
 
             <div className="flex flex-wrap items-start justify-between gap-4">
                 <div />

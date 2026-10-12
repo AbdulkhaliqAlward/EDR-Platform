@@ -435,10 +435,10 @@ export function PlaybooksPage() {
             <Terminal className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
           </div>
           <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Orchestration</div>
             <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
               Incident Response Playbooks
             </h1>
-            <p className="text-sm text-slate-500 mt-1">Workflows run by the server-side response engine on the target endpoint.</p>
           </div>
         </div>
         <div className="flex items-center gap-4">

@@ -718,10 +718,8 @@ export default function Endpoints() {
             <div className="relative flex-1 flex flex-col min-h-0  w-full space-y-4 lg:space-y-5">
                 <div className="flex flex-wrap items-center justify-between gap-3 shrink-0">
                     <div>
-                        <h2 className="text-2xl sm:text-[1.75rem] font-bold text-slate-900 dark:text-white tracking-tight">Devices (Fleet)</h2>
-                        <p className="text-[15px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed max-w-[70ch]">
-                            Fleet inventory for Open a device for response, activity, network, and configuration tabs.
-                        </p>
+                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Management</div>
+                        <h1 className="text-2xl sm:text-[1.75rem] font-bold text-slate-900 dark:text-white tracking-tight">Devices (Fleet)</h1>
                     </div>
                 {agents.length > 0 && (() => {
                     let onlineCount = 0, offlineCount = 0, degradedCount = 0;

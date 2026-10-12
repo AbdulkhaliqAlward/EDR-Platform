@@ -20,15 +20,12 @@ import {
     Database,
     Fingerprint,
     KeyRound,
-    Layers,
     ListChecks,
     Radio,
     Search,
     Server,
     Shield,
     Terminal,
-    TrendingUp,
-    Wifi,
 } from 'lucide-react';
 import {
     PieChart,
@@ -436,67 +433,9 @@ export function DashboardEndpointPage() {
                 
                 accent="emerald"
                 icon={BarChart3}
-                eyebrow="Fleet Overview"
+                eyebrow="Dashboards"
                 title="Endpoint Summary"
-                lead={
-                    <>
-                        A high-level overview of your entire fleet: <strong className="text-white">total registered endpoints</strong>,{' '}
-                        <strong className="text-white">real-time connectivity status</strong>, operating system distribution,{' '}
-                        and the <strong className="text-white">highest-risk devices</strong> requiring immediate attention.
-                    </>
-                }
             />
-
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Layers className="w-4 h-4 text-cyan-500" />
-                        Security Posture
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/dashboards/service">
-                            Security Posture
-                        </Link>{' '}
-                        provides an overall security health view including detection rules, alerts, and system reliability.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <TrendingUp className="w-4 h-4 text-amber-500" />
-                        Risk Analysis
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/endpoint-risk">
-                            Endpoint Risk
-                        </Link>{' '}
-                        shows the complete risk ranking for all devices. This page shows the <strong>top 10 highest-risk endpoints</strong>.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Shield className="w-4 h-4 text-violet-500" />
-                        Compliance
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/dashboards/endpoint-compliance">
-                            Endpoint Compliance
-                        </Link>{' '}
-                        evaluates each device against security policies. This dashboard focuses on fleet health and version drift.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Wifi className="w-4 h-4 text-sky-500" />
-                        Network Health
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/management/network">
-                            Fleet Connectivity
-                        </Link>{' '}
-                        provides detailed network monitoring per device. This page shows a condensed connectivity overview.
-                    </p>
-                </div>
-            </div>
 
             {riskQ.isError && (
                 <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-4 py-2.5 text-xs text-amber-900 dark:text-amber-200">
@@ -868,15 +807,8 @@ export function DashboardEndpointCompliancePage() {
                 
                 accent="indigo"
                 icon={ListChecks}
-                eyebrow="Security Compliance"
+                eyebrow="Dashboards"
                 title="Endpoint Compliance"
-                lead={
-                    <>
-                        Evaluates each <strong className="text-white">active device</strong> against security policies including connectivity status, certificate validity, 
-                        and system health. Devices under <strong className="text-white">network isolation</strong> are classified as{' '}
-                        <strong className="text-white">Pending Remediation</strong> for targeted follow-up.
-                    </>
-                }
             />
 
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
@@ -1255,35 +1187,6 @@ export function _LegacyDashboardReportsPage() {
                 icon={ClipboardList}
                 eyebrow="Dashboards"
                 title="Reports"
-                segments={[
-                    {
-                        heading: 'Exports',
-                        children: (
-                            <>
-                                Generate <strong className="font-semibold text-slate-800 dark:text-slate-200">browser-side downloads</strong> (JSON or CSV) from live APIs — executed
-                                commands, Sigma alerts, or devices enrolled in the selected time window. Pick report type, optional endpoint scope, and range below.
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'Limits & safety',
-                        children: (
-                            <>
-                                Large extracts are <strong className="font-semibold text-slate-800 dark:text-slate-200">paged and capped</strong> so the UI stays responsive. For unconstrained
-                                search, streaming triage, or audit trails, use the linked workspaces at the bottom of this page.
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'Metric snapshots',
-                        children: (
-                            <>
-                                The three summary tiles below expose read-only <strong className="font-semibold text-slate-800 dark:text-slate-200">aggregate JSON</strong> (fleet, commands,
-                                alerts) for quick archival — separate from the filtered row exports above.
-                            </>
-                        ),
-                    },
-                ]}
             />
 
             <div className="rounded-2xl border border-slate-200/90 dark:border-slate-700/80 bg-white/95 dark:bg-slate-800/90 backdrop-blur-sm shadow-md overflow-hidden">

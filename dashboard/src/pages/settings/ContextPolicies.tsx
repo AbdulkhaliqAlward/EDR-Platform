@@ -144,9 +144,8 @@ export default function ContextPolicies() {
             <InsightHero
                 icon={ShieldAlert}
                 accent="cyan"
-                eyebrow="System Configuration"
+                eyebrow="Management"
                 title="Context Policies"
-                lead={<>Manage contextual trust policies that define Risk Scores dynamically across the fleet. Assign rules based on agents, users, or global scope.</>}
             />
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">

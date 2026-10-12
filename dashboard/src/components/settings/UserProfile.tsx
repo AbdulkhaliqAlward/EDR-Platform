@@ -1,18 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import {
-    User as UserIcon,
-    Lock,
-    Save,
-    Check,
-    AlertCircle,
-    Eye,
-    EyeOff,
-    Shield,
-    Fingerprint,
-    Settings,
-} from 'lucide-react';
+import { User as UserIcon, Lock, Save, Check, AlertCircle, Eye, EyeOff, Fingerprint } from 'lucide-react';
 import { authApi, usersApi, type User } from '../../api/client';
 import InsightHero from '../InsightHero';
 import { formatDateTime } from '../../utils/agentDisplay';
@@ -138,56 +127,11 @@ export default function UserProfile() {
                 
                 accent="indigo"
                 icon={Fingerprint}
-                eyebrow="System hub"
+                eyebrow="System"
                 title="Your profile"
-                segments={[
-                    {
-                        heading: 'Canonical route',
-                        children: (
-                            <>
-                                Use <code className="text-[11px] text-indigo-200/95 bg-white/10 px-1 rounded">/system/profile</code> to edit display name and email and to rotate credentials — the
-                                dedicated operator-facing surface for your own account.
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'API source of truth',
-                        children: (
-                            <>
-                                Identity is refreshed from <code className="text-[11px] text-indigo-200/95 bg-white/10 px-1 rounded">GET /api/v1/auth/me</code>; updates persist with{' '}
-                                <code className="text-[11px] text-indigo-200/95 bg-white/10 px-1 rounded">PATCH /api/v1/users/:id</code> — aligned with the read-only Management → Account summary.
-                            </>
-                        ),
-                    },
-                ]}
             />
 
-            <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Shield className="w-4 h-4 text-violet-500" />
-                        vs Account (read-only)
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/management/account">
-                            Management → Account
-                        </Link>{' '}
-                        shows a <strong>read-only</strong> capability matrix. Here you <strong>change</strong> profile fields and password.
-                    </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-800/80 p-4 shadow-sm">
-                    <div className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                        <Settings className="w-4 h-4 text-slate-500" />
-                        vs Access management
-                    </div>
-                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                        <Link className="text-cyan-600 dark:text-cyan-400 font-medium hover:underline" to="/system/access/users">
-                            Users &amp; roles
-                        </Link>{' '}
-                        is for <strong>administrators</strong> managing other accounts — not your own editing flow.
-                    </p>
-                </div>
-            </div>
+
 
             {meQ.isError && (
                 <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-4 py-2 text-xs text-amber-900 dark:text-amber-200">

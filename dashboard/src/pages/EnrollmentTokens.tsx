@@ -437,10 +437,10 @@ export default function EnrollmentTokens() {
                 {/* Header */}
                 <div className="flex items-center justify-between shrink-0">
                     <div>
-                        <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-300">
+                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Security</div>
+                        <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-300">
                             Enrollment Tokens
-                        </h2>
-                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Manage tokens for agent zero-touch provisioning</p>
+                        </h1>
                     </div>
                     {canManage && (
                         <button

@@ -69,8 +69,8 @@ export default function Alerts() {
                     {/* Header */}
                     <div className="flex items-center justify-between shrink-0">
                         <div>
-                            <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">Alerts (Triage)</h2>
-                            <p className="text-sm text-slate-500 mt-1">Analyst triage queue.</p>
+                            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
+                            <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">Alerts (Triage)</h1>
                         </div>
                         <div className="flex items-center gap-2 text-sm text-slate-500 bg-white/50 dark:bg-slate-800/50 px-3 py-1.5 rounded-full border border-slate-200 dark:border-slate-700/50 backdrop-blur-sm shadow-sm">
                             <TrendingUp className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />

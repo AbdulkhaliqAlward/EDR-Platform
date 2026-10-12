@@ -229,10 +229,8 @@ export default function Stats() {
         <div>
             <div className="flex justify-between items-center mb-8">
                 <div className="flex flex-col">
-                    <h2 className="text-xl font-bold text-slate-900 dark:text-white">Statistics</h2>
-                    <p className="text-sm font-medium text-slate-500 dark:text-slate-400 mt-1">
-                        Historical trends and exports from the telemetry engine.
-                    </p>
+                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
+                    <h1 className="text-xl font-bold text-slate-900 dark:text-white">Statistics</h1>
                 </div>
 
                 {/* Export Controls */}

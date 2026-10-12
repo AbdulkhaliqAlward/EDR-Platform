@@ -171,10 +171,8 @@ export default function SecurityEvents() {
         <div className="flex flex-col min-h-0 w-full gap-0">
             {/* ── Page header ── */}
             <div className="mb-3 shrink-0">
-                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Security Events</h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                    Persistent audit trail of authentication, certificate, and session security events
-                </p>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Security</div>
+                <h1 className="text-lg font-bold text-slate-900 dark:text-white">Security Events</h1>
             </div>
 
             {/* ── Summary widgets ── */}

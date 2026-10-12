@@ -1,4 +1,4 @@
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
     AlertTriangle, Activity, Monitor, Shield, Cpu, BarChart3, ShieldAlert
@@ -83,43 +83,6 @@ export default function Dashboard() {
                 icon={BarChart3}
                 eyebrow="Dashboards"
                 title="Security Posture"
-                segments={[
-                    {
-                        heading: 'What this screen is',
-                        children: (
-                            <>
-                                Executive snapshot of <strong className="font-semibold text-slate-800 dark:text-slate-200">alert pressure</strong>,{' '}
-                                <strong className="font-semibold text-slate-800 dark:text-slate-200">fleet connectivity</strong>, and{' '}
-                                <strong className="font-semibold text-slate-800 dark:text-slate-200">detection confidence</strong> — fed by Sigma statistics and connection-manager agent
-                                APIs. Use it for at-a-glance posture before drilling into operational grids.
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'Live behaviour',
-                        children: (
-                            <>
-                                Recent alerts update via stream when available, with polling fallback. KPI cards and charts refresh on a short interval — suitable for NOC-style
-                                monitoring, not long-form investigation by itself.
-                            </>
-                        ),
-                    },
-                    {
-                        heading: 'Where to go deeper',
-                        children: (
-                            <>
-                                Full triage: <Link className="text-cyan-600 dark:text-cyan-400 font-semibold hover:underline" to="/alerts">Alerts</Link>
-                                {' · '}
-                                Fleet ops: <Link className="text-cyan-600 dark:text-cyan-400 font-semibold hover:underline" to="/management/devices">Devices</Link>
-                                {' · '}
-                                Alternative summary:{' '}
-                                <Link className="text-cyan-600 dark:text-cyan-400 font-semibold hover:underline" to="/dashboards/endpoint">
-                                    Endpoint Summary
-                                </Link>
-                            </>
-                        ),
-                    },
-                ]}
             />
 
             {/* ── Row 1: KPI Cards ── */}
