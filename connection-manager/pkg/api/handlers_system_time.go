@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 
 	"github.com/edr-platform/connection-manager/internal/repository"
 	"github.com/edr-platform/connection-manager/pkg/geoip"
+	"github.com/edr-platform/shared/tzdetect"
 )
 
 const maxNetworkContextIDs = 200
@@ -21,25 +21,14 @@ func (h *Handlers) SetAgentNetworkContext(repo *repository.AgentNetworkContextRe
 	h.geo = geo
 }
 
-// serverTimezone is the platform display timezone: EDR_TIMEZONE (IANA name,
-// e.g. "Asia/Riyadh"), else the server's TZ, else the server's local zone
-// (UTC in the container; an empty name means "offset only"). Display only:
-// the process time zone is not changed, storage and processing stay in UTC.
-func serverTimezone(now time.Time) (name string, loc *time.Location) {
-	for _, env := range []string{"EDR_TIMEZONE", "TZ"} {
-		if tz := strings.TrimPrefix(strings.TrimSpace(os.Getenv(env)), ":"); tz != "" {
-			if l, err := time.LoadLocation(tz); err == nil {
-				return l.String(), l
-			}
-		}
+// displayZone is the platform display time zone, detected automatically from
+// the server host (see shared/tzdetect). Display only: the process time zone
+// is not changed, storage and processing stay in UTC.
+func (h *Handlers) displayZone() tzdetect.Zone {
+	if h.tz != nil {
+		return h.tz.Current()
 	}
-	if n := time.Local.String(); n != "" && n != "Local" {
-		return n, time.Local
-	}
-	if _, off := now.In(time.Local).Zone(); off == 0 {
-		return "UTC", time.UTC
-	}
-	return "", time.Local // offset-only (no IANA name available)
+	return tzdetect.Current()
 }
 
 // GetSystemTime handles GET /api/v1/system/time: the server clock and display
@@ -47,12 +36,13 @@ func serverTimezone(now time.Time) (name string, loc *time.Location) {
 // the viewer's own clock and region.
 func (h *Handlers) GetSystemTime(c echo.Context) error {
 	now := time.Now()
-	name, loc := serverTimezone(now)
-	abbr, offset := now.In(loc).Zone()
+	zone := h.displayZone()
+	abbr, offset := now.In(zone.Location).Zone()
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"server_time":        now.UTC().Format(time.RFC3339Nano),
-		"timezone":           name,
+		"timezone":           zone.Name, // "" = offset only (unnamed host zone)
 		"timezone_abbr":      abbr,
+		"timezone_source":    zone.Source,
 		"utc_offset_seconds": offset,
 		"geoip": map[string]interface{}{
 			"enabled":         h.geo.Enabled(),

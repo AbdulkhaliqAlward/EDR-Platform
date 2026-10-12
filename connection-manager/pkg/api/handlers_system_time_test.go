@@ -11,11 +11,15 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/edr-platform/connection-manager/internal/repository"
+	"github.com/edr-platform/shared/tzdetect"
 )
 
 func TestGetSystemTimeReportsPlatformZone(t *testing.T) {
-	t.Setenv("EDR_TIMEZONE", "Asia/Riyadh")
-	h := &Handlers{logger: logrus.New()}
+	// Detected automatically (here: the explicit override path of the same
+	// detector; host detection is covered in shared/tzdetect).
+	env := map[string]string{"EDR_TIMEZONE": "Asia/Riyadh"}
+	h := &Handlers{logger: logrus.New(), tz: &tzdetect.Detector{HostLocaltime: "missing-localtime",
+		Getenv: func(k string) string { return env[k] }}}
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/system/time", nil), rec)
 	if err := h.GetSystemTime(c); err != nil || rec.Code != http.StatusOK {
@@ -24,6 +28,7 @@ func TestGetSystemTimeReportsPlatformZone(t *testing.T) {
 	var body struct {
 		ServerTime string `json:"server_time"`
 		Timezone   string `json:"timezone"`
+		Source     string `json:"timezone_source"`
 		Offset     int    `json:"utc_offset_seconds"`
 		GeoIP      struct {
 			Enabled bool `json:"enabled"`
@@ -33,19 +38,14 @@ func TestGetSystemTimeReportsPlatformZone(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := time.Parse(time.RFC3339Nano, body.ServerTime)
-	if err != nil || time.Since(st) > time.Minute || body.Timezone != "Asia/Riyadh" || body.Offset != 3*3600 || body.GeoIP.Enabled {
+	if err != nil || time.Since(st) > time.Minute || body.Timezone != "Asia/Riyadh" || body.Source != "EDR_TIMEZONE" || body.Offset != 3*3600 || body.GeoIP.Enabled {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 
-	t.Setenv("EDR_TIMEZONE", "")
-	t.Setenv("TZ", "")
-	// Unconfigured: the server's own zone — by name when known, otherwise
-	// offset-only (the dashboard then formats with the UTC offset).
-	now := time.Now()
-	name, loc := serverTimezone(now)
-	_, want := now.Zone()
-	if _, got := now.In(loc).Zone(); got != want || (name != "" && name != loc.String()) {
-		t.Fatalf("unconfigured zone %q (offset %d) does not match the server's (%d)", name, got, want)
+	// Nothing configured and no host file: the process zone, never empty.
+	h.tz = &tzdetect.Detector{HostLocaltime: "missing-localtime", Getenv: func(string) string { return "" }}
+	if z := h.displayZone(); z.Location == nil || z.Source != "process" {
+		t.Fatalf("fallback zone: %+v", z)
 	}
 }
 

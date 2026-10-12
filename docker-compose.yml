@@ -31,10 +31,13 @@ services:
     environment:
       # Optional for remote agents: PUBLIC_API_BASE_URL=http://YOUR_LAN_IP:30082 (or https://edr.example.com)
       LOG_LEVEL: debug
-      # Platform display time zone (IANA name, e.g. Asia/Riyadh): every dashboard
-      # and notification shows times in this zone. Display only — storage and
-      # processing stay in UTC; agent event times are put on the server clock.
-      EDR_TIMEZONE: "${EDR_TIMEZONE:-UTC}"
+      # Display time zone: detected automatically from this server's own time
+      # zone (/etc/localtime below). After changing it on the server
+      # (timedatectl set-timezone …) the platform follows on its next container
+      # start. EDR_TIMEZONE (IANA name) is only an optional override. Display
+      # only — storage and processing stay in UTC; agent event times are put
+      # on the server clock.
+      EDR_TIMEZONE: "${EDR_TIMEZONE:-}"
       DATABASE_URL: "postgres://${POSTGRES_USER:?POSTGRES_USER missing in .env}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing in .env}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB missing in .env}?sslmode=disable"
       DATABASE_PASSWORD: "${POSTGRES_PASSWORD}"
       REDIS_ADDR: "redis:6379"
@@ -81,6 +84,8 @@ services:
     volumes:
       - ./connection-manager/certs:/app/certs
       - ./connection-manager/config:/app/config:ro
+      # Server time zone (read-only, this one file) for automatic detection
+      - /etc/localtime:/host/etc/localtime:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,12 +127,15 @@ services:
       REDIS_ADDR: "redis:6379"
       # --- API ---
       API_PORT: "8080"
-      # Display time zone for Slack/Teams/e-mail alert notifications (same as connection-manager)
-      EDR_TIMEZONE: "${EDR_TIMEZONE:-UTC}"
+      # Display time zone for Slack/Teams/e-mail notifications: detected from the
+      # server like connection-manager (optional override: EDR_TIMEZONE)
+      EDR_TIMEZONE: "${EDR_TIMEZONE:-}"
       JWT_PUBLIC_KEY_PATH: "/app/certs/jwt_public.pem"
     volumes:
       - ./sigma_engine_go/sigma_rules:/app/sigma_rules:ro
       - ./connection-manager/certs:/app/certs:ro
+      # Server time zone (read-only, this one file) for automatic detection
+      - /etc/localtime:/host/etc/localtime:ro
     depends_on:
       postgres:
         condition: service_healthy

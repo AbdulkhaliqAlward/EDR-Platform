@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/smtp"
-	"os"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/edr-platform/shared/tzdetect"
 
 	"github.com/edr-platform/sigma-engine/internal/domain"
 	"github.com/edr-platform/sigma-engine/internal/infrastructure/logger"
@@ -325,24 +325,20 @@ body { font-family: Arial, sans-serif; }
 	)
 }
 
-var (
-	displayZoneOnce sync.Once
-	displayZone     *time.Location
-)
+// displayZone is the platform display time zone, detected automatically from
+// the server host (shared/tzdetect) — the same zone the dashboards use.
+var displayZone = tzdetect.Current
 
-// displayTime renders a time in the platform display time zone (EDR_TIMEZONE,
-// the same zone the dashboards use; UTC when unset), e.g.
+// displayTime renders a time in the platform display time zone, e.g.
 // "12 Oct 2026 13:04:05 +03 (Asia/Riyadh)".
 func displayTime(t time.Time) string {
-	displayZoneOnce.Do(func() {
-		displayZone = time.UTC
-		if tz := strings.TrimSpace(os.Getenv("EDR_TIMEZONE")); tz != "" {
-			if loc, err := time.LoadLocation(tz); err == nil {
-				displayZone = loc
-			}
-		}
-	})
-	return t.In(displayZone).Format("02 Jan 2006 15:04:05 MST") + " (" + displayZone.String() + ")"
+	z := displayZone()
+	local := t.In(z.Location)
+	name := z.Name
+	if name == "" { // unnamed host zone: show the UTC offset
+		name = "UTC" + local.Format("-07:00")
+	}
+	return local.Format("02 Jan 2006 15:04:05 MST") + " (" + name + ")"
 }
 
 // sendWebhook sends HTTP POST to webhook URL.

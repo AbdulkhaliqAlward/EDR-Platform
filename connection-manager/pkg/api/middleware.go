@@ -20,6 +20,7 @@ import (
 	"github.com/edr-platform/connection-manager/pkg/geoip"
 	"github.com/edr-platform/connection-manager/pkg/handlers"
 	"github.com/edr-platform/connection-manager/pkg/security"
+	"github.com/edr-platform/shared/tzdetect"
 )
 
 // Handlers contains all API handler methods.
@@ -68,6 +69,7 @@ type Handlers struct {
 	// optional: agent connection geolocation + clock offsets
 	networkContextRepo *repository.AgentNetworkContextRepository
 	geo                *geoip.Resolver
+	tz                 *tzdetect.Detector // nil = process-wide detector (tests inject one)
 }
 
 // NewHandlers creates a new handlers instance.

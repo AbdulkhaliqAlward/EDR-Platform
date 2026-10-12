@@ -41,6 +41,7 @@ import (
 	"github.com/edr-platform/connection-manager/pkg/playbook"
 	"github.com/edr-platform/connection-manager/pkg/security"
 	"github.com/edr-platform/connection-manager/pkg/server"
+	"github.com/edr-platform/shared/tzdetect"
 )
 
 // generateRandomPassword returns a URL-safe 24-byte (=32-char base64) random
@@ -554,6 +555,12 @@ func main() {
 		networkContextRepo = repository.NewAgentNetworkContextRepository(dbPool.Pool())
 	}
 	agentContext := handlers.NewAgentContextRecorder(logger, geoResolver, networkContextRepo)
+	// Platform display time zone, detected from the server host (logged so
+	// operators can see what the dashboards will show).
+	go func() {
+		z := tzdetect.Current()
+		logger.WithFields(logrus.Fields{"timezone": z.Name, "source": z.Source}).Info("Display time zone detected")
+	}()
 	hbHandler.SetContextRecorder(agentContext)
 	evtHandler.SetClockTracker(agentContext.Clock())
 

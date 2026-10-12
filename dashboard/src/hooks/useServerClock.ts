@@ -18,8 +18,9 @@ export function useServerClock() {
             const st = await systemApi.time();
             return { ...st, skewMs: browserSkewMs(st.server_time, sent, Date.now()) };
         },
-        staleTime: 15 * 60_000,
-        refetchInterval: 30 * 60_000,
+        // Re-checked so a server time zone change reaches open dashboards.
+        staleTime: 5 * 60_000,
+        refetchInterval: 5 * 60_000,
         retry: 1,
     });
     const skew = data?.skewMs ?? 0;
