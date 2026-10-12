@@ -1,7 +1,7 @@
 import PageHeader from '../../components/PageHeader';
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileCode, Plus, Pencil, Trash2, X, Shield, Clock, AlertTriangle, Search } from 'lucide-react';
+import { FileCode, Plus, Pencil, Trash2, X, Clock, AlertTriangle, Search } from 'lucide-react';
 import { agentsApi, responseScriptsApi, type ResponseScript, type ResponseScriptInput } from '../../api/client';
 import { useToast } from '../../components';
 import { PaginationControls } from '../../components/PaginationControls';
@@ -108,8 +108,6 @@ export function ScriptLibraryPage() {
     deleteMutation.mutate(s);
   };
 
-  const executables = caps?.script_library_executables || [];
-
   return (
     <div className="space-y-6 relative">
       {/* Header */}
@@ -121,36 +119,6 @@ export function ScriptLibraryPage() {
                   </button>
               )}
           </>} />
-
-      {/* How it works */}
-      <div className="rounded-xl border border-teal-200 dark:border-teal-800/50 bg-teal-50 dark:bg-teal-900/10 p-4 text-sm text-teal-900 dark:text-teal-200 flex gap-3">
-        <Shield className="w-5 h-5 shrink-0 mt-0.5 text-teal-600 dark:text-teal-400" />
-        <div className="space-y-1">
-          <p>
-            Scripts run on the endpoint as SYSTEM, without a shell, under the agent&apos;s approved command list
-            (PowerShell is limited to <code className="font-mono">-Command</code>). Run a script from an endpoint&apos;s
-            <span className="font-semibold"> Response</span> tab → <span className="font-semibold">Run library script</span>.
-          </p>
-          <p>
-            {canManage
-              ? 'Only administrators can add or change scripts; every change is audited.'
-              : 'Only administrators can add or change scripts.'}
-          </p>
-          {caps && (
-            <p className="text-xs">
-              OTP approval:{' '}
-              <span className="font-semibold">
-                {caps.command_approval_enabled ? 'On — changes and runs need an emailed code' : 'Off'}
-              </span>
-            </p>
-          )}
-          {executables.length > 0 && (
-            <p className="text-xs">
-              Allowed programs: <span className="font-mono">{executables.join(', ')}</span>
-            </p>
-          )}
-        </div>
-      </div>
 
       {/* List */}
       <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">

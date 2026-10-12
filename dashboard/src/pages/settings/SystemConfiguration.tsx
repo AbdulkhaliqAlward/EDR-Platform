@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
     Moon, Sun, Bell, Mail, MessageSquare, Monitor,
-    Webhook, Save, Check, Settings2, AlertCircle
+    Webhook, Save, Check, Settings2
 } from 'lucide-react';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -159,21 +159,6 @@ export default function SystemConfiguration() {
                     <Check size={14} /> {feedback}
                 </div>
             )}
-
-            <div className="bg-slate-50 border border-slate-200 text-slate-800 dark:bg-slate-900/40 dark:border-slate-700 dark:text-slate-300 rounded-xl p-4 text-sm flex gap-3">
-                <AlertCircle className="w-5 h-5 shrink-0 text-cyan-600 dark:text-cyan-400" />
-                <div>
-                    <strong className="font-semibold text-slate-900 dark:text-white">Dashboard preferences (this browser)</strong>
-                    <p className="mt-1 opacity-90 leading-relaxed">
-                        Appearance, timezone, date format, and the notification matrix below are stored in{' '}
-                        <code className="text-xs px-1 rounded bg-slate-200/80 dark:bg-slate-800 font-mono">localStorage</code>{' '}
-                        for this dashboard session only. Other operators and browsers do not see these values. Platform-wide policies,
-                        users, roles, and reliability data live under{' '}
-                        <strong className="font-medium">System</strong> and <strong className="font-medium">Management</strong> in the main navigation — not here.
-                        Webhook or Slack fields are placeholders until a server-side integration endpoint exists.
-                    </p>
-                </div>
-            </div>
 
             {/* ═══ Panel: Appearance & Regional ═══ */}
             <Panel
