@@ -1,3 +1,5 @@
+import { Bell } from 'lucide-react';
+import PageHeader from '../components/PageHeader';
 import { PaginationControls, NewItemsBanner } from '../components/PaginationControls';
 import { AlertTriangle, TrendingUp, X } from 'lucide-react';
 import { useAlerts } from '../hooks/useAlerts';
@@ -67,16 +69,13 @@ export default function Alerts() {
 
                 <div className="relative flex-1 flex flex-col min-h-0 space-y-4 lg:space-y-6 w-full">
                     {/* Header */}
-                    <div className="flex items-center justify-between shrink-0">
-                        <div>
-                            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
-                            <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">Alerts (Triage)</h1>
-                        </div>
+                    <PageHeader eyebrow="SOC" title="Alerts (Triage)" icon={Bell} actions={<>
                         <div className="flex items-center gap-2 text-sm text-slate-500 bg-white/50 dark:bg-slate-800/50 px-3 py-1.5 rounded-full border border-slate-200 dark:border-slate-700/50 backdrop-blur-sm shadow-sm">
                             <TrendingUp className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-                            <span>Sorted by <span className="font-semibold text-slate-800 dark:text-cyan-300">{sortBy === 'risk_score' ? 'Risk score' : 'Creation time'}</span></span>
+                            <span>Sorted by <span className="font-semibold text-slate-800 dark:text-cyan-300">{sortBy==='risk_score'? 'Risk score':'Creation time'}</span></span>
                         </div>
-                    </div>
+                        <button type="button" className="btn btn-secondary self-start" onClick={refresh}>Refresh first page</button>
+                    </>} />
 
                     {/* Filters */}
                     <AlertsFiltersBar
@@ -87,7 +86,7 @@ export default function Alerts() {
                     />
 
                     <NewItemsBanner count={pendingCount} onRefresh={refresh} />
-                    <button type="button" className="btn btn-secondary self-start" onClick={refresh}>Refresh first page</button>
+                    
                     {/* Bulk Actions */}
                     <BulkActionsToolbar
                         selectedCount={selectedIds.size}

@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, useEffect } from 'react';
 import {
@@ -435,14 +436,8 @@ export default function EnrollmentTokens() {
 
             <div className="relative flex-1 flex flex-col min-h-0 space-y-4 lg:space-y-6  w-full">
                 {/* Header */}
-                <div className="flex items-center justify-between shrink-0">
-                    <div>
-                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Security</div>
-                        <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-300">
-                            Enrollment Tokens
-                        </h1>
-                    </div>
-                    {canManage && (
+                <PageHeader eyebrow="Security" title="Enrollment Tokens" icon={Key} actions={<>
+                    {canManage&&(
                         <button
                             onClick={() => setShowGenerateModal(true)}
                             className="btn bg-cyan-600 hover:bg-cyan-700 text-white shadow-lg shadow-cyan-500/20 border-0 flex items-center gap-2"
@@ -451,7 +446,7 @@ export default function EnrollmentTokens() {
                             Generate Token
                         </button>
                     )}
-                </div>
+                </>} />
 
                 {/* Stats */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 shrink-0">

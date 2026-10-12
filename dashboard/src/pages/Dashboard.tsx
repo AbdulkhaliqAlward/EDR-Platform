@@ -6,7 +6,7 @@ import {
 import { SkeletonKPICards } from '../components';
 import StatCard from '../components/StatCard';
 import ThreatMeter from '../components/ThreatMeter';
-import InsightHero from '../components/InsightHero';
+import PageHeader from '../components/PageHeader';
 import { useDashboard } from '../hooks/useDashboard';
 import { securityEventsApi, authApi } from '../api/client';
 import {
@@ -77,9 +77,7 @@ export default function Dashboard() {
 
     return (
         <div className="space-y-6 pb-8 w-full min-w-0">
-            <InsightHero
-                variant="light"
-                accent="cyan"
+            <PageHeader
                 icon={BarChart3}
                 eyebrow="Dashboards"
                 title="Security Posture"

@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { commandsApi } from '../api/client';
 import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
 import { PaginationControls } from '../components/PaginationControls';
@@ -470,77 +471,69 @@ export default function EndpointDetail() {
         <div className="relative flex flex-col min-h-[calc(100vh-2rem)] -mx-4 sm:-mx-6 lg:-mx-8 -my-4 sm:-my-6 lg:-my-8 p-4 sm:p-6 lg:p-8 bg-slate-100 dark:bg-gradient-to-br dark:from-slate-900 dark:via-[#0b1120] dark:to-slate-900">
             <div className="w-full space-y-5">
                 {/* Back button */}
-                <button
-                    type="button"
-                    onClick={() => navigate('/management/devices')}
-                    className="inline-flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
-                >
-                    <ArrowLeft className="w-4 h-4" />
-                    Back to Devices
-                </button>
+                
 
                 {/* Agent Header Card */}
-                <div className="bg-white/95 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 backdrop-blur-md rounded-2xl p-5 sm:p-6 shadow-sm">
-                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                        <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-                                <Server className="w-6 h-6 text-white" />
-                            </div>
-                            <div>
-                                <h2 className="text-xl font-bold text-slate-900 dark:text-white break-all">{agent.hostname}</h2>
-                                <div className="flex items-center gap-3 mt-1">
-                                    <span className="text-xs text-slate-500 font-mono">{agent.id.slice(0, 20)}...</span>
-                                    <span className="text-[10px] text-slate-400">{agent.os_type || 'Unknown OS'}</span>
-                                    {agent.agent_version && <span className="text-[10px] text-slate-400">v{agent.agent_version}</span>}
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                            <span
-                                className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border ${eff === 'online'
-                                        ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800/50'
-                                        : eff === 'offline'
-                                            ? 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700'
-                                            : eff === 'uninstalled'
-                                                ? 'bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-800/50'
-                                                : eff === 'pending_uninstall'
-                                                    ? 'bg-rose-50 dark:bg-rose-900/20 text-rose-500 border-rose-200 dark:border-rose-800/50'
-                                                    : 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800/50'
-                                    }`}
-                            >
-                                {eff === 'pending_uninstall' ? 'Uninstalling…' : eff}
+                <PageHeader eyebrow="Management" title={agent.hostname} icon={Server} actions={<>
+                    <button
+                        type="button"
+                        onClick={() => navigate('/management/devices')}
+                        className="inline-flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors"
+                    >
+                        <ArrowLeft className="w-4 h-4" />
+                        Back to Devices
+                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider border ${eff==='online'
+                                ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800/50'
+                                :eff==='offline'
+                                    ? 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700'
+                                    :eff==='uninstalled'
+                                        ? 'bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-800/50'
+                                        :eff==='pending_uninstall'
+                                            ? 'bg-rose-50 dark:bg-rose-900/20 text-rose-500 border-rose-200 dark:border-rose-800/50'
+                                            :'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800/50'
+                                }`}
+                        >
+                            {eff==='pending_uninstall'? 'Uninstalling…':eff}
+                        </span>
+                        {agent.is_isolated&&(
+                            <span className="px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800/50">
+                                Isolated
                             </span>
-                            {agent.is_isolated && (
-                                <span className="px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800/50">
-                                    Isolated
-                                </span>
-                            )}
-                            <Link
-                                to={`/responses?agent_id=${encodeURIComponent(agent.id)}`}
-                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-50 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800/50 hover:bg-cyan-100 dark:hover:bg-cyan-900/40 transition-colors"
+                        )}
+                        <Link
+                            to={`/responses?agent_id=${encodeURIComponent(agent.id)}`}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-50 dark:bg-cyan-900/20 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800/50 hover:bg-cyan-100 dark:hover:bg-cyan-900/40 transition-colors"
+                        >
+                            View Commands
+                        </Link>
+                        <Link
+                            to={`/events?agent_id=${encodeURIComponent(agent.id)}`}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                        >
+                            View Events
+                        </Link>
+                        {authApi.canManageEndpoints()&&(
+                            <button
+                                type="button"
+                                onClick={() => setRemoveOpen(true)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 dark:bg-rose-900/20 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/50 hover:bg-rose-100 dark:hover:bg-rose-900/40 transition-colors"
+                                title="Remove this device from the dashboard (its history is kept)"
                             >
-                                View Commands
-                            </Link>
-                            <Link
-                                to={`/events?agent_id=${encodeURIComponent(agent.id)}`}
-                                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-                            >
-                                View Events
-                            </Link>
-                            {authApi.canManageEndpoints() && (
-                                <button
-                                    type="button"
-                                    onClick={() => setRemoveOpen(true)}
-                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 dark:bg-rose-900/20 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/50 hover:bg-rose-100 dark:hover:bg-rose-900/40 transition-colors"
-                                    title="Remove this device from the dashboard (its history is kept)"
-                                >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                    Remove from dashboard
-                                </button>
-                            )}
-                        </div>
+                                <Trash2 className="w-3.5 h-3.5" />
+                                Remove from dashboard
+                            </button>
+                        )}
                     </div>
-                </div>
+                </>}>
+                    <div className="flex items-center gap-3 mt-1">
+                        <span className="text-xs text-slate-500 font-mono">{agent.id.slice(0,20)}...</span>
+                        <span className="text-[10px] text-slate-400">{agent.os_type||'Unknown OS'}</span>
+                        {agent.agent_version&&<span className="text-[10px] text-slate-400">v{agent.agent_version}</span>}
+                    </div>
+                </PageHeader>
 
                 <Modal
                     isOpen={removeOpen}

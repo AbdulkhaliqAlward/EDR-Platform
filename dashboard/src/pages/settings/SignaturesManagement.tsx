@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, ChevronUp, Database, Loader2, RefreshCw, Search, Send, ShieldCheck, Workflow } from 'lucide-react';
 import { authApi, signaturesApi } from '../../api/client';
 import { useToast } from '../../components/Toast';
-import InsightHero from '../../components/InsightHero';
+import PageHeader from '../../components/PageHeader';
 import { PaginationControls } from '../../components/PaginationControls';
 import { useClientPagination } from '../../hooks/useClientPagination';
 import { usePaginatedQuery } from '../../hooks/usePaginatedQuery';
@@ -131,8 +131,7 @@ export default function SignaturesManagement() {
 
     return (
         <div className="space-y-6 md:space-y-8">
-            <InsightHero
-                accent="emerald"
+            <PageHeader
                 icon={ShieldCheck}
                 eyebrow="System"
                 title="Central malware hash feed"

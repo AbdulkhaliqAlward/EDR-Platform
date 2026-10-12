@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Save, RefreshCw, Shield, AlertCircle, Check, Lock, Eye } from 'lucide-react';
 import { rolesApi, authApi, type Role, type Permission } from '../../api/client';
 import { ROLE_COLORS } from './types';
-import InsightHero from '../InsightHero';
+import PageHeader from '../PageHeader';
 
 const ROLE_ORDER = ['admin', 'security', 'analyst', 'operations', 'viewer'] as const;
 
@@ -164,20 +164,18 @@ export default function RBACMatrix() {
 
     return (
         <div className="space-y-6 w-full max-w-none animate-fade-in">
-            <InsightHero eyebrow="System"
-                variant="light"
-                accent="cyan"
+            <PageHeader eyebrow="System"
                 icon={Shield}
                 title="Authorization matrix"
                 actions={
-                    !canEdit ? (
+                    !canEdit? (
                         <div className="flex items-center gap-2 shrink-0 rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50/90 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200 max-w-xs">
                             <Eye className="w-4 h-4 shrink-0" />
                             <span>
                                 View only — your role can read <code className="font-mono">roles:read</code> but not <code className="font-mono">roles:write</code>.
                             </span>
                         </div>
-                    ) : null
+                    ):null
                 }
             />
 

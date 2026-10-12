@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { usePageSearch } from '../hooks/usePageSearch';
 import { memo, useCallback, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -80,21 +81,14 @@ export default function Events() {
     return (
         <div className="relative flex flex-col min-h-[calc(100vh-2rem)] -mx-4 sm:-mx-6 lg:-mx-8 -my-4 sm:-my-6 lg:-my-8 p-4 sm:p-6 lg:p-8 bg-slate-200 dark:bg-gradient-to-br dark:from-slate-900 dark:via-[#0b1120] dark:to-slate-900">
             <div className=" w-full space-y-4">
-                <div className="flex items-start gap-3">
-                    <div className="p-2 rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300">
-                        <Activity className="w-6 h-6" />
-                    </div>
-                    <div className="flex-1">
-                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
-                        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Telemetry Search</h1>
-                    </div>
+                <PageHeader eyebrow="SOC" title="Telemetry Search" icon={Activity} actions={<>
                     <Link
                         to="/alerts"
                         className="px-3 py-2 text-sm font-semibold rounded-lg border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-900/50 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
                     >
                         Alerts (Triage)
                     </Link>
-                </div>
+                </>} />
 
                 <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-900/40 backdrop-blur p-4 sm:p-5 space-y-4">
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-3">

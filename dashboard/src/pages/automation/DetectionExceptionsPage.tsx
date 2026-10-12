@@ -1,3 +1,4 @@
+import PageHeader from '../../components/PageHeader';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Clock3, Loader2, Plus, RefreshCw, Search, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react';
 import { authApi, detectionExceptionsApi, type DetectionException } from '../../api/client';
@@ -75,19 +76,12 @@ export function DetectionExceptionsPage() {
     const hits = items.reduce((count, item) => count + item.hit_count, 0);
 
     return <div className="min-w-0 space-y-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="flex min-w-0 items-start gap-3">
-                <span className="rounded-xl border border-indigo-200 bg-indigo-50 p-2.5 dark:border-indigo-800 dark:bg-indigo-950/40"><ShieldOff className="h-5 w-5 text-indigo-600 dark:text-indigo-400" /></span>
-                <div className="min-w-0">
-                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Orchestration</div>
-                    <h1 className="text-xl font-bold text-slate-900 dark:text-white">Detection Exceptions</h1>
-                </div>
-            </div>
+        <PageHeader eyebrow="Orchestration" title="Detection Exceptions" icon={ShieldOff} actions={<>
             <div className="flex items-center gap-2">
-                <button type="button" onClick={() => void load()} disabled={loading || !!busy} className="btn btn-secondary inline-flex items-center gap-2 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Refresh</button>
-                {canManage && <button type="button" onClick={() => setCreating(true)} className="btn btn-primary inline-flex items-center gap-2"><Plus className="h-4 w-4" /> New exception</button>}
+                <button type="button" onClick={() => void load()} disabled={loading||!!busy} className="btn btn-secondary inline-flex items-center gap-2 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${loading? 'animate-spin':''}`} /> Refresh</button>
+                {canManage&&<button type="button" onClick={() => setCreating(true)} className="btn btn-primary inline-flex items-center gap-2"><Plus className="h-4 w-4" /> New exception</button>}
             </div>
-        </div>
+        </>} />
         {!canManage && <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-900/30">Read-only access. Managing exceptions requires the administrator or security role.</p>}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {[{ label: 'Active exceptions', value: active, Icon: ShieldCheck }, { label: 'Suppressed rule matches', value: hits.toLocaleString(), Icon: ShieldOff }, { label: 'Expired exceptions', value: expired, Icon: Clock3 }].map(({ label, value, Icon }) => <div key={label} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">

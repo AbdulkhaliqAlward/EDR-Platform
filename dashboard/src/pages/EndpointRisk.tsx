@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { useQuery } from '@tanstack/react-query';
 import React, { useState, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -357,24 +358,20 @@ export default function EndpointRisk() {
 
     return (
         <div className="relative space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
-                <div>
-                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
-                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight">Endpoint Risk</h1>
-                </div>
+            <PageHeader eyebrow="SOC" title="Endpoint Risk" icon={Shield} actions={<>
                 <div className="flex items-center gap-2">
                     <label className="text-xs text-slate-500 flex items-center gap-2">Activity window
-                        <select aria-label="Activity window" value={windowDays} onChange={e => setParam('window', e.target.value)}
+                        <select aria-label="Activity window" value={windowDays} onChange={e => setParam('window',e.target.value)}
                             className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 py-1.5 text-sm text-slate-800 dark:text-slate-100">
                             {WINDOWS.map(w => <option key={w.days} value={w.days}>Last {w.label}</option>)}
                         </select>
                     </label>
                     <button onClick={() => refetch()} disabled={isFetching}
                         className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors shadow-sm">
-                        <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} /> Refresh
+                        <RefreshCw className={`w-4 h-4 ${isFetching? 'animate-spin':''}`} /> Refresh
                     </button>
                 </div>
-            </div>
+            </>} />
 
             {isError && (
                 <div role="alert" className="flex items-center gap-2 rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/30 p-3 text-sm text-rose-700 dark:text-rose-400">

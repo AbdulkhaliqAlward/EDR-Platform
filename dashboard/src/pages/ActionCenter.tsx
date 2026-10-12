@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import React, { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -316,34 +317,27 @@ export default function ActionCenter() {
 
             <div className="relative flex-1 flex flex-col min-h-0 space-y-4 lg:space-y-6  w-full">
                                 {/* Header Section */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
-                    <div>
-                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
-                        <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-300">
-                            Command Center
-                        </h1>
-                    </div>
-                    {/* Action Bar */}
+                <PageHeader eyebrow="SOC" title="Command Center" icon={Terminal} actions={<>
                     <div className="flex flex-wrap items-center gap-3">
-                        {isError && (
+                        {isError&&(
                             <div className="flex items-center gap-2 text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-500/10 px-3 py-1.5 rounded-lg border border-rose-200 dark:border-rose-500/20 text-sm font-medium">
                                 <AlertTriangle className="w-4 h-4" />
                                 <span>Sync failed</span>
                             </div>
                         )}
                         <span className="text-sm text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                            {isFetching && !commandsLoading && <RefreshCw className="w-4 h-4 animate-spin text-cyan-500" />}
+                            {isFetching&&!commandsLoading&&<RefreshCw className="w-4 h-4 animate-spin text-cyan-500" />}
                             Last updated: {new Date(lastUpdated).toLocaleTimeString()}
                         </span>
-                        {activeTab === 'commands' && authApi.canExecuteCommands() && (
+                        {activeTab==='commands'&&authApi.canExecuteCommands()&&(
                             <button
                                 type="button"
                                 onClick={() => {
-                                    const aid = debouncedAgentId?.trim();
-                                    if (aid) {
+                                    const aid=debouncedAgentId?.trim();
+                                    if(aid) {
                                         navigate(`/management/devices/${aid}?tab=response`);
                                     } else {
-                                        showToast('Enter an Agent ID in Search Endpoints, or open Device Management and pick a host.', 'info');
+                                        showToast('Enter an Agent ID in Search Endpoints, or open Device Management and pick a host.','info');
                                     }
                                 }}
                                 className="px-3 py-2 text-sm font-semibold rounded-lg border border-cyan-500/40 bg-cyan-500/10 text-cyan-800 dark:text-cyan-300 hover:bg-cyan-500/20 transition-colors"
@@ -356,10 +350,10 @@ export default function ActionCenter() {
                             className="p-2 border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors bg-white/60 dark:bg-slate-900/60 backdrop-blur"
                             title="Refresh Now"
                         >
-                            <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+                            <RefreshCw className={`w-4 h-4 ${isFetching? 'animate-spin':''}`} />
                         </button>
                     </div>
-                </div>
+                </>} />
 
                 {/* Sub-tabs */}
                 <div className="flex gap-1 bg-white/60 dark:bg-slate-900/40 backdrop-blur-md border border-slate-200/80 dark:border-slate-700/50 rounded-xl p-1.5 shrink-0 w-fit">

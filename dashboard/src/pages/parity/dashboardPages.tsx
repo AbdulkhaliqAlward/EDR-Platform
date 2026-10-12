@@ -6,7 +6,7 @@ import { parityApi } from '../../api/parity/parityApi';
 import * as mocks from '../../api/parity/mocks';
 import { GenericParityView } from '../../components/parity/GenericParityView';
 import StatCard from '../../components/StatCard';
-import InsightHero from '../../components/InsightHero';
+import PageHeader from '../../components/PageHeader';
 import {
     Activity,
     AlertTriangle,
@@ -429,9 +429,7 @@ export function DashboardEndpointPage() {
 
     return (
         <div className="space-y-6 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                
-                accent="emerald"
+            <PageHeader
                 icon={BarChart3}
                 eyebrow="Dashboards"
                 title="Endpoint Summary"
@@ -803,9 +801,7 @@ export function DashboardEndpointCompliancePage() {
 
     return (
         <div className="space-y-6 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                
-                accent="indigo"
+            <PageHeader
                 icon={ListChecks}
                 eyebrow="Dashboards"
                 title="Endpoint Compliance"
@@ -1181,9 +1177,7 @@ export function _LegacyDashboardReportsPage() {
 
     return (
         <div className="space-y-6 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                variant="light"
-                accent="violet"
+            <PageHeader
                 icon={ClipboardList}
                 eyebrow="Dashboards"
                 title="Reports"

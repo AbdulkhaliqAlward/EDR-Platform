@@ -1,3 +1,4 @@
+import PageHeader from '../../components/PageHeader';
 import { useState, useEffect, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertContextPanel } from '../../components/automation/AlertContextPanel';
@@ -402,34 +403,23 @@ export function AutomationRulesPage() {
   return (
     <div className="space-y-6 relative">
       {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-blue-100 dark:bg-blue-900/30 rounded-lg">
-            <Activity className="w-6 h-6 text-blue-600 dark:text-blue-400" />
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Orchestration</div>
-            <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
-              Automation Rules
-            </h1>
-          </div>
-        </div>
-        <div className="flex items-center gap-4">
-            {alertContext && (
-            <div className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 px-3 py-1.5 rounded-full border border-blue-200 dark:border-blue-800/50 font-medium">
-                <AlertTriangle className="w-4 h-4" />
-                <span>Active Alert Context</span>
-            </div>
-            )}
-            <button
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2 font-medium transition-colors"
-                onClick={openCreateModal}
-            >
-                <Plus className="w-4 h-4" />
-                Create Rule
-            </button>
-        </div>
-      </div>
+          <PageHeader eyebrow="Orchestration" title="Automation Rules" icon={Activity} actions={<>
+              <div className="flex items-center gap-4">
+                  {alertContext&&(
+                      <div className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 px-3 py-1.5 rounded-full border border-blue-200 dark:border-blue-800/50 font-medium">
+                          <AlertTriangle className="w-4 h-4" />
+                          <span>Active Alert Context</span>
+                      </div>
+                  )}
+                  <button
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-2 font-medium transition-colors"
+                      onClick={openCreateModal}
+                  >
+                      <Plus className="w-4 h-4" />
+                      Create Rule
+                  </button>
+              </div>
+          </>} />
 
       {/* Alert Context Panel */}
       {alertContext && (

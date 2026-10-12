@@ -1,3 +1,4 @@
+import PageHeader from '../../components/PageHeader';
 import { usePageSearch } from '../../hooks/usePageSearch';
 import { usePaginatedQuery } from '../../hooks/usePaginatedQuery';
 import { PaginationControls } from '../../components/PaginationControls';
@@ -295,9 +296,7 @@ export function SecurityEndpointZeroTrustPage() {
 
     return (
         <div className="space-y-6 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                
-                accent="indigo"
+            <PageHeader
                 icon={ShieldCheck}
                 eyebrow="Security"
                 title="Endpoint Zero Trust"
@@ -619,9 +618,7 @@ export function SecuritySiemPage() {
 
     return (
         <div className="space-y-6 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                
-                accent="cyan"
+            <PageHeader
                 icon={ServerCrash}
                 eyebrow="Security"
                 title="SIEM Forwarding"
@@ -1018,9 +1015,7 @@ export function ManagedSecurityOverviewPage() {
 
     return (
         <div className="space-y-6 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                
-                accent="violet"
+            <PageHeader
                 icon={Shield}
                 eyebrow="Managed Detection &amp; Response"
                 title="Operations Overview"
@@ -1330,9 +1325,7 @@ export function ManagedSecurityIncidentsPage() {
 
     return (
         <div className="space-y-6 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                
-                accent="fuchsia"
+            <PageHeader
                 icon={ListFilter}
                 eyebrow="Managed Detection &amp; Response"
                 title="Incident Queue"
@@ -2521,9 +2514,7 @@ export function ManagementNetworkPage() {
 
     return (
         <div className="space-y-4 animate-slide-up-fade w-full min-w-0">
-            <InsightHero
-                variant="light"
-                accent="cyan"
+            <PageHeader
                 icon={Wifi}
                 eyebrow="Management"
                 title="Fleet Connectivity"
@@ -2746,9 +2737,8 @@ export function ManagementAccountPage() {
 
     return (
         <div className="space-y-6 w-full min-w-0 animate-slide-up-fade">
-            <InsightHero
+            <PageHeader
                 icon={ShieldAlert}
-                accent="cyan"
                 eyebrow="System"
                 title="Account Settings"
             />
@@ -2828,7 +2818,7 @@ export function ManagementRmmPage() {
     const cmds = cmdQ.data?.data ?? [];
     return (
         <div className="space-y-6 w-full min-w-0 animate-slide-up-fade">
-            <InsightHero icon={Terminal} accent="cyan" eyebrow="Management" title="Remote Management"
+            <PageHeader icon={Terminal} eyebrow="Management" title="Remote Management"
             />
             <div className="bg-white/95 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
                 <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">

@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { agentsApi, reliabilityApi, type ReliabilityHealthResponse } from '../api/client';
 import { formatDateTime } from '../utils/agentDisplay';
-import InsightHero from '../components/InsightHero';
+import PageHeader from '../components/PageHeader';
 
 function reliabilityHeadline(data: ReliabilityHealthResponse | null): {
     text: string;
@@ -83,16 +83,13 @@ export default function EssentialPlatform() {
                 {/* Live snapshot — API-backed */}
                 <section
                     aria-labelledby="live-snapshot-heading"
-                    className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/90 dark:bg-slate-900/60 backdrop-blur p-5 sm:p-6 md:p-8 shadow-sm"
+                    className="space-y-5"
                 >
-                    <InsightHero
+                    <PageHeader
                         titleId="live-snapshot-heading"
-                        variant="light"
-                        accent="cyan"
                         icon={Activity}
                         eyebrow="Essential Platform"
                         title="Live deployment snapshot"
-                        className="!rounded-xl border-0 shadow-none bg-transparent px-0 py-0 sm:py-1"
                         actions={
                             <button
                                 type="button"
@@ -100,7 +97,7 @@ export default function EssentialPlatform() {
                                 className="inline-flex items-center gap-2 self-start px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                                 title="Refresh snapshot"
                             >
-                                <RefreshCw className={`w-4 h-4 ${fetching ? 'animate-spin' : ''}`} />
+                                <RefreshCw className={`w-4 h-4 ${fetching? 'animate-spin':''}`} />
                                 Refresh
                             </button>
                         }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { Layers, Activity, ShieldAlert, Package, RefreshCw, Wifi, Wrench } from 'lucide-react';
-import InsightHero from '../../components/InsightHero';
+import PageHeader from '../../components/PageHeader';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Application Control — main page
@@ -73,9 +73,8 @@ export default function ApplicationControlPage() {
     return (
         <div className="space-y-6 w-full min-w-0 animate-slide-up-fade">
             {/* Hero */}
-            <InsightHero
+            <PageHeader
                 icon={Layers}
-                accent="violet"
                 eyebrow="Management"
                 title="Application Control"
             />

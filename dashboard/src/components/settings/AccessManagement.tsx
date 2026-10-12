@@ -6,7 +6,7 @@ import { usersApi, authApi, type User } from '../../api/client';
 import { ROLE_COLORS, STATUS_STYLES } from './types';
 import { formatDateTime } from '../../utils/agentDisplay';
 import { useDebounce } from '../../hooks/useDebounce';
-import InsightHero from '../InsightHero';
+import PageHeader from '../PageHeader';
 
 const ROLES = ['admin', 'security', 'analyst', 'operations', 'viewer'] as const;
 const PAGE_SIZE = 50;
@@ -200,13 +200,11 @@ export default function AccessManagement() {
 
     return (
         <div className="space-y-6 w-full min-w-0 animate-fade-in">
-            <InsightHero eyebrow="System"
-                variant="light"
-                accent="cyan"
+            <PageHeader eyebrow="System"
                 icon={Users}
                 title="Directory users"
                 actions={
-                    authApi.canManageUsers() ? (
+                    authApi.canManageUsers()? (
                         <button
                             type="button"
                             onClick={() => setShowAddModal(true)}
@@ -214,7 +212,7 @@ export default function AccessManagement() {
                         >
                             <UserPlus size={15} /> Add user
                         </button>
-                    ) : null
+                    ):null
                 }
             />
 

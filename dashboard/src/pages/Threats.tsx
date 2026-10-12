@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { useQuery } from '@tanstack/react-query';
 import React, { useState, useMemo } from 'react';
 import { Shield, Target, TrendingUp, Eye, ChevronRight, ExternalLink, GitBranch, ArrowRight } from 'lucide-react';
@@ -361,37 +362,30 @@ export default function Threats() {
             <div className="absolute bottom-0 left-0 w-[600px] h-[600px] pointer-events-none mix-blend-screen" style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.05) 0%, transparent 70%)' }} />
 
             <div className="relative  w-full space-y-6">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
-                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
-                        <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-300">
-                            ATT&CK Analytics
-                        </h1>
-                    </div>
-                    
+                <PageHeader eyebrow="SOC" title="ATT&amp;CK Analytics" icon={Shield} actions={<>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={() => setViewMode('matrix')}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${ viewMode === 'matrix' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700' }`}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${viewMode==='matrix'? 'bg-indigo-600 text-white shadow-sm':'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
                         >
                             MITRE Matrix
                         </button>
                         <button
                             onClick={() => setViewMode('swimlane')}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${ viewMode === 'swimlane' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700' }`}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${viewMode==='swimlane'? 'bg-indigo-600 text-white shadow-sm':'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
                         >
                             Kill Chain
                         </button>
                         <button
                             className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm shadow-indigo-500/20 ml-2"
-                            onClick={() => window.open('https://attack.mitre.org/', '_blank')}
+                            onClick={() => window.open('https://attack.mitre.org/','_blank')}
                         >
                             <Shield className="w-4 h-4" />
                             Explore Framework
                             <ExternalLink className="w-3.5 h-3.5 ml-1 opacity-70" />
                         </button>
                     </div>
-                </div>
+                </>} />
 
                 {/* Summary Cards */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

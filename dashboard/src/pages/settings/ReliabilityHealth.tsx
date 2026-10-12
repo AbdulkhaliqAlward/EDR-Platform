@@ -4,7 +4,7 @@ import { Activity, AlertTriangle, Database, HardDrive, RefreshCw, Route, Server 
 
 import { reliabilityApi } from '../../api/client';
 import axios from 'axios';
-import InsightHero from '../../components/InsightHero';
+import PageHeader from '../../components/PageHeader';
 
 function MetricCard({
     title,
@@ -105,9 +105,7 @@ export default function ReliabilityHealth() {
 
     return (
         <div className="space-y-6 md:space-y-8 w-full min-w-0 animate-slide-up-fade">
-            <InsightHero
-                
-                accent="teal"
+            <PageHeader
                 icon={Server}
                 eyebrow="System"
                 title="Reliability health"

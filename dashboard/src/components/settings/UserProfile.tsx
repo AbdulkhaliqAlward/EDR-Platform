@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { User as UserIcon, Lock, Save, Check, AlertCircle, Eye, EyeOff, Fingerprint } from 'lucide-react';
 import { authApi, usersApi, type User } from '../../api/client';
-import InsightHero from '../InsightHero';
+import PageHeader from '../PageHeader';
 import { formatDateTime } from '../../utils/agentDisplay';
 
 export default function UserProfile() {
@@ -123,9 +123,7 @@ export default function UserProfile() {
 
     return (
         <div className="space-y-6 w-full min-w-0 animate-slide-up-fade">
-            <InsightHero
-                
-                accent="indigo"
+            <PageHeader
                 icon={Fingerprint}
                 eyebrow="System"
                 title="Your profile"

@@ -1,3 +1,5 @@
+import { BarChart3 } from 'lucide-react';
+import PageHeader from '../components/PageHeader';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useState, useMemo } from 'react';
@@ -227,13 +229,7 @@ export default function Stats() {
 
     return (
         <div>
-            <div className="flex justify-between items-center mb-8">
-                <div className="flex flex-col">
-                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
-                    <h1 className="text-xl font-bold text-slate-900 dark:text-white">Statistics</h1>
-                </div>
-
-                {/* Export Controls */}
+            <div className="mb-6"><PageHeader eyebrow="SOC" title="Statistics" icon={BarChart3} actions={<>
                 <div className="flex items-center gap-4">
                     <div className="relative">
                         <select
@@ -252,17 +248,17 @@ export default function Stats() {
                         </div>
                     </div>
 
-                    {dateRange === 'custom' && (
+                    {dateRange==='custom'&&(
                         <div className="flex items-center gap-2">
-                            <input 
-                                type="date" 
+                            <input
+                                type="date"
                                 value={customFrom}
                                 onChange={(e) => setCustomFrom(e.target.value)}
                                 className="bg-slate-900/60 border border-slate-700 text-slate-200 rounded-lg px-3 py-2 hover:bg-slate-800 focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 focus:outline-none transition-all text-sm w-36"
                             />
                             <span className="text-slate-500">to</span>
-                            <input 
-                                type="date" 
+                            <input
+                                type="date"
                                 value={customTo}
                                 onChange={(e) => setCustomTo(e.target.value)}
                                 className="bg-slate-900/60 border border-slate-700 text-slate-200 rounded-lg px-3 py-2 hover:bg-slate-800 focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 focus:outline-none transition-all text-sm w-36"
@@ -270,7 +266,7 @@ export default function Stats() {
                         </div>
                     )}
 
-                    {canExport && (
+                    {canExport&&(
                         <>
                             <div className="relative">
                                 <select
@@ -294,7 +290,7 @@ export default function Stats() {
                         </>
                     )}
                 </div>
-            </div>
+            </>} /></div>
 
             {/* Summary Cards */}
             <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">

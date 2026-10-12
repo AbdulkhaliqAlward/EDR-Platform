@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Save, Trash2, ShieldAlert, Key, Globe, LayoutList, Server, Shield } from 'lucide-react';
 import { agentsApi, alertsApi, contextPoliciesApi, type ContextPolicy } from '../../api/client';
 import { useToast } from '../../components/Toast';
-import InsightHero from '../../components/InsightHero';
+import PageHeader from '../../components/PageHeader';
 
 type EditablePolicy = Omit<ContextPolicy, 'id' | 'created_at' | 'updated_at'> & { id?: number };
 
@@ -141,9 +141,8 @@ export default function ContextPolicies() {
 
     return (
         <div className="space-y-6 w-full min-w-0 animate-slide-up-fade">
-            <InsightHero
+            <PageHeader
                 icon={ShieldAlert}
-                accent="cyan"
                 eyebrow="Management"
                 title="Context Policies"
             />

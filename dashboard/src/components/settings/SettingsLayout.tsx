@@ -1,5 +1,5 @@
 import { Settings2 } from 'lucide-react';
-import InsightHero from '../InsightHero';
+import PageHeader from '../PageHeader';
 
 export default function SettingsLayout({
     children,
@@ -11,14 +11,11 @@ export default function SettingsLayout({
 }) {
     return (
         <div className="flex-1 flex flex-col min-h-0 bg-slate-50 dark:bg-slate-950">
-            <div className="px-6 md:px-10 py-6 md:py-8 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shrink-0">
-                <InsightHero
-                    variant="light"
-                    accent="sky"
+            <div className="px-6 md:px-10 pt-6 md:pt-8 shrink-0">
+                <PageHeader
                     icon={Settings2}
                     eyebrow="Settings"
                     title="Platform preferences"
-                    className="!rounded-xl border-0 shadow-none bg-transparent px-0 py-0"
                 />
             </div>
 

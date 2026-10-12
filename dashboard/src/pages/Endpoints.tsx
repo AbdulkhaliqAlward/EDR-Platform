@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { authApi } from '../api/client';
 import React, { useState, useEffect, useMemo } from 'react';
@@ -716,37 +717,33 @@ export default function Endpoints() {
             <div className="absolute top-1/4 right-1/4 w-[600px] h-[600px] pointer-events-none -translate-y-1/2 translate-x-1/3" style={{ background: 'radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 70%)' }} />
             
             <div className="relative flex-1 flex flex-col min-h-0  w-full space-y-4 lg:space-y-5">
-                <div className="flex flex-wrap items-center justify-between gap-3 shrink-0">
-                    <div>
-                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Management</div>
-                        <h1 className="text-2xl sm:text-[1.75rem] font-bold text-slate-900 dark:text-white tracking-tight">Devices (Fleet)</h1>
-                    </div>
-                {agents.length > 0 && (() => {
-                    let onlineCount = 0, offlineCount = 0, degradedCount = 0;
-                    agents.forEach((a) => {
-                        const eff = getEffectiveStatus(a);
-                        if (eff === 'online') onlineCount++;
-                        else if (eff === 'degraded') degradedCount++;
-                        else offlineCount++;
-                    });
-                    return (
+                <PageHeader eyebrow="Management" title="Devices (Fleet)" icon={Monitor} actions={<>
+                    {agents.length>0&&(() => {
+                        let onlineCount=0,offlineCount=0,degradedCount=0;
+                        agents.forEach((a) => {
+                            const eff=getEffectiveStatus(a);
+                            if(eff==='online') onlineCount++;
+                            else if(eff==='degraded') degradedCount++;
+                            else offlineCount++;
+                        });
+                        return (
                             <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                                 <span className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-400 border border-green-500/20 rounded-full text-xs font-bold uppercase tracking-wider">
                                     <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                                {onlineCount} Online
-                            </span>
-                            <span className="flex items-center gap-2 px-3 py-1.5 bg-slate-500/10 dark:bg-slate-500/20 text-slate-600 dark:text-slate-400 border border-slate-500/20 rounded-full text-xs font-bold uppercase tracking-wider">
-                                <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-                                {offlineCount} Offline
-                            </span>
+                                    {onlineCount} Online
+                                </span>
+                                <span className="flex items-center gap-2 px-3 py-1.5 bg-slate-500/10 dark:bg-slate-500/20 text-slate-600 dark:text-slate-400 border border-slate-500/20 rounded-full text-xs font-bold uppercase tracking-wider">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                                    {offlineCount} Offline
+                                </span>
                                 <span className="flex items-center gap-2 px-3 py-1.5 bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400 border border-amber-500/20 rounded-full text-xs font-bold uppercase tracking-wider">
                                     <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                                {degradedCount} Degraded
-                            </span>
-                        </div>
-                    );
-                })()}
-            </div>
+                                    {degradedCount} Degraded
+                                </span>
+                            </div>
+                        );
+                    })()}
+                </>} />
 
                 <div
                     data-section-id="dm-structure"

@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
 import { usePageSearch } from '../hooks/usePageSearch';
 import { PaginationControls } from '../components/PaginationControls';
@@ -160,14 +161,8 @@ export default function Rules() {
             <div className="relative flex-1 flex flex-col min-h-0 space-y-5  w-full">
 
                 {/* ── Header ── */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
-                    <div>
-                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">SOC</div>
-                        <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-300 tracking-tight">
-                            Detection Rules
-                        </h1>
-                    </div>
-                    {canWrite && (
+                <PageHeader eyebrow="SOC" title="Detection Rules" icon={Shield} actions={<>
+                    {canWrite&&(
                         <button
                             onClick={() => { setEditingRule(null); setShowModal(true); }}
                             className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl transition-colors shadow-md shadow-indigo-500/20"
@@ -176,7 +171,7 @@ export default function Rules() {
                             Create Rule
                         </button>
                     )}
-                </div>
+                </>} />
 
                 {/* ── KPI Cards ── */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 shrink-0">

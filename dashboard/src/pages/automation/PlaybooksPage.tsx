@@ -1,3 +1,4 @@
+import PageHeader from '../../components/PageHeader';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import { AlertContextPanel } from '../../components/automation/AlertContextPanel';
@@ -429,31 +430,20 @@ export function PlaybooksPage() {
   return (
     <div className="space-y-6 relative">
       {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-indigo-100 dark:bg-indigo-900/30 rounded-lg">
-            <Terminal className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Orchestration</div>
-            <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
-              Incident Response Playbooks
-            </h1>
-          </div>
-        </div>
-        <div className="flex items-center gap-4">
-          {alertContext && (
-            <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 px-3 py-1.5 rounded-full border border-emerald-200 dark:border-emerald-800/50 font-medium">
-              <AlertTriangle className="w-4 h-4" />
-              <span>Active Alert Context</span>
-            </div>
-          )}
-          <button onClick={openCreatePlaybook} className="btn btn-primary flex items-center gap-2">
-            <Plus className="w-4 h-4" />
-            Create Playbook
-          </button>
-        </div>
-      </div>
+          <PageHeader eyebrow="Orchestration" title="Incident Response Playbooks" icon={Terminal} actions={<>
+              <div className="flex items-center gap-4">
+                  {alertContext&&(
+                      <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 px-3 py-1.5 rounded-full border border-emerald-200 dark:border-emerald-800/50 font-medium">
+                          <AlertTriangle className="w-4 h-4" />
+                          <span>Active Alert Context</span>
+                      </div>
+                  )}
+                  <button onClick={openCreatePlaybook} className="btn btn-primary flex items-center gap-2">
+                      <Plus className="w-4 h-4" />
+                      Create Playbook
+                  </button>
+              </div>
+          </>} />
 
       {/* Alert Context Panel */}
       {alertContext && (

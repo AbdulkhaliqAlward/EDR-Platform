@@ -1,3 +1,4 @@
+import PageHeader from '../../components/PageHeader';
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileCode, Plus, Pencil, Trash2, X, Shield, Clock, AlertTriangle, Search } from 'lucide-react';
@@ -112,23 +113,14 @@ export function ScriptLibraryPage() {
   return (
     <div className="space-y-6 relative">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-teal-100 dark:bg-teal-900/30 rounded-lg">
-            <FileCode className="w-6 h-6 text-teal-600 dark:text-teal-400" />
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Orchestration</div>
-            <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Response Script Library</h1>
-          </div>
-        </div>
-        {canManage && (
-          <button onClick={openCreate} className="btn btn-primary flex items-center gap-2">
-            <Plus className="w-4 h-4" />
-            New Script
-          </button>
-        )}
-      </div>
+          <PageHeader eyebrow="Orchestration" title="Response Script Library" icon={FileCode} actions={<>
+              {canManage&&(
+                  <button onClick={openCreate} className="btn btn-primary flex items-center gap-2">
+                      <Plus className="w-4 h-4" />
+                      New Script
+                  </button>
+              )}
+          </>} />
 
       {/* How it works */}
       <div className="rounded-xl border border-teal-200 dark:border-teal-800/50 bg-teal-50 dark:bg-teal-900/10 p-4 text-sm text-teal-900 dark:text-teal-200 flex gap-3">

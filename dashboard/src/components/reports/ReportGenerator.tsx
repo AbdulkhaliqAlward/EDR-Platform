@@ -1,3 +1,4 @@
+import PageHeader from '../PageHeader';
 import { collectPages } from '../../api/collectPages';
 /**
  * Report Generator Component
@@ -339,18 +340,9 @@ export function ReportGenerator() {
     return (
         <div className="space-y-6">
             {/* Report Builder Panel */}
+            <PageHeader eyebrow="Dashboards" title="Reports" icon={BarChart3} />
             <div className="rounded-2xl border border-slate-200/90 dark:border-slate-700/80 bg-white/95 dark:bg-slate-800/90 backdrop-blur-sm shadow-md overflow-hidden">
-                <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-violet-50/80 via-white to-slate-50/80 dark:from-violet-950/30 dark:via-slate-900/80 dark:to-slate-900/60">
-                    <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-violet-500/12 text-violet-600 dark:text-violet-400 border border-violet-500/15 flex items-center justify-center">
-                            <BarChart3 className="w-5 h-5" />
-                        </div>
-                        <div>
-                            <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Dashboards</div>
-                            <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Reports</h1>
-                        </div>
-                    </div>
-                </div>
+                
 
                 <div className="p-6 space-y-6">
                     {/* Template Selection */}

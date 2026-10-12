@@ -95,6 +95,10 @@ try {
         await page.getByText(`${label} 0`,{exact:true}).first().waitFor();
         await change('');await page.getByText(`${label} 0`,{exact:true}).first().waitFor();
         assert.equal(await nav.evaluate(e=>e.scrollWidth<=e.clientWidth+1),true,`${screen} ${width} dark=${dark}`);
+        const header = page.locator('[data-page-header]');
+        assert.equal(await header.count(), 1, screen);
+        assert.ok(await header.evaluate(e => e.scrollWidth <= e.clientWidth + 1), `header ${screen} ${width} dark=${dark}`);
+        assert.ok(await header.getByRole('heading', { level: 1 }).isVisible());
         await page.close();
     }
     assert.deepEqual(errors,[]);

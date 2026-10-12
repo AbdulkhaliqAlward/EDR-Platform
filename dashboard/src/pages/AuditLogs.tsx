@@ -1,3 +1,5 @@
+import { ScrollText } from 'lucide-react';
+import PageHeader from '../components/PageHeader';
 import { useQuery } from '@tanstack/react-query';
 import { useState, useEffect, useRef } from 'react';
 import {
@@ -396,15 +398,8 @@ export default function AuditLogs() {
             className="flex flex-col min-h-0 w-full  gap-0"
         >
             {/* Title — compact, above Standard toolbar */}
-            <div className="mb-3 shrink-0">
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">System</div>
-                <h1 className="text-lg font-bold text-slate-900 dark:text-white">Audit Logs</h1>
-                {exportError && <p role="alert" className="mt-2 text-xs text-rose-600 dark:text-rose-400">{exportError}</p>}
-            </div>
-
-            {/* dm-toolbar–like strip */}
-            <div
-                className="flex flex-wrap items-center gap-1 px-2 py-1.5 rounded-t-lg border border-b-0 shrink-0"
+            <div className="mb-6"><PageHeader eyebrow="System" title="Audit Logs" icon={ScrollText} actions={<div
+                className="flex flex-wrap items-center gap-1 px-2 py-1.5 rounded-lg border shrink-0"
                 style={{
                     background: 'var(--xc-nav-bg, #0a043d)',
                     borderColor: 'var(--xc-nav-border, rgba(255,255,255,0.08))',
@@ -415,14 +410,14 @@ export default function AuditLogs() {
                     <button
                         type="button"
                         onClick={() => setExportMenuOpen((o) => !o)}
-                        disabled={filteredLogs.length === 0 || exporting}
+                        disabled={filteredLogs.length===0||exporting}
                         className="inline-flex items-center gap-2 px-2 py-1.5 rounded text-[13px] text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))] disabled:opacity-40 border border-transparent"
                     >
-                        {exporting ? <Loader2 className="w-4 h-4 shrink-0 animate-spin" /> : <Download className="w-4 h-4 shrink-0" />}
-                        <span>{exporting ? 'Exporting…' : 'Export'}</span>
-                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${exportMenuOpen ? 'rotate-180' : ''}`} />
+                        {exporting? <Loader2 className="w-4 h-4 shrink-0 animate-spin" />:<Download className="w-4 h-4 shrink-0" />}
+                        <span>{exporting? 'Exporting…':'Export'}</span>
+                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${exportMenuOpen? 'rotate-180':''}`} />
                     </button>
-                    {exportMenuOpen && (
+                    {exportMenuOpen&&(
                         <div
                             className="absolute left-0 top-full mt-1 min-w-[200px] rounded-md border py-1 shadow-xl z-50"
                             style={{
@@ -453,22 +448,26 @@ export default function AuditLogs() {
                         title="Refresh"
                         className="inline-flex items-center justify-center p-2 rounded text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))] disabled:opacity-50"
                     >
-                        <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`w-4 h-4 ${isFetching? 'animate-spin':''}`} />
                     </button>
                     <button
                         type="button"
                         onClick={() => setFilterPanelOpen((v) => !v)}
                         title="Table filter"
-                        className={`inline-flex items-center justify-center p-2 rounded ${
-                            filterPanelOpen
+                        className={`inline-flex items-center justify-center p-2 rounded ${filterPanelOpen
                                 ? 'text-[var(--xc-nav-active,#f19637)] bg-[var(--xc-nav-hover,rgb(8,3,49))]'
-                                : 'text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))]'
-                        }`}
+                                :'text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))]'
+                            }`}
                     >
                         <Filter className="w-4 h-4" />
                     </button>
                 </div>
-            </div>
+            </div>} >
+                {exportError&&<p role="alert" className="mt-2 text-xs text-rose-600 dark:text-rose-400">{exportError}</p>}
+            </PageHeader></div>
+
+            {/* dm-toolbar–like strip */}
+            
 
             {/* Filter panel — Platform “cover” style */}
             {filterPanelOpen && (

@@ -1,78 +1,32 @@
-import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import { ChevronRight, Clock } from 'lucide-react';
+import { LayoutDashboard, type LucideIcon } from 'lucide-react';
+import type { ReactNode } from 'react';
 
-interface Breadcrumb {
-    label: string;
-    path?: string;
-}
+type PageHeaderProps = {
+    eyebrow: ReactNode;
+    title: ReactNode;
+    icon?: LucideIcon;
+    actions?: ReactNode;
+    titleId?: string;
+    children?: ReactNode;
+};
 
-interface PageHeaderProps {
-    title: string;
-    subtitle?: string;
-    breadcrumbs?: Breadcrumb[];
-    actions?: React.ReactNode;
-    showTimestamp?: boolean;
-}
-
-export default function PageHeader({ title, subtitle, breadcrumbs, actions, showTimestamp = true }: PageHeaderProps) {
-    const [now, setNow] = useState(new Date());
-
-    useEffect(() => {
-        if (!showTimestamp) return;
-        const id = setInterval(() => setNow(new Date()), 1000);
-        return () => clearInterval(id);
-    }, [showTimestamp]);
-
+/** Shared page identity and actions; tables and form controls stay in page content. */
+export default function PageHeader({ eyebrow, title, icon: Icon = LayoutDashboard, actions, titleId, children }: PageHeaderProps) {
     return (
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6 animate-slide-up-fade">
-            <div className="flex-1 min-w-0">
-                {/* Breadcrumbs */}
-                {breadcrumbs && breadcrumbs.length > 0 && (
-                    <nav className="flex items-center gap-1 mb-2" aria-label="Breadcrumb">
-                        {breadcrumbs.map((crumb, i) => (
-                            <React.Fragment key={i}>
-                                {i > 0 && <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />}
-                                {crumb.path ? (
-                                    <Link
-                                        to={crumb.path}
-                                        className="text-xs text-slate-400 hover:text-cyan-500 transition-colors font-medium"
-                                    >
-                                        {crumb.label}
-                                    </Link>
-                                ) : (
-                                    <span className="text-xs text-slate-500 font-medium">{crumb.label}</span>
-                                )}
-                            </React.Fragment>
-                        ))}
-                    </nav>
-                )}
-
-                {/* Title */}
-                <h1 className="text-2xl font-bold text-slate-900 dark:text-white tracking-tight truncate">
-                    {title}
-                </h1>
-
-                {/* Subtitle + timestamp row */}
-                <div className="flex items-center gap-4 mt-1 flex-wrap">
-                    {subtitle && (
-                        <p className="text-sm text-slate-400">{subtitle}</p>
-                    )}
-                    {showTimestamp && (
-                        <span className="flex items-center gap-1.5 text-[11px] text-slate-500 font-mono">
-                            <Clock className="w-3 h-3" />
-                            {now.toLocaleTimeString('en-US', { hour12: false })} UTC{now.toTimeString().slice(9, 15)}
-                        </span>
-                    )}
+        <header data-page-header className="w-full min-w-0 shrink-0 rounded-2xl border border-slate-200/90 dark:border-slate-700/80 bg-gradient-to-br from-slate-50 via-white to-cyan-50/50 dark:from-slate-900/85 dark:via-slate-900/60 dark:to-cyan-950/25 px-6 py-8 sm:px-10 sm:py-10 shadow-sm">
+            <div className="flex min-w-0 flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
+                <div className="flex min-w-0 flex-1 items-stretch gap-5">
+                    <div className="flex w-14 shrink-0 items-center justify-center self-stretch rounded-xl border border-cyan-500/30 bg-cyan-500/10 py-3 text-cyan-700 dark:text-cyan-300">
+                        <Icon className="h-7 w-7" aria-hidden="true" />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-3">
+                        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 [overflow-wrap:anywhere]">{eyebrow}</div>
+                        <h1 id={titleId} className="text-2xl sm:text-[1.75rem] font-bold tracking-tight text-slate-900 dark:text-white [overflow-wrap:anywhere]">{title}</h1>
+                    </div>
                 </div>
+                {actions && <div data-page-header-actions className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-3 xl:w-auto xl:max-w-[60%] xl:justify-end [&>*]:min-w-0 [&>*]:max-w-full [&>*]:flex-wrap [&_input]:max-w-full [&_select]:max-w-full">{actions}</div>}
             </div>
-
-            {/* Action slot */}
-            {actions && (
-                <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                    {actions}
-                </div>
-            )}
-        </div>
+            {children && <div className="mt-4 min-w-0">{children}</div>}
+        </header>
     );
 }

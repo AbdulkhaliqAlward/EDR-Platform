@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router-dom';
@@ -510,17 +511,8 @@ export default function AgentDeployment() {
     return (
         <div className="space-y-6">
             {/* Page Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                <div>
-                    <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Management</div>
-                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
-                        <div className="p-2.5 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-xl shadow-lg shadow-cyan-500/20">
-                            <Download className="w-6 h-6 text-white" />
-                        </div>
-                        Agent Deployment
-                    </h1>
-                </div>
-                {authApi.canBuildAgent() && (
+            <PageHeader eyebrow="Management" title="Agent Deployment" icon={Download} actions={<>
+                {authApi.canBuildAgent()&&(
                     <button
                         id="build-agent-btn"
                         onClick={() => setIsModalOpen(true)}
@@ -530,7 +522,7 @@ export default function AgentDeployment() {
                         Build Agent
                     </button>
                 )}
-            </div>
+            </>} />
 
             {/* Status Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

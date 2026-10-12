@@ -1,3 +1,4 @@
+import PageHeader from '../components/PageHeader';
 import { usePaginatedQuery } from '../hooks/usePaginatedQuery';
 import { usePageFilters } from '../hooks/usePageFilters';
 import { PaginationControls } from '../components/PaginationControls';
@@ -170,18 +171,9 @@ export default function SecurityEvents() {
     return (
         <div className="flex flex-col min-h-0 w-full gap-0">
             {/* ── Page header ── */}
-            <div className="mb-3 shrink-0">
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">Security</div>
-                <h1 className="text-lg font-bold text-slate-900 dark:text-white">Security Events</h1>
-            </div>
-
-            {/* ── Summary widgets ── */}
-            {summaryItems.length > 0 && <SummaryWidgets items={summaryItems} />}
-
-            {/* ── Toolbar ── */}
-            <div
-                className="flex flex-wrap items-center gap-1 px-2 py-1.5 rounded-t-lg border border-b-0 shrink-0"
-                style={{ background: 'var(--xc-nav-bg, #0a043d)', borderColor: 'var(--xc-nav-border, rgba(255,255,255,0.08))' }}
+            <div className="mb-6"><PageHeader eyebrow="Security" title="Security Events" icon={ShieldAlert} actions={<div
+                className="flex flex-wrap items-center gap-1 px-2 py-1.5 rounded-lg border shrink-0"
+                style={{ background: 'var(--xc-nav-bg, #0a043d)',borderColor: 'var(--xc-nav-border, rgba(255,255,255,0.08))' }}
             >
                 <span className="flex items-center gap-1.5 px-2 py-1.5 text-[13px] text-[var(--xc-nav-text,#c0ced6)]">
                     <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
@@ -196,22 +188,27 @@ export default function SecurityEvents() {
                         title="Refresh"
                         className="inline-flex items-center justify-center p-2 rounded text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))] disabled:opacity-50"
                     >
-                        <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`w-4 h-4 ${isFetching? 'animate-spin':''}`} />
                     </button>
                     <button
                         type="button"
                         onClick={() => setFilterPanelOpen(v => !v)}
                         title="Filters"
-                        className={`inline-flex items-center justify-center p-2 rounded ${
-                            filterPanelOpen
+                        className={`inline-flex items-center justify-center p-2 rounded ${filterPanelOpen
                                 ? 'text-[var(--xc-nav-active,#f19637)] bg-[var(--xc-nav-hover,rgb(8,3,49))]'
-                                : 'text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))]'
-                        }`}
+                                :'text-[var(--xc-nav-text,#c0ced6)] hover:bg-[var(--xc-nav-hover,rgb(8,3,49))]'
+                            }`}
                     >
                         <Filter className="w-4 h-4" />
                     </button>
                 </div>
-            </div>
+            </div>} /></div>
+
+            {/* ── Summary widgets ── */}
+            {summaryItems.length > 0 && <SummaryWidgets items={summaryItems} />}
+
+            {/* ── Toolbar ── */}
+            
 
             {/* ── Filter panel ── */}
             {filterPanelOpen && (
